@@ -1,4 +1,4 @@
-# Rust
+# Rust / Cargo
 /target/
 **/*.rs.bk
 *.pdb
@@ -14,7 +14,37 @@ Cargo.lock
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Build artifacts
 dist/
 build/
+
+# Debug artifacts
+*.d
+*.debug
+
+# Release artifacts (keep the exe, but clean intermediate files)
+!target/release/containment.exe
+target/release/containment.pdb
+target/release/*.d
+target/release/build/
+
+# Containment runtime
+containment-runtime/target/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+*.profraw
+*.profdata
+
+# Temporary files
+*.tmp
+*.temp
