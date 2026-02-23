@@ -1,0 +1,25 @@
+# OpenClaw container configuration for a Node.js AI agent
+
+[container]
+name = "nodejs-agent"
+image = "node:20-alpine"
+
+[container.resources]
+memory = "1G"
+cpu = "1"
+
+[container.runtime]
+workdir = "/app"
+env = [
+    "NODE_ENV=production",
+    "NODE_OPTIONS=--max-old-space-size=1024"
+]
+
+[container.network]
+mode = "bridge"
+port_mappings = [
+    { host_port = 3000, container_port = 3000 }
+]
+
+[process]
+command = ["node", "index.js"]

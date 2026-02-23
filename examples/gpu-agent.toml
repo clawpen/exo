@@ -1,0 +1,27 @@
+# OpenClaw container configuration for GPU-enabled AI agent
+
+[container]
+name = "gpu-agent"
+image = "nvidia/cuda:12.1.0-runtime-ubuntu22.04"
+
+[container.resources]
+memory = "8G"
+cpu = "4"
+
+[container.runtime]
+workdir = "/workspace"
+env = [
+    "CUDA_VISIBLE_DEVICES=0",
+    "TORCH_CUDA_ARCH_LIST=",
+]
+
+[container.network]
+mode = "bridge"
+
+[container.gpu]
+enabled = true
+type = "nvidia"
+devices = "all"
+
+[process]
+command = ["python", "train_model.py"]

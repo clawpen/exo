@@ -1,0 +1,22 @@
+[package]
+name = "containment-image"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha256 = "1.5"
+
+# OCI image spec
+oci-spec = "0.7"
+
+# Archive handling
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
+
+# HTTP client for pulling images
+reqwest = { version = "0.12", features = ["stream"] }

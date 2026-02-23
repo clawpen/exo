@@ -1,0 +1,21 @@
+[package]
+name = "containment-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+libc = { workspace = true }
+procfs = "0.17"
+
+[dev-dependencies]
+tokio-test = "0.4"

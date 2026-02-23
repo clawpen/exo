@@ -1,0 +1,1 @@
+F:\Software\OpenClaw\Container\target\release\libcontainment_gpu.rlib: F:\Software\OpenClaw\Container\crates\containment-gpu\src\amd.rs F:\Software\OpenClaw\Container\crates\containment-gpu\src\detector.rs F:\Software\OpenClaw\Container\crates\containment-gpu\src\lib.rs F:\Software\OpenClaw\Container\crates\containment-gpu\src\nvidia.rs

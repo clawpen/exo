@@ -1,0 +1,17 @@
+[package]
+name = "containment-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+nvml-wrapper = { workspace = true }
+serde = { workspace = true }
+
+# For device detection
+pci-ids = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true }
