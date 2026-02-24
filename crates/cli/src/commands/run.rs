@@ -1,7 +1,7 @@
 //! Run command implementation
 
 #[cfg(windows)]
-use containment_wsl::{WslConfig, WslDistroManager, WslCommand, WslMount, WslGpuDetector};
+use containment_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig};
 use containment_runtime::config::ContainerConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -54,6 +54,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 #[cfg(windows)]
 async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
     use containment_wsl::command::{ContainerSpec, MountSpec};
+    use containment_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
     use tracing::{info, debug};
 
     info!("Running container via WSL2 backend");
@@ -61,6 +62,17 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
     // Initialize WSL environment
     let wsl_manager = WslDistroManager::new(WslConfig::default());
     wsl_manager.initialize()?;
+
+    // Set up networking for agents
+    let net_config = AgentNetworkConfig::default();
+    let network_manager = NetworkManager::new(
+        &net_config.bridge_name,
+        &net_config.subnet,
+        &net_config.gateway_ip,
+    )?;
+
+    // Create bridge network for agent communication
+    network_manager.create_bridge()?;
 
     // Convert Windows paths to WSL paths for mounts
     let wsl_mount = WslMount::new(WslConfig::default());
@@ -72,7 +84,6 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
                 // Windows path
                 wsl_mount.windows_to_wsl(&m.source)
             } else {
-                // Already a WSL path
                 m.source.clone()
             };
 
@@ -83,6 +94,37 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
             }
         })
         .collect();
+
+    // Set up port mappings
+    let port_mappings: Vec<PortMapping> = config.network.port_mappings
+        .iter()
+        .map(|p| PortMapping {
+            host_port: p.host_port,
+            container_port: p.container_port,
+            protocol: match p.protocol.as_str() {
+                "udp" => PortProtocol::Udp,
+                _ => PortProtocol::Tcp,
+            },
+            host_ip: p.host_ip.clone(),
+        })
+        .collect();
+
+    // Set up container networking
+    let container_network = network_manager.setup_container_network(
+        &config.name,
+        &NetworkConfig {
+            mode: NetworkMode::Bridge,
+            port_mappings,
+            ..Default::default()
+        },
+    )?;
+
+    // Add hostname to DNS
+    let dns_entry = DnsEntry::new(&config.name, &container_network.ip);
+
+    // Write DNS entry to /etc/hosts
+    let state_dir = format!("/var/lib/containment/containers/{}", config.name);
+    dns_entry.write_to_container(&state_dir)?;
 
     // Check GPU support
     let gpu_enabled = config.gpu.as_ref()
@@ -124,9 +166,11 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
     let container_id = wsl_cmd.start_container(&container_spec)?;
 
     info!("Container started: {}", container_id);
+    info!("Network: {} @ {}", container_network.ip, config.name);
 
     if detach {
         println!("Container running in background: {}", container_id);
+        println!("Agent reachable at {}:{}", container_network.ip, config.name);
         return Ok(());
     }
 
@@ -157,10 +201,10 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
 #[cfg(not(windows))]
 async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
     use containment_runtime::Container;
+    use containment_gpu::{GpuConfig, GpuType};
 
     // Validate GPU config if specified
     if let Some(gpu_cfg) = &config.gpu {
-        use openclaw_gpu::{GpuConfig, GpuType};
         let gpu_type = gpu_cfg.gpu_type.parse::<GpuType>().unwrap_or(GpuType::Auto);
         let gpu_config = GpuConfig {
             gpu_type,
@@ -205,6 +249,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyho
 
 fn parse_memory_mb(size: &str) -> anyhow::Result<u64> {
     let size = size.trim().to_lowercase();
+
     let (num, unit) = if size.ends_with('g') {
         (size.trim_end_matches('g'), "g")
     } else if size.ends_with('m') {
@@ -229,13 +274,13 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
     let name = config.get("container")
         .and_then(|c| c.get("name"))
         .and_then(|n| n.as_str())
-        .unwrap_or("openclaw-container")
+        .unwrap_or("containment-agent")
         .to_string();
 
     let image = config.get("container")
         .and_then(|c| c.get("image"))
         .and_then(|i| i.as_str())
-        .unwrap_or("alpine:latest")
+        .unwrap_or("python:3.12-slim")
         .to_string();
 
     let workdir = config.get("container")
@@ -248,8 +293,8 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
     let command = config.get("process")
         .and_then(|p| p.get("command"))
         .and_then(|c| c.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_else(|| vec!["sh".to_string()]);
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec!["python".to_string()]);
 
     let mut env = HashMap::new();
     if let Some(runtime) = config.get("container").and_then(|c| c.get("runtime")) {
@@ -278,7 +323,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
     use containment_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig};
 
     let name = args.name.unwrap_or_else(|| {
-        format!("openclaw-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
+        format!("containment-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
     });
 
     let command = if args.command.is_empty() {

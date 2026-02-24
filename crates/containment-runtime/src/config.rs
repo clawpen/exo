@@ -91,7 +91,7 @@ fn default_user() -> String {
 }
 
 fn default_hostname() -> String {
-    "openclaw".to_string()
+    "containment".to_string()
 }
 
 fn default_namespaces() -> Namespaces {

@@ -10,6 +10,8 @@ pub mod command;
 pub mod mount;
 #[cfg(windows)]
 pub mod gpu;
+#[cfg(windows)]
+pub mod networking;
 
 #[cfg(windows)]
 pub use distro::{WslDistro, WslDistroManager};
@@ -19,6 +21,8 @@ pub use command::{WslCommand, WslResult};
 pub use mount::WslMount;
 #[cfg(windows)]
 pub use gpu::{WslGpuDetector, GpuInfo, GpuVendor, WslGpuConfig};
+#[cfg(windows)]
+pub use networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, ContainerNetwork, DnsEntry, AgentNetworkConfig};
 
 use anyhow::Result;
 
@@ -99,7 +103,7 @@ pub fn get_wsl_version() -> Result<u32> {
     Ok(1) // Default to WSL1
 }
 
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 pub fn get_wsl_version() -> Result<u32> {
     Ok(0)
 }
