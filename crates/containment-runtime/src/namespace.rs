@@ -5,8 +5,6 @@ use nix::sched::{CloneFlags, setns, unshare};
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
 use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::os::unix::io::AsRawFd;
 use anyhow::Result;
 
 /// Process ID type (platform-specific).
@@ -150,7 +148,7 @@ pub fn unshare_namespaces(_namespaces: &[Namespace]) -> Result<()> {
 pub fn enter_namespace(pid: Pid, ns_type: Namespace) -> Result<()> {
     let path = ns_type.path_for(pid);
     let file = File::open(&path)?;
-    setns(file.as_raw_fd(), ns_type.clone_flag())?;
+    setns(&file, ns_type.clone_flag())?;
     Ok(())
 }
 

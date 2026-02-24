@@ -24,7 +24,12 @@ pub use gpu::{WslGpuDetector, GpuInfo, GpuVendor, WslGpuConfig};
 #[cfg(windows)]
 pub use networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, ContainerNetwork, DnsEntry, AgentNetworkConfig};
 
+#[cfg(windows)]
 use anyhow::Result;
+
+/// Stub Result type for non-Windows platforms
+#[cfg(not(windows))]
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// WSL2 backend configuration.
 #[derive(Debug, Clone)]
