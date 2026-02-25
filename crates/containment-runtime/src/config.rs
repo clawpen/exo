@@ -59,6 +59,14 @@ pub struct ContainerConfig {
     /// Read-only root filesystem
     #[serde(default)]
     pub readonly_rootfs: bool,
+
+    /// Target architecture (auto-detected from image if not specified)
+    #[serde(default)]
+    pub architecture: Option<String>,
+
+    /// Platform in OCI format (os/arch variant)
+    #[serde(default)]
+    pub platform: Option<String>,
 }
 
 impl Default for ContainerConfig {
@@ -78,6 +86,8 @@ impl Default for ContainerConfig {
             hostname: default_hostname(),
             privileged: false,
             readonly_rootfs: false,
+            architecture: None,
+            platform: None,
         }
     }
 }
@@ -359,6 +369,103 @@ mod tests {
         let cfg: ContainerConfig = serde_json::from_value(config).unwrap();
         assert_eq!(cfg.workdir, PathBuf::from("/app"));
         assert_eq!(cfg.user, "root");
-        assert_eq!(cfg.hostname, "openclaw");
+        assert_eq!(cfg.hostname, "containment");
+    }
+}
+
+impl ContainerConfig {
+    /// Detect architecture from image name (e.g., "arm64v8/python", "python:arm64")
+    pub fn detect_architecture(&self) -> Option<&str> {
+        // Check explicit architecture field first
+        if let Some(ref arch) = self.architecture {
+            return Some(arch);
+        }
+
+        // Check platform field
+        if let Some(ref platform) = self.platform {
+            if let Some(arch_part) = platform.split('/').nth(1) {
+                return Some(arch_part);
+            }
+        }
+
+        // Parse image name for architecture hints
+        let image_lower = self.image.to_lowercase();
+
+        // Common architecture prefixes in Docker images
+        let arch_patterns = [
+            ("arm64v8/", "aarch64"),
+            ("arm64v8-", "aarch64"),
+            ("arm64v8", "aarch64"),
+            ("arm64/", "aarch64"),
+            ("armv7/", "arm"),
+            ("armv7-", "arm"),
+            ("armv7", "arm"),
+            ("arm32v7/", "arm"),
+            ("arm32v7-", "arm"),
+            ("ppc64le/", "ppc64le"),
+            ("s390x/", "s390x"),
+            ("riscv64/", "riscv64"),
+        ];
+
+        for (pattern, arch) in &arch_patterns {
+            if image_lower.contains(pattern) {
+                return Some(arch);
+            }
+        }
+
+        // Check tag for architecture suffix
+        if let Some(tag_part) = self.image.split(':').nth(1) {
+            let tag_lower = tag_part.to_lowercase();
+            if tag_lower.contains("arm64") || tag_lower.contains("aarch64") {
+                return Some("aarch64");
+            }
+            if tag_lower.contains("armv7") || tag_lower.contains("arm32") {
+                return Some("arm");
+            }
+            if tag_lower.contains("ppc64le") {
+                return Some("ppc64le");
+            }
+            if tag_lower.contains("s390x") {
+                return Some("s390x");
+            }
+            if tag_lower.contains("riscv64") {
+                return Some("riscv64");
+            }
+        }
+
+        None
+    }
+
+    /// Check if this container requires foreign binary execution
+    pub fn requires_foreign_exec(&self) -> bool {
+        if let Some(detected_arch) = self.detect_architecture() {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::binfmt::Architecture;
+                if let Some(arch) = Architecture::from_str(detected_arch) {
+                    return arch.is_foreign();
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the target architecture as a string
+    pub fn target_arch(&self) -> String {
+        self.detect_architecture()
+            .unwrap_or_else(|| {
+                #[cfg(target_arch = "x86_64")]
+                return "x86_64";
+                #[cfg(target_arch = "aarch64")]
+                return "aarch64";
+                #[cfg(target_arch = "arm")]
+                return "arm";
+                #[cfg(target_arch = "riscv64")]
+                return "riscv64";
+                #[cfg(target_arch = "powerpc64")]
+                return "ppc64le";
+                "x86_64"
+            })
+            .to_string()
     }
 }

@@ -16,6 +16,8 @@ uuid = { workspace = true }
 nix = { workspace = true }
 libc = { workspace = true }
 procfs = "0.17"
+caps = "0.5"
+libseccomp = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"

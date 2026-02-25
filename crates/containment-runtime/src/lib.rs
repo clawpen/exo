@@ -6,10 +6,21 @@ pub mod namespace;
 pub mod process;
 pub mod container;
 pub mod config;
+pub mod userns;
+pub mod rootfs;
+pub mod cgroup;
+pub mod security;
+pub mod seccomp;
+pub mod binfmt;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
 pub use namespace::Namespace;
+pub use userns::{UidMap, GidMap, setup_user_namespace};
+pub use cgroup::{CgroupManager, parse_size as parse_cgroup_size, cpu_count_to_quota};
+pub use security::{Capability, drop_capabilities, raise_capabilities, get_default_caps};
+pub use seccomp::{SeccompProfile, SeccompAction, apply_seccomp, default_profile};
+pub use binfmt::{Architecture, register_binfmt, is_qemu_available, setup_foreign_exec};
 
 use anyhow::Result;
 
