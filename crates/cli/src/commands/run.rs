@@ -3,6 +3,8 @@
 #[cfg(windows)]
 use containment_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig};
 use containment_runtime::config::ContainerConfig;
+use containment_runtime::image::{ImageManager, TagOrDigest};
+use containment_runtime::storage::OverlayfsDriver;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -46,7 +48,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
     #[cfg(not(windows))]
     {
-        // Linux path: Use native runtime
+        // Linux path: Use native runtime with new features
         execute_linux(config, detach, rm).await
     }
 }
@@ -200,8 +202,21 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
 
 #[cfg(not(windows))]
 async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
-    use containment_runtime::Container;
+    use containment_runtime::{Container, ContainerStatus};
     use containment_gpu::{GpuConfig, GpuType};
+
+    // Initialize image manager and storage
+    let image_manager = ImageManager::new()?;
+
+    // Parse the image reference to check for foreign architecture
+    let image_ref = image_manager.parse_image_reference(&config.image)?;
+    let is_foreign = match &image_ref.reference {
+        TagOrDigest::Tag(_) => {
+            // Check if the tag indicates architecture
+            config.image.contains("arm64") || config.image.contains("armv7")
+        }
+        _ => false
+    };
 
     // Validate GPU config if specified
     if let Some(gpu_cfg) = &config.gpu {
@@ -216,27 +231,54 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyho
         gpu_config.validate()?;
     }
 
+    // Pull image if not present (with registry feature)
+    #[cfg(feature = "registry")]
+    {
+        use containment_runtime::TagOrDigest;
+        if let TagOrDigest::Tag(tag) = &image_ref.reference {
+            let image_name = format!("{}/{}:{}", image_ref.registry, image_ref.repository, tag);
+            if let Err(e) = image_manager.pull(&image_name).await {
+                tracing::warn!("Failed to pull image: {}", e);
+                // Continue anyway - image might be cached
+            }
+        }
+    }
+
     // Create and start the container
     let mut container = Container::new(config)?;
 
     println!("Starting container: {}", container.handle().id);
 
+    // Print architecture info if foreign
+    if is_foreign {
+        println!("Running with QEMU emulation for foreign architecture");
+    }
+
     container.start()?;
 
     if detach {
+        let pid = container.handle().pid.unwrap();
         println!("Container running in background: {}", container.handle().id);
+        println!("PID: {}", pid);
+
+        // Store container state for management
+        // In production, this would write to a state file
+
         return Ok(());
     }
 
     // Wait for container to finish
     let status = container.wait()?;
 
+    // Clean up overlay if needed
+    let _ = image_manager.storage().remove_container_overlay(&container.handle().id);
+
     if rm {
         container.remove()?;
     }
 
     match status {
-        containment_runtime::ContainerStatus::Exited(code) => {
+        ContainerStatus::Exited(code) => {
             if code == 0 {
                 Ok(())
             } else {
@@ -329,20 +371,20 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
     let command = if args.command.is_empty() {
         vec!["sh".to_string()]
     } else {
-        args.command
+        args.command.clone()
     };
 
     let workdir = args.workdir.unwrap_or_else(|| "/app".to_string());
 
     let mut env = HashMap::new();
-    for e in args.env {
+    for e in &args.env {
         if let Some((key, value)) = e.split_once('=') {
             env.insert(key.to_string(), value.to_string());
         }
     }
 
     let mut mounts = vec![];
-    for v in args.volume {
+    for v in &args.volume {
         if let Some((src, target)) = v.split_once(':') {
             mounts.push(MountConfig {
                 mount_type: "bind".to_string(),
@@ -356,7 +398,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
     }
 
     let mut port_mappings = vec![];
-    for p in args.publish {
+    for p in &args.publish {
         if let Some((host, container)) = p.split_once(':') {
             let host_port = host.parse().unwrap_or(8080);
             let container_port = container.parse().unwrap_or(8080);
@@ -371,7 +413,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
 
     let gpu = if args.gpu {
         Some(GpuConfig {
-            gpu_type: args.gpu_type.unwrap_or("auto".to_string()),
+            gpu_type: args.gpu_type.clone().unwrap_or("auto".to_string()),
             devices: vec!["all".to_string()],
             compute_mode: None,
         })
@@ -380,20 +422,20 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
     };
 
     let resources = ResourceConfig {
-        memory: args.memory,
-        cpu: args.cpu,
+        memory: args.memory.clone(),
+        cpu: args.cpu.clone(),
         ..Default::default()
     };
 
     let network = NetworkConfig {
-        mode: args.network.unwrap_or_else(|| "bridge".to_string()),
+        mode: args.network.clone().unwrap_or_else(|| "bridge".to_string()),
         port_mappings,
         ..Default::default()
     };
 
     Ok(ContainerConfig {
         name,
-        image: args.image,
+        image: args.image.clone(),
         workdir: PathBuf::from(workdir),
         env,
         user: "root".to_string(),

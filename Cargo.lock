@@ -196,7 +196,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
+ "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -270,12 +273,14 @@ name = "containment"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "containment-gpu",
  "containment-image",
  "containment-runtime",
  "containment-wsl",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -319,10 +324,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "caps",
+ "chrono",
+ "futures-util",
  "libc",
  "libseccomp",
  "nix",
  "procfs",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

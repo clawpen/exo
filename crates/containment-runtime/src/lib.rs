@@ -12,6 +12,9 @@ pub mod cgroup;
 pub mod security;
 pub mod seccomp;
 pub mod binfmt;
+pub mod storage;
+pub mod image;
+pub mod channel;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
@@ -21,6 +24,9 @@ pub use cgroup::{CgroupManager, parse_size as parse_cgroup_size, cpu_count_to_qu
 pub use security::{Capability, drop_capabilities, raise_capabilities, get_default_caps};
 pub use seccomp::{SeccompProfile, SeccompAction, apply_seccomp, default_profile};
 pub use binfmt::{Architecture, register_binfmt, is_qemu_available, setup_foreign_exec};
+pub use storage::{OverlayfsDriver, ContainerOverlay};
+pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};
+pub use channel::{AgentChannel, AgentMessage, ToolRequest, ToolResponse};
 
 use anyhow::Result;
 
