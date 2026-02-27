@@ -2,7 +2,7 @@
 
 > **Exō** (Latin): "from outside, outward" — the protective shell that makes agents possible.
 
-A container runtime built specifically for AI agents from [Claw Pen](https://clawpen.com).
+A container runtime built specifically for AI agents from [Claw Pen](https://clawpen.ca).
 
 ## Why Exo?
 
@@ -152,4 +152,4 @@ MIT OR Apache-2.0
 ---
 
 **Exo** — *The outer shell that protects your agents.*
-From [Claw Pen](https://clawpen.com)
+From [Claw Pen](https://clawpen.ca)
