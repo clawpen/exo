@@ -346,33 +346,6 @@ pub fn parse_size(size: &str) -> anyhow::Result<u64> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_size() {
-        assert_eq!(parse_size("2G").unwrap(), 2 * 1024 * 1024 * 1024);
-        assert_eq!(parse_size("512M").unwrap(), 512 * 1024 * 1024);
-        assert_eq!(parse_size("1024K").unwrap(), 1024 * 1024);
-        assert_eq!(parse_size("1024").unwrap(), 1024);
-    }
-
-    #[test]
-    fn test_container_config_default() {
-        let config = serde_json::json!({
-            "name": "test",
-            "image": "python:3.12",
-            "command": ["python", "app.py"]
-        });
-
-        let cfg: ContainerConfig = serde_json::from_value(config).unwrap();
-        assert_eq!(cfg.workdir, PathBuf::from("/app"));
-        assert_eq!(cfg.user, "root");
-        assert_eq!(cfg.hostname, "containment");
-    }
-}
-
 impl ContainerConfig {
     /// Detect architecture from image name (e.g., "arm64v8/python", "python:arm64")
     pub fn detect_architecture(&self) -> Option<&str> {
@@ -467,5 +440,120 @@ impl ContainerConfig {
                 "x86_64"
             })
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_size() {
+        assert_eq!(parse_size("2G").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size("512M").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_size("1024K").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_container_config_default() {
+        let config = ContainerConfig::default();
+        assert_eq!(config.workdir, PathBuf::from("/app"));
+        assert_eq!(config.user, "root");
+        assert_eq!(config.hostname, "containment");
+        assert!(!config.privileged);
+        assert!(!config.readonly_rootfs);
+        assert!(config.env.is_empty());
+        assert!(config.mounts.is_empty());
+        assert!(config.gpu.is_none());
+    }
+
+    #[test]
+    fn test_resource_config_default() {
+        let config = ResourceConfig::default();
+        assert!(config.memory.is_none());
+        assert!(config.cpu.is_none());
+        assert!(config.cpu_shares.is_none());
+        assert!(config.pids_limit.is_none());
+    }
+
+    #[test]
+    fn test_network_config_default() {
+        let config = NetworkConfig::default();
+        assert_eq!(config.mode, "bridge");
+        assert!(config.port_mappings.is_empty());
+        assert!(config.dns.is_empty());
+    }
+
+    #[test]
+    fn test_namespaces_default() {
+        let ns = Namespaces::default();
+        assert!(ns.user);
+        assert!(ns.pid);
+        assert!(ns.network);
+        assert!(ns.mount);
+        assert!(ns.uts);
+        assert!(ns.ipc);
+        assert!(ns.cgroup);
+    }
+
+    #[test]
+    fn test_gpu_config_default() {
+        let config = GpuConfig {
+            gpu_type: "auto".to_string(),
+            devices: vec!["all".to_string()],
+            compute_mode: None,
+        };
+        assert_eq!(config.gpu_type, "auto");
+        assert!(!config.devices.is_empty());
+    }
+
+    #[test]
+    fn test_container_config_with_env() {
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+        env.insert("HOME".to_string(), "/root".to_string());
+
+        let mut config = ContainerConfig::default();
+        config.env = env;
+
+        assert_eq!(config.env.get("PATH"), Some(&"/usr/bin:/bin".to_string()));
+        assert_eq!(config.env.get("HOME"), Some(&"/root".to_string()));
+    }
+
+    #[test]
+    fn test_container_config_serialization() {
+        let config = ContainerConfig {
+            name: "test".to_string(),
+            image: "ubuntu:latest".to_string(),
+            command: vec!["bash".to_string()],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&config).expect("Failed to serialize");
+        assert!(json.contains("test"));
+        assert!(json.contains("ubuntu:latest"));
+
+        let deserialized: ContainerConfig = serde_json::from_str(&json)
+            .expect("Failed to deserialize");
+        assert_eq!(deserialized.name, "test");
+        assert_eq!(deserialized.image, "ubuntu:latest");
+    }
+
+    #[test]
+    fn test_mount_config() {
+        let mount = MountConfig {
+            mount_type: "bind".to_string(),
+            source: "/host/path".to_string(),
+            target: "/container/path".to_string(),
+            readonly: false,
+            size: None,
+            propagation: "rprivate".to_string(),
+        };
+
+        assert_eq!(mount.source, "/host/path");
+        assert_eq!(mount.target, "/container/path");
+        assert!(!mount.readonly);
+        assert_eq!(mount.mount_type, "bind");
     }
 }
