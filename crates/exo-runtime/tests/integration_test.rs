@@ -19,13 +19,13 @@ use std::time::Duration;
 use anyhow::Result;
 
 #[cfg(target_os = "linux")]
-use containment_runtime::{
+use exo_runtime::{
     Container, ContainerConfig, ContainerStatus, ResourceConfig,
     NetworkConfig, UidMap, GidMap, Capability,
     CgroupManager, drop_capabilities, apply_seccomp, default_profile, SeccompAction,
 };
 
-use containment_runtime::{
+use exo_runtime::{
     storage::OverlayfsDriver,
     image::ImageManager,
     channel::{ToolRequest, ToolResponse, AgentMessage, MessageType},
@@ -305,7 +305,7 @@ fn test_image_manager_creation() {
 
 #[test]
 fn test_parse_image_reference() {
-    use containment_runtime::image::DEFAULT_LIBRARY;
+    use exo_runtime::image::DEFAULT_LIBRARY;
 
     let manager = ImageManager::new().unwrap();
 
@@ -329,18 +329,17 @@ fn test_parse_image_reference() {
 
 #[test]
 fn test_parse_image_reference_with_digest() {
-    use containment_runtime::image::DEFAULT_LIBRARY;
+    use exo_runtime::image::{DEFAULT_LIBRARY, TagOrDigest};
 
     let manager = ImageManager::new().unwrap();
 
     let reference = "ubuntu@sha256:abcdef1234567890";
     let parsed = manager.parse_image_reference(reference).unwrap();
 
-    // Note: The parser has a bug where it checks for ':' before '@'
-    // so "library/ubuntu@sha256:..." gets split incorrectly
-    // For now, we document the current behavior
+    // Now correctly parses @sha256: format
     assert_eq!(parsed.registry, "registry-1.docker.io");
-    assert!(parsed.repository.contains("ubuntu"));
+    assert_eq!(parsed.repository, format!("{}/ubuntu", DEFAULT_LIBRARY));
+    assert!(matches!(parsed.reference, TagOrDigest::Digest(d) if d == "sha256:abcdef1234567890"));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -405,7 +404,7 @@ fn test_tool_response_serialization() {
 
 #[test]
 fn test_container_config_default() {
-    use containment_runtime::ContainerConfig;
+    use exo_runtime::ContainerConfig;
 
     let config = ContainerConfig::default();
 
@@ -419,7 +418,7 @@ fn test_container_config_default() {
 
 #[test]
 fn test_parse_size() {
-    use containment_runtime::parse_cgroup_size;
+    use exo_runtime::parse_cgroup_size;
 
     let cases = vec![
         ("1g", 1024 * 1024 * 1024),
@@ -436,7 +435,7 @@ fn test_parse_size() {
 
 #[test]
 fn test_parse_size_invalid() {
-    use containment_runtime::parse_cgroup_size;
+    use exo_runtime::parse_cgroup_size;
 
     let result = parse_cgroup_size("invalid");
     assert!(result.is_err(), "Should fail for invalid input");
@@ -444,7 +443,7 @@ fn test_parse_size_invalid() {
 
 #[test]
 fn test_cpu_count_to_quota() {
-    use containment_runtime::cpu_count_to_quota;
+    use exo_runtime::cpu_count_to_quota;
 
     // 0.5 CPU = 50000 quota with 100000 period
     let (quota, period) = cpu_count_to_quota(0.5);

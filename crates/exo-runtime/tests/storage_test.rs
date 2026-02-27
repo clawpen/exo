@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use containment_runtime::{
+use exo_runtime::{
     storage::{OverlayfsDriver, ContainerOverlay},
     image::{ImageManager, ParsedImageReference, TagOrDigest},
 };

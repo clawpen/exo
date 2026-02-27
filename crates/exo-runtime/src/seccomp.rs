@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use containment_runtime::seccomp::{apply_seccomp, default_profile};
+//! use exo_runtime::seccomp::{apply_seccomp, default_profile};
 //!
 //! let profile = default_profile();
 //! apply_seccomp(&profile)?;

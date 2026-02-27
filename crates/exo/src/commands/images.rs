@@ -1,6 +1,6 @@
 //! List images command
 
-use containment_runtime::ImageManager;
+use exo_runtime::ImageManager;
 use chrono::{DateTime, Utc};
 
 pub struct ImagesArgs {

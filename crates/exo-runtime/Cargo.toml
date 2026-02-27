@@ -1,5 +1,5 @@
 [package]
-name = "containment-runtime"
+name = "exo-runtime"
 version.workspace = true
 edition.workspace = true
 

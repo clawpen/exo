@@ -16,8 +16,8 @@
 //! # Example
 //!
 //! ```no_run
-//! use containment_runtime::rootfs::{prepare_rootfs, pivot_rootfs, setup_mounts};
-//! use containment_runtime::config::ContainerConfig;
+//! use exo_runtime::rootfs::{prepare_rootfs, pivot_rootfs, setup_mounts};
+//! use exo_runtime::config::ContainerConfig;
 //!
 //! let config = ContainerConfig::default();
 //! let rootfs_path = prepare_rootfs(&config)?;

@@ -1,16 +1,16 @@
 [package]
-name = "containment"
+name = "exo"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "containment"
+name = "exo"
 path = "src/main.rs"
 
 [dependencies]
-containment-runtime = { path = "../containment-runtime", features = ["registry"] }
-containment-gpu = { path = "../containment-gpu" }
-containment-image = { path = "../containment-image" }
+exo-runtime = { path = "../exo-runtime", features = ["registry"] }
+exo-gpu = { path = "../exo-gpu" }
+exo-image = { path = "../exo-image" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -24,4 +24,4 @@ uuid = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
-containment-wsl = { path = "../containment-wsl" }
+exo-wsl = { path = "../exo-wsl" }

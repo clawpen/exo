@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use containment_runtime::userns::{UidMap, GidMap, setup_user_namespace};
+//! use exo_runtime::userns::{UidMap, GidMap, setup_user_namespace};
 //! use nix::unistd::Pid;
 //!
 //! // Map container root (0) to host user (1000)

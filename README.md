@@ -1,145 +1,155 @@
-# Containment - AI Agent Container Runtime
+# Exo - Agent Container Runtime
 
-A custom container runtime for AI agents, deployable on Windows using WSL2 backend.
+> **Exō** (Latin): "from outside, outward" — the protective shell that makes agents possible.
+
+A container runtime built specifically for AI agents from [Claw Pen](https://clawpen.com).
+
+## Why Exo?
+
+General-purpose container runtimes (Docker, containerd) were designed for microservices. Exo is designed for **agents**:
+
+- **Agent-first communication** — Stdio + tool bus, not HTTP
+- **Tool-level sandboxing** — Each tool gets its own security context
+- **Fast spawning** — Daemonless, spin up in milliseconds
+- **Rootless by default** — User namespaces, no system privileges required
+
+## Quick Start
+
+```bash
+# Run a Python agent container
+exo run --image python:3.12 --tool bash
+
+# Run with GPU support
+exo run --gpu --image python:3.12
+
+# List running containers
+exo ps
+
+# Stop a container
+exo stop <container-id>
+```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Containment (Windows .exe)                │
-├─────────────────────────────────────────────────────────────┤
-│  CLI                                                          │
-│  - run, ps, stop, logs, exec commands                        │
-│  - TOML config parsing                                       │
-├─────────────────────────────────────────────────────────────┤
-│  Container Runtime Core (Cross-Platform)                     │
-│  - Container lifecycle management                            │
-│  - Image handling                                            │
-│  - GPU configuration                                         │
-├─────────────────────────────────────────────────────────────┤
-│  WSL2 Backend (Windows-specific)                            │
-│  - Manages WSL2 distro for containers                        │
-│  - Executes container commands inside WSL2                   │
-│  - Filesystem mounting (Windows ↔ WSL2)                     │
-│  - GPU passthrough to WSL2                                  │
-├─────────────────────────────────────────────────────────────┤
-│  Windows GPU Detection                                      │
-│  - Detects NVIDIA/AMD GPUs on Windows                       │
-│  - Validates WSL2 GPU support                               │
+│                      Exo CLI                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                    Agent Channel                       │  │
+│  │  • Stdio-based messaging (not HTTP)                 │  │
+│  │  • Tool bus for sandboxed command execution        │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                  Storage Layer                         │  │
+│  │  • Overlay2 filesystem                               │  │
+│  │  • Layer management                                  │  │
+│  │  • Image operations                                  │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                  Security Layer                        │  │
+│  │  • Linux namespaces (user, pid, net, mount)         │  │
+│  │  • Cgroups v2 (memory, CPU, I/O limits)            │  │
+│  │  • Seccomp syscall filtering                         │  │
+│  │  • Capability dropping                               │  │
+│  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
-                            │
-                            ▼
+                              │
+                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    WSL2 (Lightweight VM)                     │
-│  - Real Linux kernel                                        │
-│  - Near-native performance (~95-98%)                        │
-│  - GPU passthrough supported                                │
-│  - Runs Containment Linux runtime (unshare, namespaces)     │
+│                    Container                               │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐                        │
+│  │  bash   │  │  python  │  │  node   │  Agent Tools           │
+│  └─────────┘  └─────────┘  └─────────┘                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
 
 ```
-containment/
+exo/
 ├── Cargo.toml                    # Workspace
 ├── crates/
-│   ├── cli/                      # Windows CLI application
+│   ├── exo/                      # CLI application
+│   │   └── src/commands/         # run, ps, stop, logs, images
+│   ├── exo-runtime/             # Core container runtime
 │   │   ├── src/
-│   │   │   ├── main.rs           # Entry point
-│   │   │   └── commands/         # CLI commands
-│   │   └── Cargo.toml
-│   ├── runtime/                  # Core container runtime
-│   │   ├── src/
-│   │   │   ├── container.rs      # Container abstraction
-│   │   │   ├── config.rs         # Configuration parsing
-│   │   │   └── platform/         # Platform-specific backends
-│   │   └── Cargo.toml
-│   ├── wsl/                      # WSL2 management (Windows only)
-│   │   ├── src/
-│   │   │   ├── distro.rs         # WSL2 distro management
-│   │   │   ├── command.rs        # Execute commands in WSL2
-│   │   │   ├── mount.rs          # Windows↔WSL2 filesystem
-│   │   │   └── gpu.rs            # GPU passthrough to WSL2
-│   │   └── Cargo.toml
-│   ├── gpu/                      # GPU detection (cross-platform)
-│   │   ├── src/
-│   │   │   ├── windows.rs        # Windows GPU detection
-│   │   │   └── linux.rs          # Linux GPU detection
-│   │   └── Cargo.toml
-│   └── image/                    # OCI image handling
-│       └── ...
-│   ├── linux-runtime/            # Linux runtime that runs inside WSL2
-│   │   ├── Cargo.toml            # Linux binary built separately
-│   │   ├── src/
-│   │   │   ├── main.rs           # Entry point for WSL2
-│   │   │   ├── namespaces.rs     # Linux namespace operations
-│   │   │   ├── cgroup.rs         # cgroups v2 setup
-│   │   │   ├── mount.rs          # Mount operations
-│   │   │   ├── process.rs       # Fork+exec with namespaces
-│   │   │   ├── container.rs     # Container lifecycle
-│   │   │   ├── rootfs.rs        # Root filesystem setup
-│   │   │   ├── state.rs         # State persistence
-│   │   │   └── server.rs        # RPC server
-│   │   └── build.sh             # Build Linux binary
-│   └── installer/                # First-run setup
-│       └── setup.rs               # WSL2 installation/check
-└── examples/                    # Sample agent configurations
-    ├── python-agent.toml
-    ├── nodejs-agent.toml
-    └── gpu-agent.toml
+│   │   │   ├── container.rs      # Container lifecycle
+│   │   │   ├── config.rs         # Configuration
+│   │   │   ├── namespace.rs     # Linux namespaces
+│   │   │   ├── userns.rs         # User namespaces
+│   │   │   ├── rootfs.rs        # Root filesystem
+│   │   │   ├── cgroup.rs         # Cgroup v2
+│   │   │   ├── security.rs       # Capabilities
+│   │   │   ├── seccomp.rs       # Syscall filtering
+│   │   │   ├── binfmt.rs        # Foreign binary support
+│   │   │   ├── storage.rs       # Overlay2 storage
+│   │   │   ├── image.rs         # Image management
+│   │   │   ├── channel.rs       # Agent communication
+│   │   │   └── process.rs       # Process spawning
+│   ├── exo-image/               # OCI image operations
+│   ├── exo-wsl/                 # WSL2 backend (Windows)
+│   └── exo-gpu/                 # GPU detection
+└── docs/                        # Architecture & design docs
 ```
 
-## Usage
+## Agent Communication Protocol
 
-```bash
-# Run an AI agent with GPU
-containment run --gpu python:3.12 -- python train.py
+Exo speaks "Agent" natively:
 
-# Use config file
-containment run -f examples/gpu-agent.toml
+```
+Host → Agent: {"type": "tool_request", "tool": "bash", "args": {...}}
+Agent → Host: {"type": "observation", "content": "result..."}
 
-# Use Windows folders
-containment run -v C:\mycode:/app python:3.12 -- python script.py
-
-# List containers
-containment ps
-
-# Stop container
-containment stop <id>
+Tool Bus:
+┌─────────────┐     ┌─────────────┐
+│   Agent     │────▶│  Exo        │────▶│   Bash      │
+│  (stdin)    │     │ (Tool Bus)  │     │ (isolated)  │
+└─────────────┘     └─────────────┘     └─────────────┘
 ```
 
-## Configuration Example
+No HTTP overhead, no WebSocket gymnastics. Just structured stdio.
 
-```toml
-[container]
-name = "gpu-agent"
-image = "nvidia/cuda:12.1.0-runtime-ubuntu22.04"
+## Windows Support via WSL2
 
-[container.resources]
-memory = "8G"
-cpu = "4"
+On Windows, Exo uses WSL2 as a Linux backend:
 
-[container.runtime]
-workdir = "/workspace"
-env = ["CUDA_VISIBLE_DEVICES=0"]
-
-[container.network]
-mode = "bridge"
-
-[container.gpu]
-enabled = true
-type = "nvidia"
-devices = "all"
-
-[process]
-command = ["python", "train_model.py"]
+```
+Windows ──────▶ WSL2 ──────▶ Linux Container
+                   ↓
+              GPU Passthrough
+              Filesystem Mount
 ```
 
-## Deployment
+Single `exo.exe` handles WSL2 installation, distro management, and container execution.
 
-Single `containment.exe` that:
-1. Checks for WSL2 installation on first run
-2. Installs/creates 'containment' WSL2 distro
-3. Deploys runtime binary into WSL2
-4. Ready to run containers
+## For All Agents
+
+Exo is designed to serve any AI agent that needs sandboxed tool execution:
+
+- **OpenClaw** - The LLM that started it all
+- **Agent-0** - Coding agents
+- **Your agents** - Whatever you're building
+
+One container runtime, many agents.
+
+## Status
+
+- [x] Container isolation (namespaces, cgroups, seccomp)
+- [x] Storage layer (overlay2, OCI images)
+- [x] Agent communication protocol
+- [x] Windows support (WSL2 backend)
+- [x] GPU passthrough
+- [ ] Container networking (bridge mode)
+- [ ] Multi-agent orchestration
+- [ ] Kubernetes integration
+
+## License
+
+MIT OR Apache-2.0
+
+---
+
+**Exo** — *The outer shell that protects your agents.*
+From [Claw Pen](https://clawpen.com)

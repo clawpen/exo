@@ -59,7 +59,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             mode: NetworkMode::Bridge,
-            bridge_name: "containment-br0".to_string(),
+            bridge_name: "exo-br0".to_string(),
             container_ip: None,
             gateway_ip: Some("172.17.0.1".to_string()),
             subnet_mask: Some("255.255.255.0".to_string()),
@@ -330,7 +330,7 @@ impl Default for AgentNetworkConfig {
     fn default() -> Self {
         Self {
             subnet: "172.17.0.0/24".to_string(),
-            bridge_name: "containment-br0".to_string(),
+            bridge_name: "exo-br0".to_string(),
             gateway_ip: "172.17.0.1".to_string(),
             base_ip: "172.17.0".to_string(),
         }
@@ -345,7 +345,7 @@ mod tests {
     fn test_network_config_default() {
         let config = NetworkConfig::default();
         assert_eq!(config.mode, NetworkMode::Bridge);
-        assert_eq!(config.bridge_name, "containment-br0");
+        assert_eq!(config.bridge_name, "exo-br0");
     }
 
     #[test]

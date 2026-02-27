@@ -1,6 +1,32 @@
-//! OpenClaw Container Runtime
+//! Exo - Agent Container Runtime
 //!
-//! Core container runtime implementation for Linux.
+//! Core container runtime for AI agents from Claw Pen.
+//!
+//! # About Exo
+//!
+//! Exo provides lightweight, secure container isolation specifically designed
+//! for AI agent workloads. Unlike traditional container runtimes built for
+//! microservices, Exo is optimized for:
+//!
+//! - **Agent communication**: Stdio-based protocol instead of HTTP
+//! - **Tool sandboxing**: Per-tool security contexts
+//! - **Fast spawning**: Daemonless architecture for quick agent tasks
+//! - **Rootless operation**: User namespaces for privilege separation
+//!
+//! # Example
+//!
+//! ```no_run
+//! use exo_runtime::{Container, ContainerConfig};
+//!
+//! let config = ContainerConfig {
+//!     name: "my-agent".to_string(),
+//!     image: "python:3.12".to_string(),
+//!     command: vec!["python".to_string()],
+//!     ..Default::default()
+//! };
+//!
+//! let container = Container::spawn(config)?;
+//! ```
 
 pub mod namespace;
 pub mod process;

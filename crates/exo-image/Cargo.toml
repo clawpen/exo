@@ -1,5 +1,5 @@
 [package]
-name = "containment-image"
+name = "exo-image"
 version.workspace = true
 edition.workspace = true
 

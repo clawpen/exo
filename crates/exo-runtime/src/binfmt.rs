@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use containment_runtime::binfmt::{register_binfmt, is_qemu_available, Architecture};
+//! use exo_runtime::binfmt::{register_binfmt, is_qemu_available, Architecture};
 //!
 //! // Check if QEMU is available for ARM64
 //! if is_qemu_available(Architecture::Aarch64) {
@@ -213,7 +213,7 @@ pub fn ensure_binfmt_mounted() -> Result<()> {
 /// # Example
 ///
 /// ```no_run
-/// use containment_runtime::binfmt::{register_binfmt, Architecture};
+/// use exo_runtime::binfmt::{register_binfmt, Architecture};
 ///
 /// // Enable ARM64 binary execution
 /// register_binfmt(Architecture::Aarch64)?;

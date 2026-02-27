@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use containment_runtime::{
+use exo_runtime::{
     Container, ContainerConfig, ContainerStatus, ResourceConfig, NetworkConfig,
     CgroupManager, Capability, drop_capabilities, get_default_caps,
 };
@@ -233,7 +233,7 @@ fn test_cgroup_v2_detection() {
 
 #[test]
 fn test_resource_config() {
-    use containment_runtime::ResourceConfig;
+    use exo_runtime::ResourceConfig;
 
     let config = ResourceConfig {
         memory: Some("512m".to_string()),
@@ -249,7 +249,7 @@ fn test_resource_config() {
 
 #[test]
 fn test_network_config() {
-    use containment_runtime::NetworkConfig;
+    use exo_runtime::NetworkConfig;
 
     let config = NetworkConfig {
         mode: "bridge".to_string(),
@@ -264,7 +264,7 @@ fn test_network_config() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_seccomp_default_profile() {
-    use containment_runtime::{default_profile, SeccompAction};
+    use exo_runtime::{default_profile, SeccompAction};
 
     let profile = default_profile();
 
@@ -285,7 +285,7 @@ fn test_seccomp_default_profile() {
 #[test]
 fn test_container_config_with_all_options() {
     use std::collections::HashMap;
-    use containment_runtime::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
+    use exo_runtime::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
 
     let mut env = HashMap::new();
     env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
@@ -336,7 +336,7 @@ fn test_container_config_with_all_options() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_capability_all() {
-    use containment_runtime::Capability;
+    use exo_runtime::Capability;
 
     let all = Capability::all();
 

@@ -171,7 +171,12 @@ impl ImageManager {
         };
 
         // Split repository and tag/digest
-        let (repository, reference) = if let Some(pos) = repository.rfind(':') {
+        // Check for @digest BEFORE :tag since sha256: contains a colon
+        let (repository, reference) = if let Some(pos) = repository.rfind('@') {
+            let repo = &repository[..pos];
+            let ref_part = &repository[pos + 1..];
+            (repo.to_string(), TagOrDigest::Digest(ref_part.to_string()))
+        } else if let Some(pos) = repository.rfind(':') {
             let repo = &repository[..pos];
             let ref_part = &repository[pos + 1..];
 
@@ -180,10 +185,6 @@ impl ImageManager {
             } else {
                 (repo.to_string(), TagOrDigest::Tag(ref_part.to_string()))
             }
-        } else if let Some(pos) = repository.rfind('@') {
-            let repo = &repository[..pos];
-            let ref_part = &repository[pos + 1..];
-            (repo.to_string(), TagOrDigest::Digest(ref_part.to_string()))
         } else {
             (repository.clone(), TagOrDigest::Tag("latest".to_string()))
         };

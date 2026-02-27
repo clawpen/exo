@@ -1,6 +1,6 @@
 //! Pull image command
 
-use containment_runtime::ImageManager;
+use exo_runtime::ImageManager;
 
 pub struct PullArgs {
     pub image: String,

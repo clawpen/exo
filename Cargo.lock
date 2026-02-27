@@ -269,94 +269,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
-name = "containment"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "containment-gpu",
- "containment-image",
- "containment-runtime",
- "containment-wsl",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "containment-gpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "nvml-wrapper",
- "pci-ids",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "containment-image"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-compression",
- "oci-spec",
- "reqwest",
- "serde",
- "serde_json",
- "sha256",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "containment-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "caps",
- "chrono",
- "futures-util",
- "libc",
- "libseccomp",
- "nix",
- "procfs",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-test",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "containment-wsl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "windows-sys 0.59.0",
- "winreg",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,6 +432,94 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "exo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "exo-gpu",
+ "exo-image",
+ "exo-runtime",
+ "exo-wsl",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "exo-gpu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nvml-wrapper",
+ "pci-ids",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "exo-image"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "oci-spec",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha256",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "exo-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "caps",
+ "chrono",
+ "futures-util",
+ "libc",
+ "libseccomp",
+ "nix",
+ "procfs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "exo-wsl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "windows-sys 0.59.0",
+ "winreg",
 ]
 
 [[package]]

@@ -1,13 +1,13 @@
 [workspace]
-members = ["crates/containment-runtime", "crates/cli", "crates/containment-gpu", "crates/containment-image", "crates/containment-wsl"]
+members = ["crates/exo-runtime", "crates/exo", "crates/exo-gpu", "crates/exo-image", "crates/exo-wsl"]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Containment Contributors"]
+authors = ["Exo Contributors <https://clawpen.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/containment/container"
+repository = "https://github.com/clawpen/exo"
 
 [workspace.dependencies]
 # Async runtime

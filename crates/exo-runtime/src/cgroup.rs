@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use containment_runtime::cgroup::CgroupManager;
+//! use exo_runtime::cgroup::CgroupManager;
 //!
 //! let mut mgr = CgroupManager::new("my-container")?;
 //! mgr.set_memory_limit(512 * 1024 * 1024)?;  // 512 MB

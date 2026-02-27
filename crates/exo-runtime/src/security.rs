@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use containment_runtime::security::{Capability, drop_capabilities};
+//! use exo_runtime::security::{Capability, drop_capabilities};
 //!
 //! // Keep only essential capabilities for a web container
 //! let keep = vec![
@@ -368,7 +368,7 @@ pub fn get_caps_to_drop() -> HashSet<Capability> {
 /// # Example
 ///
 /// ```no_run
-/// use containment_runtime::security::{drop_capabilities, Capability};
+/// use exo_runtime::security::{drop_capabilities, Capability};
 ///
 /// // Keep only basic capabilities
 /// let keep = vec![

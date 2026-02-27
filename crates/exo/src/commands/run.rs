@@ -1,10 +1,10 @@
 //! Run command implementation
 
 #[cfg(windows)]
-use containment_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig};
-use containment_runtime::config::ContainerConfig;
-use containment_runtime::image::{ImageManager, TagOrDigest};
-use containment_runtime::storage::OverlayfsDriver;
+use exo_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig};
+use exo_runtime::config::ContainerConfig;
+use exo_runtime::image::{ImageManager, TagOrDigest};
+use exo_runtime::storage::OverlayfsDriver;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -55,8 +55,8 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
-    use containment_wsl::command::{ContainerSpec, MountSpec};
-    use containment_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
+    use exo_wsl::command::{ContainerSpec, MountSpec};
+    use exo_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
     use tracing::{info, debug};
 
     info!("Running container via WSL2 backend");
@@ -180,7 +180,7 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
     let status = wsl_cmd.container_status(&container_id)?;
 
     match status {
-        containment_wsl::command::ContainerStatus::Running => {
+        exo_wsl::command::ContainerStatus::Running => {
             // Attach to logs
             let mut log_stream = wsl_cmd.stream_logs(&container_id).await?;
             while let Some(line) = log_stream.next_line().await? {
@@ -202,7 +202,7 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
 
 #[cfg(not(windows))]
 async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
-    use containment_runtime::{Container, ContainerStatus};
+    use exo_runtime::{Container, ContainerStatus};
     use containment_gpu::{GpuConfig, GpuType};
 
     // Initialize image manager and storage
@@ -234,7 +234,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyho
     // Pull image if not present (with registry feature)
     #[cfg(feature = "registry")]
     {
-        use containment_runtime::TagOrDigest;
+        use exo_runtime::TagOrDigest;
         if let TagOrDigest::Tag(tag) = &image_ref.reference {
             let image_name = format!("{}/{}:{}", image_ref.registry, image_ref.repository, tag);
             if let Err(e) = image_manager.pull(&image_name).await {
@@ -316,7 +316,7 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
     let name = config.get("container")
         .and_then(|c| c.get("name"))
         .and_then(|n| n.as_str())
-        .unwrap_or("containment-agent")
+        .unwrap_or("exo-agent")
         .to_string();
 
     let image = config.get("container")
@@ -362,10 +362,10 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
 }
 
 fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
-    use containment_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig};
+    use exo_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig};
 
     let name = args.name.unwrap_or_else(|| {
-        format!("containment-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
+        format!("exo-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
     });
 
     let command = if args.command.is_empty() {
