@@ -41,6 +41,7 @@ pub mod binfmt;
 pub mod storage;
 pub mod image;
 pub mod channel;
+pub mod agent;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
@@ -53,6 +54,7 @@ pub use binfmt::{Architecture, register_binfmt, is_qemu_available, setup_foreign
 pub use storage::{OverlayfsDriver, ContainerOverlay};
 pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};
 pub use channel::{AgentChannel, AgentMessage, ToolRequest, ToolResponse};
+pub use agent::{AgentProfile, NetworkAccess, get_agent_profile, AgentConfigExt};
 
 use anyhow::Result;
 

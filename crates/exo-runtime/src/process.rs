@@ -12,6 +12,7 @@ use crate::security::{self, drop_capabilities, get_default_caps};
 use crate::userns::{self, setup_user_namespace, GidMap, UidMap};
 use crate::namespace::{Namespace, NamespaceFlags, unshare_namespaces};
 use crate::binfmt::{self, Architecture};
+use crate::agent::{self, AgentConfigExt, get_agent_profile, AgentProfile};
 use anyhow::{Context, Result};
 
 #[cfg(target_os = "linux")]
@@ -454,24 +455,44 @@ fn container_child_init(
         setup_loopback_network()?;
     }
 
-    // Step 7: Drop capabilities
+    // Step 7: Apply security profile
     if !config.privileged {
-        let caps_to_keep = if config.namespaces.user {
-            // In user namespace, we have different caps
-            vec![
-                security::Capability::CAP_SETUID,
-                security::Capability::CAP_SETGID,
-            ]
-        } else {
-            get_default_caps().into_iter().collect()
-        };
-        drop_capabilities(&caps_to_keep)?;
-    }
+        // Check if this is an agent container and use agent-specific security
+        if config.is_agent() {
+            let agent_profile = get_agent_profile(config);
+            tracing::info!("Using agent security profile: {}", agent_profile.name);
 
-    // Step 8: Apply seccomp filter
-    if !config.privileged {
-        let profile = default_profile();
-        apply_seccomp(&profile)?;
+            // Drop capabilities according to agent profile
+            drop_capabilities(&agent_profile.capabilities)?;
+
+            // Apply agent seccomp filter
+            apply_seccomp(&agent_profile.seccomp)?;
+
+            // Set no_new_privs if configured
+            if agent_profile.no_new_privs {
+                const PR_SET_NO_NEW_PRIVS: u64 = 38;
+                let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+                if ret != 0 {
+                    tracing::warn!("Failed to set no_new_privs: {}", std::io::Error::last_os_error());
+                }
+            }
+        } else {
+            // Use standard container security
+            let caps_to_keep = if config.namespaces.user {
+                // In user namespace, we have different caps
+                vec![
+                    security::Capability::CAP_SETUID,
+                    security::Capability::CAP_SETGID,
+                ]
+            } else {
+                get_default_caps().into_iter().collect()
+            };
+            drop_capabilities(&caps_to_keep)?;
+
+            // Apply standard seccomp filter
+            let profile = default_profile();
+            apply_seccomp(&profile)?;
+        }
     }
 
     // Signal parent that setup is complete
