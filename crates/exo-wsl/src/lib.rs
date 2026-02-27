@@ -1,4 +1,4 @@
-//! WSL2 backend for Containment on Windows.
+//! WSL2 backend for Exo on Windows.
 //!
 //! This module handles all WSL2-specific operations when running on Windows.
 
@@ -12,6 +12,8 @@ pub mod mount;
 pub mod gpu;
 #[cfg(windows)]
 pub mod networking;
+#[cfg(windows)]
+pub mod deploy;
 
 #[cfg(windows)]
 pub use distro::{WslDistro, WslDistroManager};
@@ -23,6 +25,8 @@ pub use mount::WslMount;
 pub use gpu::{WslGpuDetector, GpuInfo, GpuVendor, WslGpuConfig};
 #[cfg(windows)]
 pub use networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, ContainerNetwork, DnsEntry, AgentNetworkConfig};
+#[cfg(windows)]
+pub use deploy::WslDeployer;
 
 #[cfg(windows)]
 use anyhow::Result;
@@ -53,8 +57,8 @@ pub struct WslConfig {
 impl Default for WslConfig {
     fn default() -> Self {
         Self {
-            distro_name: "containment".to_string(),
-            distro_path: "%LOCALAPPDATA%\\containment\\wsl".to_string(),
+            distro_name: "exo".to_string(),
+            distro_path: "%LOCALAPPDATA%\\exo\\wsl".to_string(),
             memory_limit: None,
             swap_size: Some(4),
             gpu_passthrough: true,

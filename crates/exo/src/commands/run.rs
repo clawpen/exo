@@ -1,7 +1,7 @@
 //! Run command implementation
 
 #[cfg(windows)]
-use exo_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig};
+use exo_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig, WslDeployer};
 use exo_runtime::config::ContainerConfig;
 use exo_runtime::image::{ImageManager, TagOrDigest};
 use exo_runtime::storage::OverlayfsDriver;
@@ -57,6 +57,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
     use exo_wsl::command::{ContainerSpec, MountSpec};
     use exo_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
+    use exo_wsl::deploy::WslDeployer;
     use tracing::{info, debug};
 
     info!("Running container via WSL2 backend");
@@ -64,6 +65,11 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
     // Initialize WSL environment
     let wsl_manager = WslDistroManager::new(WslConfig::default());
     wsl_manager.initialize()?;
+
+    // Deploy runtime to WSL if needed
+    let deployer = WslDeployer::new(WslConfig::default());
+    deployer.ensure_wsl_ready()?;
+    deployer.deploy_runtime()?;
 
     // Set up networking for agents
     let net_config = AgentNetworkConfig::default();
@@ -125,7 +131,7 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
     let dns_entry = DnsEntry::new(&config.name, &container_network.ip);
 
     // Write DNS entry to /etc/hosts
-    let state_dir = format!("/var/lib/containment/containers/{}", config.name);
+    let state_dir = deployer.state_dir();
     dns_entry.write_to_container(&state_dir)?;
 
     // Check GPU support
@@ -163,8 +169,12 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
         cpu_shares: config.resources.cpu_shares,
     };
 
-    // Start container
+    // Ensure state directory exists and clean up stale containers
     let wsl_cmd = WslCommand::new(WslConfig::default());
+    wsl_cmd.exec(&format!("mkdir -p {}", deployer.state_dir()))?;
+    deployer.cleanup_stale_containers()?;
+
+    // Start container
     let container_id = wsl_cmd.start_container(&container_spec)?;
 
     info!("Container started: {}", container_id);
@@ -203,7 +213,7 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
 #[cfg(not(windows))]
 async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
     use exo_runtime::{Container, ContainerStatus};
-    use containment_gpu::{GpuConfig, GpuType};
+    use exo_gpu::{GpuConfig, GpuType};
 
     // Initialize image manager and storage
     let image_manager = ImageManager::new()?;

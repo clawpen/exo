@@ -61,12 +61,12 @@ impl WslCommand {
         let config_json = serde_json::to_string(config)?;
 
         // Write config to a temp file in WSL
-        let temp_file = format!("/tmp/openclaw-{}.json", uuid::Uuid::new_v4());
+        let temp_file = format!("/tmp/exo-{}.json", uuid::Uuid::new_v4());
         self.exec(&format!("cat << 'EOF' > {}\n{}\nEOF", temp_file, config_json))?;
 
         // Run the container runtime
         let container_id = self.exec_stdout(&format!(
-            "openclaw-runtime run --config {} --id-only",
+            "exo-runtime run --config {} --id-only",
             temp_file
         ))?;
 
@@ -75,14 +75,14 @@ impl WslCommand {
 
     /// Stop a running container.
     pub fn stop_container(&self, container_id: &str) -> Result<()> {
-        self.exec(&format!("openclaw-runtime stop {}", container_id))?;
+        self.exec(&format!("exo-runtime stop {}", container_id))?;
         Ok(())
     }
 
     /// Get container status.
     pub fn container_status(&self, container_id: &str) -> Result<ContainerStatus> {
         let output = self.exec_stdout(&format!(
-            "openclaw-runtime status {} 2>/dev/null || echo 'unknown'",
+            "exo-runtime status {} 2>/dev/null || echo 'unknown'",
             container_id
         ))?;
 
@@ -101,7 +101,7 @@ impl WslCommand {
                 "--distribution",
                 &self.config.distro_name,
                 "--command",
-                &format!("openclaw-runtime logs -f {}", container_id),
+                &format!("exo-runtime logs -f {}", container_id),
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
