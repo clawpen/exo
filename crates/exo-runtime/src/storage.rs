@@ -294,12 +294,14 @@ impl OverlayfsDriver {
         );
 
         // Mount overlayfs
+        let options_cstr = std::ffi::CString::new(options.as_str())
+            .context("Invalid mount options")?;
         mount(
             Some("overlay"),
-            &overlay.merged,
+            overlay.merged.as_path(),
             Some("overlay"),
             MsFlags::MS_NOATIME,
-            Some(&options),
+            Some(options_cstr.as_c_str()),
         ).context("Failed to mount overlayfs")?;
 
         // Track the mount
@@ -311,7 +313,8 @@ impl OverlayfsDriver {
             work: overlay.work.clone(),
         };
 
-        let mut mounts = self.mounts.write().await;
+        let mut mounts = self.mounts.write()
+            .expect("mounts lock poisoned");
         mounts.push(mount_info);
 
         tracing::info!("Mounted overlayfs for container {} at {:?}", overlay.container_id, overlay.merged);
@@ -326,7 +329,8 @@ impl OverlayfsDriver {
 
         // Find and remove mount info
         let mount_info = {
-            let mut mounts = self.mounts.write().await;
+            let mut mounts = self.mounts.write()
+                .expect("mounts lock poisoned");
             mounts.iter()
                 .position(|m| m.id == container_id)
                 .map(|pos| mounts.remove(pos))

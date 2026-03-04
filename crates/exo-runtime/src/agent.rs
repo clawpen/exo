@@ -364,7 +364,7 @@ impl AgentProfile {
     #[cfg(target_os = "linux")]
     fn set_no_new_privs(&self) -> Result<()> {
         use nix::unistd::Uid;
-        const PR_SET_NO_NEW_PRIVS: u64 = 38;
+        const PR_SET_NO_NEW_PRIVS: i32 = 38;
 
         // Use prctl to set no_new_privs
         let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };

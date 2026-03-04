@@ -34,7 +34,8 @@ use std::path::{Path, PathBuf};
 use {
     nix::mount::{mount, MsFlags},
     nix::unistd::pivot_root,
-    std::fs::{create_dir_all, File},
+    nix::sys::stat::{mknod, SFlag, Mode, makedev},
+    std::fs::File,
     std::os::unix::io::AsRawFd,
 };
 
@@ -144,66 +145,66 @@ fn create_dev_nodes(rootfs: &Path) -> Result<()> {
     // Create /dev/null (mode 0666)
     let null_path = dev_dir.join("null");
     if !null_path.exists() {
-        let _ = nix::unistd::mknod(
+        let _ = mknod(
             &null_path,
-            nix::sys::stat::SFlag::S_IFCHR,
-            nix::sys::stat::Mode::S_IRWXU | nix::sys::stat::Mode::S_IRWXG | nix::sys::stat::Mode::S_IRWXO,
-            nix::sys::stat::makedev(1, 3),
+            SFlag::S_IFCHR,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+            makedev(1, 3),
         );
     }
 
     // Create /dev/zero (mode 0666)
     let zero_path = dev_dir.join("zero");
     if !zero_path.exists() {
-        let _ = nix::unistd::mknod(
+        let _ = mknod(
             &zero_path,
-            nix::sys::stat::SFlag::S_IFCHR,
-            nix::sys::stat::Mode::S_IRWXU | nix::sys::stat::Mode::S_IRWXG | nix::sys::stat::Mode::S_IRWXO,
-            nix::sys::stat::makedev(1, 5),
+            SFlag::S_IFCHR,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+            makedev(1, 5),
         );
     }
 
     // Create /dev/full (mode 0666)
     let full_path = dev_dir.join("full");
     if !full_path.exists() {
-        let _ = nix::unistd::mknod(
+        let _ = mknod(
             &full_path,
-            nix::sys::stat::SFlag::S_IFCHR,
-            nix::sys::stat::Mode::S_IRWXU | nix::sys::stat::Mode::S_IRWXG | nix::sys::stat::Mode::S_IRWXO,
-            nix::sys::stat::makedev(1, 7),
+            SFlag::S_IFCHR,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+            makedev(1, 7),
         );
     }
 
     // Create /dev/random (mode 0666)
     let random_path = dev_dir.join("random");
     if !random_path.exists() {
-        let _ = nix::unistd::mknod(
+        let _ = mknod(
             &random_path,
-            nix::sys::stat::SFlag::S_IFCHR,
-            nix::sys::stat::Mode::S_IRWXU | nix::sys::stat::Mode::S_IRWXG | nix::sys::stat::Mode::S_IRWXO,
-            nix::sys::stat::makedev(1, 8),
+            SFlag::S_IFCHR,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+            makedev(1, 8),
         );
     }
 
     // Create /dev/urandom (mode 0666)
     let urandom_path = dev_dir.join("urandom");
     if !urandom_path.exists() {
-        let _ = nix::unistd::mknod(
+        let _ = mknod(
             &urandom_path,
-            nix::sys::stat::SFlag::S_IFCHR,
-            nix::sys::stat::Mode::S_IRWXU | nix::sys::stat::Mode::S_IRWXG | nix::sys::stat::Mode::S_IRWXO,
-            nix::sys::stat::makedev(1, 9),
+            SFlag::S_IFCHR,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+            makedev(1, 9),
         );
     }
 
     // Create /dev/tty (mode 0666)
     let tty_path = dev_dir.join("tty");
     if !tty_path.exists() {
-        let _ = nix::unistd::mknod(
+        let _ = mknod(
             &tty_path,
-            nix::sys::stat::SFlag::S_IFCHR,
-            nix::sys::stat::Mode::S_IRWXU | nix::sys::stat::Mode::S_IRWXG | nix::sys::stat::Mode::S_IRWXO,
-            nix::sys::stat::makedev(5, 0),
+            SFlag::S_IFCHR,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+            makedev(5, 0),
         );
     }
 

@@ -25,7 +25,6 @@ use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use {
     libseccomp::{ScmpAction, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall},
-    std::ffi::CString,
 };
 
 /// Seccomp action for syscall rules.
@@ -66,9 +65,9 @@ impl Syscall {
     #[cfg(target_os = "linux")]
     fn as_scmp_syscall(&self) -> ScmpSyscall {
         match self {
-            Syscall::Name(name) => ScmpSyscall::by_name(name)
-                .unwrap_or_else(|_| ScmpSyscall::by_name("invalid").unwrap()),
-            Syscall::Number(num) => ScmpSyscall::from(*num),
+            Syscall::Name(name) => ScmpSyscall::from_name(name)
+                .unwrap_or_else(|_| ScmpSyscall::from_name("invalid").unwrap_or(ScmpSyscall::from(-1))),
+            Syscall::Number(num) => ScmpSyscall::from(*num as i32),
         }
     }
 
@@ -320,8 +319,8 @@ pub fn strict_profile() -> SeccompProfile {
 /// Ok(()) on success, error if filter setup fails
 #[cfg(target_os = "linux")]
 pub fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
-    // Create filter context
-    let mut ctx = ScmpFilterContext::new(profile.default_action.as_scmp_action())
+    // Create filter context with default action
+    let mut ctx = ScmpFilterContext::new_filter(profile.default_action.as_scmp_action())
         .context("Failed to create seccomp filter context")?;
 
     // Set architecture if specified
@@ -334,7 +333,7 @@ pub fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
     for syscall in &profile.allow {
         match syscall {
             Syscall::Name(name) => {
-                if let Ok(sc) = ScmpSyscall::by_name(name) {
+                if let Ok(sc) = ScmpSyscall::from_name(name) {
                     ctx.add_rule(ScmpAction::Allow, sc)
                         .with_context(|| format!("Failed to add allow rule for {}", name))?;
                     tracing::trace!("Seccomp: allow {}", name);
@@ -343,7 +342,7 @@ pub fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
                 }
             }
             Syscall::Number(num) => {
-                let sc = ScmpSyscall::from(*num);
+                let sc = ScmpSyscall::from(*num as i32);
                 ctx.add_rule(ScmpAction::Allow, sc)
                     .with_context(|| format!("Failed to add allow rule for syscall {}", num))?;
             }
@@ -354,14 +353,14 @@ pub fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
     for syscall in &profile.deny {
         match syscall {
             Syscall::Name(name) => {
-                if let Ok(sc) = ScmpSyscall::by_name(name) {
+                if let Ok(sc) = ScmpSyscall::from_name(name) {
                     ctx.add_rule(ScmpAction::Errno(libc::EPERM), sc)
                         .with_context(|| format!("Failed to add deny rule for {}", name))?;
                     tracing::trace!("Seccomp: deny {}", name);
                 }
             }
             Syscall::Number(num) => {
-                let sc = ScmpSyscall::from(*num);
+                let sc = ScmpSyscall::from(*num as i32);
                 ctx.add_rule(ScmpAction::Errno(libc::EPERM), sc)?;
             }
         }
@@ -374,14 +373,14 @@ pub fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
         let compare = rule.compare;
 
         let arg_cmp = match compare {
-            SeccompCompare::Eq(val) => ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::Eq, val),
-            SeccompCompare::NotEq(val) => ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::NotEq, val),
-            SeccompCompare::Gt(val) => ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::Greater, val),
-            SeccompCompare::Ge(val) => ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::GreaterEq, val),
-            SeccompCompare::Lt(val) => ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::Less, val),
-            SeccompCompare::Le(val) => ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::LessEq, val),
+            SeccompCompare::Eq(val) => ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::Equal, val),
+            SeccompCompare::NotEq(val) => ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::NotEqual, val),
+            SeccompCompare::Gt(val) => ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::Greater, val),
+            SeccompCompare::Ge(val) => ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::GreaterEqual, val),
+            SeccompCompare::Lt(val) => ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::Less, val),
+            SeccompCompare::Le(val) => ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::LessOrEqual, val),
             SeccompCompare::MaskedEq(val, mask) => {
-                ScmpArgCompare::new(rule.arg_num, ScmpCompareOp::MaskedEq(val, mask))
+                ScmpArgCompare::new(rule.arg_num as u32, ScmpCompareOp::MaskedEqual(mask), val)
             }
         };
 

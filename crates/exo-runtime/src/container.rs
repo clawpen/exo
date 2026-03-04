@@ -4,6 +4,8 @@ use crate::config::ContainerConfig;
 use crate::process::ContainerProcess;
 use crate::cgroup::CgroupManager;
 use crate::rootfs;
+#[cfg(target_os = "linux")]
+use crate::process::enter_container_namespaces;
 use anyhow::Result;
 use std::path::PathBuf;
 use uuid::Uuid;

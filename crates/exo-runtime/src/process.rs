@@ -18,12 +18,12 @@ use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use {
     nix::sys::wait::{waitpid, WaitStatus},
-    nix::sys::signal::Signal,
+    nix::sys::signal::{self, Signal},
     nix::unistd::{self, Pid, Uid, Gid},
-    nix::sched::{clone, CloneFlags},
+    nix::sched::{clone, unshare, CloneFlags},
     nix::mount::{mount, MsFlags},
     std::ffi::CString,
-    std::os::unix::io::AsRawFd,
+    std::os::unix::io::{AsRawFd, RawFd, OwnedFd},
     std::fs::File,
 };
 
@@ -191,7 +191,7 @@ impl ContainerProcess {
     /// Send a signal to the container process.
     #[cfg(target_os = "linux")]
     pub fn kill(&self, sig: Signal) -> Result<()> {
-        signal::kill(self.pid, sig)?;
+        nix::sys::signal::kill(self.pid, sig)?;
         Ok(())
     }
 
@@ -326,9 +326,7 @@ pub fn spawn_container_fork(
     config: &ContainerConfig,
     rootfs_path: &std::path::Path,
     options: &SpawnOptions,
-) -> Result<(Pid, std::os::unix::io::RawFd)> {
-    use std::os::unix::io::RawFd;
-
+) -> Result<(Pid, RawFd)> {
     // Create a pipe for synchronization
     let (sync_read, sync_write) = unistd::pipe()?;
 
@@ -336,19 +334,20 @@ pub fn spawn_container_fork(
     match unsafe { unistd::fork() }? {
         unistd::ForkResult::Parent { child } => {
             // Close the write end in parent
-            unistd::close(sync_write)?;
+            drop(sync_write);
             // Wait for child to complete setup
             let mut buf = [0u8; 1];
-            let _ = unistd::read(sync_read, &mut buf);
-            unistd::close(sync_read)?;
-            Ok((child, sync_read))
+            let _ = unistd::read(sync_read.as_raw_fd(), &mut buf);
+            let sync_fd = sync_read.as_raw_fd();
+            std::mem::forget(sync_read); // Don't close the fd, caller owns it
+            Ok((child, sync_fd))
         }
         unistd::ForkResult::Child => {
             // Close the read end in child
-            unistd::close(sync_read)?;
+            drop(sync_read);
 
             // Child process - set up container environment
-            if let Err(e) = container_child_init(config, rootfs_path, options, sync_write) {
+            if let Err(e) = container_child_init(config, rootfs_path, options, sync_write.as_raw_fd()) {
                 eprintln!("Container init failed: {}", e);
                 std::process::exit(1);
             }
@@ -371,7 +370,7 @@ fn container_child_init(
 ) -> Result<()> {
     // Step 1: Create user namespace FIRST (required for rootless)
     if options.use_user_namespace {
-        unistd::unshare(CloneFlags::CLONE_NEWUSER)
+        unshare(CloneFlags::CLONE_NEWUSER)
             .context("Failed to create user namespace")?;
 
         // We can't write uid_map/gid_map from inside the namespace.
@@ -405,7 +404,7 @@ fn container_child_init(
     }
 
     if !flags.is_empty() {
-        unistd::unshare(flags)
+        unshare(flags)
             .context("Failed to unshare namespaces")?;
     }
 
@@ -470,7 +469,7 @@ fn container_child_init(
 
             // Set no_new_privs if configured
             if agent_profile.no_new_privs {
-                const PR_SET_NO_NEW_PRIVS: u64 = 38;
+                const PR_SET_NO_NEW_PRIVS: i32 = 38;
                 let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
                 if ret != 0 {
                     tracing::warn!("Failed to set no_new_privs: {}", std::io::Error::last_os_error());
@@ -496,8 +495,10 @@ fn container_child_init(
     }
 
     // Signal parent that setup is complete
-    let _ = unistd::write(sync_fd, b"X");
-    let _ = unistd::close(sync_fd);
+    use std::os::unix::io::FromRawFd;
+    let sync_file = unsafe { std::fs::File::from_raw_fd(sync_fd) };
+    let _ = unistd::write(&sync_file, b"X");
+    drop(sync_file); // This closes the fd
 
     // Step 9: Execute the container command
     exec_container_command(config, &options.workdir)?;
