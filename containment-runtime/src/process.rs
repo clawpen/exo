@@ -186,11 +186,17 @@ impl ContainerProcess {
     #[cfg(target_os = "linux")]
     pub fn wait(&self) -> Result<i32> {
         use nix::sys::wait::{waitpid, WaitStatus};
+        use nix::errno::Errno;
 
         match waitpid(self.pid, None) {
             Ok(WaitStatus::Exited(_, code)) => Ok(code),
             Ok(WaitStatus::Signaled(_, signal, _)) => Ok(128 + signal as i32),
             Ok(_) => Ok(0),
+            Err(Errno::ESRCH) => {
+                // Process already exited and was reaped - treat as success
+                tracing::debug!("Process {} already reaped, assuming exit 0", self.pid);
+                Ok(0)
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -215,8 +221,16 @@ impl ContainerProcess {
     /// Terminate the process (SIGTERM).
     #[cfg(target_os = "linux")]
     pub fn terminate(&self) -> Result<()> {
-        nix::sys::signal::kill(self.pid, nix::sys::signal::Signal::SIGTERM)?;
-        Ok(())
+        use nix::errno::Errno;
+        match nix::sys::signal::kill(self.pid, nix::sys::signal::Signal::SIGTERM) {
+            Ok(()) => Ok(()),
+            Err(Errno::ESRCH) => {
+                // Process already exited - that's fine
+                tracing::debug!("Process {} already exited, ignoring terminate", self.pid);
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

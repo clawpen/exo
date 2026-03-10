@@ -187,6 +187,8 @@ impl ContainerProcess {
     /// Wait for the process to exit.
     #[cfg(target_os = "linux")]
     pub fn wait(&self) -> Result<ProcessState> {
+        use nix::errno::Errno;
+
         match waitpid(self.pid, None) {
             Ok(WaitStatus::Exited(_, exit_code)) => {
                 Ok(ProcessState::Exited(exit_code))
@@ -195,6 +197,12 @@ impl ContainerProcess {
                 Ok(ProcessState::Failed(signal as i32))
             }
             Ok(_) => Ok(ProcessState::Running),
+            Err(Errno::ESRCH) => {
+                // Process already exited and was reaped - treat as success
+                // This can happen with short-lived commands that exit before we wait
+                tracing::debug!("Process {} already reaped, assuming exit 0", self.pid);
+                Ok(ProcessState::Exited(0))
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -208,8 +216,16 @@ impl ContainerProcess {
     /// Send a signal to the container process.
     #[cfg(target_os = "linux")]
     pub fn kill(&self, sig: Signal) -> Result<()> {
-        nix::sys::signal::kill(self.pid, sig)?;
-        Ok(())
+        use nix::errno::Errno;
+        match nix::sys::signal::kill(self.pid, sig) {
+            Ok(()) => Ok(()),
+            Err(Errno::ESRCH) => {
+                // Process already exited - that's fine
+                tracing::debug!("Process {} already exited, ignoring signal", self.pid);
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Send SIGTERM to the container process.

@@ -63,7 +63,7 @@ enum Commands {
         gpu_type: Option<String>,
 
         /// Memory limit (e.g., 2G, 512M)
-        #[arg(long, value_name = "LIMIT")]
+        #[arg(short, long, value_name = "LIMIT")]
         memory: Option<String>,
 
         /// CPU limit (e.g., 2, 200%)
