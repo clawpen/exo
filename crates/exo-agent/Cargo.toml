@@ -1,0 +1,55 @@
+[package]
+name = "exo-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight agent runtime for Exo containers"
+authors = ["Claw Pen"]
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for LLM APIs
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database for memory
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+futures = "0.3"
+
+# Configuration
+toml = "0.8"
+
+# CLI (for standalone mode)
+clap = { version = "4", features = ["derive"] }
+
+# UUID for session IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Markdown rendering (optional, for formatting)
+pulldown-cmark = { version = "0.10", optional = true }
+
+[features]
+default = []
+markdown = ["pulldown-cmark"]
+
+[[bin]]
+name = "exo-agent"
+path = "src/main.rs"

@@ -42,8 +42,10 @@ pub mod storage;
 pub mod image;
 pub mod channel;
 pub mod agent;
+pub mod manager;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
+pub use manager::{ContainerManager, ContainerMetadata, ContainerJson, ContainerListJson, CONTAINER_STATE_DIR};
 pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
 pub use namespace::Namespace;
 pub use userns::{UidMap, GidMap, setup_user_namespace};

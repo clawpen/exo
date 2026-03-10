@@ -3,6 +3,10 @@ name = "exo-image"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["registry"]
+registry = ["reqwest", "async-compression", "futures-util"]
+
 [dependencies]
 tokio = { workspace = true }
 anyhow = { workspace = true }
@@ -16,7 +20,30 @@ sha256 = "1.5"
 oci-spec = "0.7"
 
 # Archive handling
-async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"] }
+tar = "0.4"
+flate2 = "1.0"
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"], optional = true }
 
 # HTTP client for pulling images
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", features = ["stream", "json"], optional = true }
+
+# SHA256 for digest verification
+sha2 = "0.10"
+
+# Hex encoding for digests
+hex = "0.4"
+
+# Base64 for auth
+base64 = "0.22"
+
+# URL encoding
+url = "2.5"
+
+# Directory detection
+dirs = "5.0"
+
+# Async utilities
+futures-util = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

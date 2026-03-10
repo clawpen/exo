@@ -105,14 +105,16 @@ fn default_hostname() -> String {
 }
 
 fn default_namespaces() -> Namespaces {
+    // Default for rootless: only user + mount + uts + ipc
+    // Network and cgroup require privileges
     Namespaces {
-        pid: true,
-        network: true,
-        ipc: true,
-        uts: true,
-        mount: true,
-        user: true,
-        cgroup: true,
+        pid: false,      // Requires fork with CLONE_NEWPID
+        network: false,  // Requires CAP_NET_ADMIN
+        ipc: true,       // Works in user namespace
+        uts: true,       // Works in user namespace
+        mount: true,     // Works in user namespace
+        user: true,      // Core of rootless containers
+        cgroup: false,   // Requires CAP_SYS_ADMIN
     }
 }
 
@@ -488,13 +490,13 @@ mod tests {
     #[test]
     fn test_namespaces_default() {
         let ns = Namespaces::default();
-        assert!(ns.user);
-        assert!(ns.pid);
-        assert!(ns.network);
-        assert!(ns.mount);
-        assert!(ns.uts);
-        assert!(ns.ipc);
-        assert!(ns.cgroup);
+        assert!(ns.user);     // Core of rootless containers
+        assert!(!ns.pid);     // Requires fork with CLONE_NEWPID
+        assert!(!ns.network); // Requires CAP_NET_ADMIN
+        assert!(ns.mount);    // Works in user namespace
+        assert!(ns.uts);      // Works in user namespace
+        assert!(ns.ipc);      // Works in user namespace
+        assert!(!ns.cgroup);  // Requires CAP_SYS_ADMIN
     }
 
     #[test]

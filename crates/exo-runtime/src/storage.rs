@@ -31,7 +31,7 @@ use uuid::Uuid;
 use std::os::unix::fs::symlink;
 
 /// Root directory for overlay2 storage.
-pub const OVERLAY2_ROOT: &str = "/var/lib/openclaw/overlay2";
+pub const OVERLAY2_ROOT: &str = "/tmp/exo-overlay2";
 
 /// Directory containing layer diffs.
 pub const DIFF_DIR: &str = "diff";

@@ -3,8 +3,8 @@
 #[cfg(windows)]
 use exo_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig, WslDeployer};
 use exo_runtime::config::ContainerConfig;
-use exo_runtime::image::{ImageManager, TagOrDigest};
-use exo_runtime::storage::OverlayfsDriver;
+use exo_runtime::{ContainerManager, ContainerMetadata};
+use exo_image::ImageManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -32,6 +32,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     // Extract flags we need later
     let detach = args.detach;
     let rm = args.rm;
+    let name = args.name.clone();
 
     // If config file is specified, load it
     let config = if let Some(config_path) = args.config {
@@ -43,18 +44,18 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         // Windows path: Use WSL2 backend
-        execute_windows(config, detach, rm).await
+        execute_windows(config, detach, rm, name).await
     }
 
     #[cfg(not(windows))]
     {
         // Linux path: Use native runtime with new features
-        execute_linux(config, detach, rm).await
+        execute_linux(config, detach, rm, name).await
     }
 }
 
 #[cfg(windows)]
-async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
+async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
     use exo_wsl::command::{ContainerSpec, MountSpec};
     use exo_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
     use exo_wsl::deploy::WslDeployer;
@@ -211,22 +212,28 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool) -> any
 }
 
 #[cfg(not(windows))]
-async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyhow::Result<()> {
+async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
     use exo_runtime::{Container, ContainerStatus};
     use exo_gpu::{GpuConfig, GpuType};
 
-    // Initialize image manager and storage
+    // Initialize container manager for persistence
+    let manager = ContainerManager::new()?;
+    
+    // Check if container name is already in use
+    if let Some(ref container_name) = name {
+        if manager.exists(container_name) {
+            anyhow::bail!("Container name '{}' is already in use", container_name);
+        }
+    }
+
+    // Initialize image manager
     let image_manager = ImageManager::new()?;
 
-    // Parse the image reference to check for foreign architecture
+    // Parse the image reference
     let image_ref = image_manager.parse_image_reference(&config.image)?;
-    let is_foreign = match &image_ref.reference {
-        TagOrDigest::Tag(_) => {
-            // Check if the tag indicates architecture
-            config.image.contains("arm64") || config.image.contains("armv7")
-        }
-        _ => false
-    };
+    
+    // Check for foreign architecture
+    let is_foreign = config.image.contains("arm64") || config.image.contains("armv7");
 
     // Validate GPU config if specified
     if let Some(gpu_cfg) = &config.gpu {
@@ -241,18 +248,34 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyho
         gpu_config.validate()?;
     }
 
-    // Pull image if not present (with registry feature)
-    #[cfg(feature = "registry")]
-    {
-        use exo_runtime::TagOrDigest;
-        if let TagOrDigest::Tag(tag) = &image_ref.reference {
-            let image_name = format!("{}/{}:{}", image_ref.registry, image_ref.repository, tag);
-            if let Err(e) = image_manager.pull(&image_name).await {
-                tracing::warn!("Failed to pull image: {}", e);
-                // Continue anyway - image might be cached
+    // Ensure rootfs is ready (this downloads/extracts if needed)
+    let rootfs = match image_manager.ensure_rootfs(&image_ref).await {
+        Ok(path) => {
+            tracing::info!("Image rootfs ready at: {:?}", path);
+            // Create a symlink so the runtime can find it
+            let link_path = std::path::PathBuf::from("/tmp/exo-images/rootfs")
+                .join(config.image.replace(['/', ':'], "_"));
+            if !link_path.exists() {
+                let _ = std::fs::create_dir_all(link_path.parent().unwrap());
+                let _ = std::os::unix::fs::symlink(&path, &link_path);
             }
+            path
         }
-    }
+        Err(e) => {
+            tracing::warn!("Could not prepare image rootfs: {}. Using fallback.", e);
+            // Will use the bind mount fallback
+            std::path::PathBuf::new()
+        }
+    };
+
+    // Create container metadata for persistence
+    let mut metadata = ContainerMetadata::new(config.name.clone(), config.clone());
+    
+    // Add port mappings to metadata for display
+    metadata.ports = config.network.port_mappings
+        .iter()
+        .map(|p| format!("{}:{}", p.host_port, p.container_port))
+        .collect();
 
     // Create and start the container
     let mut container = Container::new(config)?;
@@ -266,25 +289,45 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool) -> anyho
 
     container.start()?;
 
+    // Update metadata with running state
+    let pid = container.handle().pid.unwrap();
+    metadata.id = container.handle().id.clone();
+    metadata.set_running(pid);
+    
+    // Save container metadata (for persistence)
+    if !rm {
+        manager.save(&metadata)?;
+    }
+
     if detach {
-        let pid = container.handle().pid.unwrap();
         println!("Container running in background: {}", container.handle().id);
         println!("PID: {}", pid);
-
-        // Store container state for management
-        // In production, this would write to a state file
+        if let Some(ref container_name) = name {
+            println!("Name: {}", container_name);
+        }
 
         return Ok(());
     }
 
     // Wait for container to finish
     let status = container.wait()?;
-
-    // Clean up overlay if needed
-    let _ = image_manager.storage().remove_container_overlay(&container.handle().id);
+    
+    // Update metadata with exit status
+    if let ContainerStatus::Exited(code) = status {
+        metadata.set_stopped(Some(code));
+    } else {
+        metadata.set_stopped(None);
+    }
 
     if rm {
         container.remove()?;
+        // Also remove metadata
+        if let Some(ref container_name) = name {
+            let _ = manager.remove(container_name);
+        }
+    } else {
+        // Save final state
+        manager.save(&metadata)?;
     }
 
     match status {
@@ -375,6 +418,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
     use exo_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig};
 
     let name = args.name.unwrap_or_else(|| {
+        // Generate a name if not provided
         format!("exo-{}", uuid::Uuid::new_v4().to_string()[..8].to_string())
     });
 
@@ -384,7 +428,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         args.command.clone()
     };
 
-    let workdir = args.workdir.unwrap_or_else(|| "/app".to_string());
+    let workdir = args.workdir.unwrap_or_else(|| "/".to_string());
 
     let mut env = HashMap::new();
     for e in &args.env {

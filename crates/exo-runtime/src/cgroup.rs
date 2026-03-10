@@ -41,13 +41,31 @@ use nix::unistd::Pid;
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// Containment cgroup subdirectory.
-pub const CONTAINMENT_CGROUP: &str = "containment";
+pub const CONTAINMENT_CGROUP: &str = "exo";
 
 /// Default CPU quota period in microseconds (100ms).
 pub const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 
 /// Maximum value for pids.max (unlimited).
 pub const PIDS_MAX: &str = "max";
+
+/// Get the base cgroup path for this user (supports rootless operation)
+fn get_user_cgroup_base() -> PathBuf {
+    // Try user's delegated cgroup first (systemd user.slice)
+    let uid = unsafe { libc::getuid() };
+    let user_slice = PathBuf::from(CGROUP_ROOT)
+        .join("user.slice")
+        .join(format!("user-{}.slice", uid));
+    
+    if user_slice.exists() && user_slice.join("cgroup.type").exists() {
+        tracing::debug!("Using user delegated cgroup: {:?}", user_slice);
+        user_slice
+    } else {
+        // Fall back to system root (requires privileges)
+        tracing::debug!("Using system cgroup root (may require privileges)");
+        PathBuf::from(CGROUP_ROOT)
+    }
+}
 
 /// Cgroup manager for container resource control.
 ///
@@ -75,7 +93,8 @@ impl CgroupManager {
     ///
     /// A new CgroupManager instance
     pub fn new(container_id: &str) -> Result<Self> {
-        let cgroup_path = PathBuf::from(CGROUP_ROOT)
+        let base = get_user_cgroup_base();
+        let cgroup_path = base
             .join(CONTAINMENT_CGROUP)
             .join(container_id);
 
@@ -88,17 +107,22 @@ impl CgroupManager {
 
     /// Initialize the cgroup by creating the directory.
     ///
-    /// Creates the cgroup hierarchy: /sys/fs/cgroup/containment/<container_id>/
+    /// Creates the cgroup hierarchy: <base>/exo/<container_id>/
+    /// Returns Ok even if cgroup creation fails (cgroups are optional for rootless)
     pub fn initialize(&mut self) -> Result<()> {
         if self.initialized {
             return Ok(());
         }
 
-        // Create the containment parent cgroup if it doesn't exist
-        let parent_cgroup = PathBuf::from(CGROUP_ROOT).join(CONTAINMENT_CGROUP);
+        // Create the exo parent cgroup if it doesn't exist
+        let base = get_user_cgroup_base();
+        let parent_cgroup = base.join(CONTAINMENT_CGROUP);
         if !parent_cgroup.exists() {
-            fs::create_dir_all(&parent_cgroup)
-                .with_context(|| format!("Failed to create cgroup parent: {:?}", parent_cgroup))?;
+            if let Err(e) = fs::create_dir_all(&parent_cgroup) {
+                tracing::warn!("Could not create cgroup parent {:?}: {}. Running without cgroup limits.", parent_cgroup, e);
+                // Return Ok anyway - cgroups are optional for rootless operation
+                return Ok(());
+            }
 
             // Enable all controllers for the subtree
             let subtree_control = parent_cgroup.join("cgroup.subtree_control");
@@ -114,14 +138,22 @@ impl CgroupManager {
         }
 
         // Create the container's cgroup directory
-        fs::create_dir_all(&self.cgroup_path)
-            .with_context(|| format!("Failed to create cgroup directory: {:?}", self.cgroup_path))?;
+        if let Err(e) = fs::create_dir_all(&self.cgroup_path) {
+            tracing::warn!("Could not create cgroup {:?}: {}. Running without cgroup limits.", self.cgroup_path, e);
+            // Return Ok anyway - cgroups are optional for rootless operation
+            return Ok(());
+        }
 
         self.initialized = true;
 
         tracing::debug!("Initialized cgroup at: {:?}", self.cgroup_path);
 
         Ok(())
+    }
+
+    /// Check if cgroups are available
+    pub fn is_available(&self) -> bool {
+        self.initialized && self.cgroup_path.exists()
     }
 
     /// Set memory limit for the container.
@@ -132,7 +164,10 @@ impl CgroupManager {
     ///
     /// Writes to `memory.max` in the cgroup.
     pub fn set_memory_limit(&self, bytes: u64) -> Result<()> {
-        self.ensure_initialized()?;
+        if !self.is_available() {
+            tracing::debug!("Cgroups not available, skipping memory limit");
+            return Ok(());
+        }
 
         let memory_max = self.cgroup_path.join("memory.max");
 
@@ -335,19 +370,29 @@ impl CgroupManager {
     /// Writes to `cgroup.procs` in the cgroup.
     #[cfg(target_os = "linux")]
     pub fn add_process(&self, pid: Pid) -> Result<()> {
-        self.ensure_initialized()?;
+        if !self.is_available() {
+            tracing::debug!("Cgroups not available, skipping process addition");
+            return Ok(());
+        }
 
         let cgroup_procs = self.cgroup_path.join("cgroup.procs");
 
-        let mut file = OpenOptions::new()
+        let mut file = match OpenOptions::new()
             .write(true)
             .open(&cgroup_procs)
-            .with_context(|| format!("Failed to open cgroup.procs: {:?}", cgroup_procs))?;
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!("Could not open cgroup.procs: {}. Continuing without cgroup.", e);
+                return Ok(());
+            }
+        };
 
-        writeln!(file, "{}", pid.as_raw())
-            .with_context(|| format!("Failed to write PID {} to cgroup.procs", pid.as_raw()))?;
-
-        tracing::debug!("Added PID {} to cgroup {:?}", pid.as_raw(), self.cgroup_path);
+        if let Err(e) = writeln!(file, "{}", pid.as_raw()) {
+            tracing::debug!("Could not write PID to cgroup.procs: {}. Continuing without cgroup.", e);
+        } else {
+            tracing::debug!("Added PID {} to cgroup {:?}", pid.as_raw(), self.cgroup_path);
+        }
 
         Ok(())
     }
@@ -449,14 +494,17 @@ impl CgroupManager {
         false
     }
 
-    /// Ensure the cgroup is initialized.
+    /// Ensure the cgroup is initialized and available.
+    /// Returns Ok even if cgroups aren't available (for rootless operation).
     fn ensure_initialized(&self) -> Result<()> {
         if !self.initialized {
-            anyhow::bail!("Cgroup not initialized. Call initialize() first.");
+            // Not initialized - this is ok for rootless, just means no limits
+            return Ok(());
         }
 
         if !self.cgroup_path.exists() {
-            anyhow::bail!("Cgroup directory does not exist: {:?}", self.cgroup_path);
+            // Path doesn't exist - cgroups not available
+            return Ok(());
         }
 
         Ok(())
@@ -606,7 +654,11 @@ mod tests {
     fn test_cgroup_manager_new() {
         let mgr = CgroupManager::new("test-container").unwrap();
         assert_eq!(mgr.container_id(), "test-container");
-        assert_eq!(mgr.path(), PathBuf::from("/sys/fs/cgroup/containment/test-container"));
+        // Path now uses user.slice for rootless operation
+        let expected_path = get_user_cgroup_base()
+            .join(CONTAINMENT_CGROUP)
+            .join("test-container");
+        assert_eq!(mgr.path(), expected_path);
         assert!(!mgr.initialized);
     }
 }

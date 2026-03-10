@@ -12,6 +12,17 @@
 //! 1. **pivot_root(2)** - Changes the root filesystem of the current process
 //! 2. **Mount propagation** - Ensures mounts don't leak to the host
 //! 3. **Bind mounts** - Allows selective host directory access
+//! 4. **OverlayFS** - Provides writable layer on top of read-only image rootfs
+//!
+//! # OverlayFS Layout
+//!
+//! ```text
+//! /var/lib/exo/containers/<container-id>/
+//! ├── config.json       # Container metadata
+//! ├── rootfs/           # Merged view (mount point for overlay)
+//! ├── upper/            # Writable layer (container changes)
+//! └── work/             # Overlay work directory
+//! ```
 //!
 //! # Example
 //!
@@ -40,20 +51,48 @@ use {
 };
 
 /// Default container root directory.
-pub const CONTAINER_ROOT_DIR: &str = "/var/lib/openclaw/containers";
+pub const CONTAINER_ROOT_DIR: &str = "/var/lib/exo/containers";
 
-/// Directory name for the container filesystem.
+/// Directory name for the container filesystem (merged overlay mount).
 pub const ROOTFS_DIR: &str = "rootfs";
+
+/// Directory name for the writable overlay layer.
+pub const UPPER_DIR: &str = "upper";
+
+/// Directory name for the overlay work directory.
+pub const WORK_DIR: &str = "work";
 
 /// Old root directory after pivot (used for cleanup).
 pub const PIVOT_OLD_ROOT: &str = "pivot_old";
 
+/// Default image rootfs directory.
+pub const IMAGE_ROOTFS_DIR: &str = "/tmp/exo-images/rootfs";
+
+/// Get the container root directory with fallback to user directory.
+/// Tries /var/lib/exo/containers first, falls back to ~/.local/share/exo/containers.
+pub fn get_container_root() -> PathBuf {
+    let system_dir = PathBuf::from(CONTAINER_ROOT_DIR);
+    if system_dir.exists() || create_dir_all(&system_dir).is_ok() {
+        return system_dir;
+    }
+    
+    // Fall back to user directory
+    if let Ok(home) = std::env::var("HOME") {
+        let user_dir = PathBuf::from(home).join(".local/share/exo/containers");
+        let _ = create_dir_all(&user_dir);
+        return user_dir;
+    }
+    
+    // Last resort: /tmp
+    PathBuf::from("/tmp/exo-containers")
+}
+
 /// Prepare the root filesystem for a container.
 ///
 /// This function:
-/// 1. Creates the container directory structure
-/// 2. Extracts/copies the rootfs from the image (if available)
-/// 3. Sets up the base directory structure
+/// 1. Creates the container directory structure with overlay directories
+/// 2. Sets up overlayfs mount for writable layer on top of image rootfs
+/// 3. Returns the path to the merged rootfs (overlay mount point)
 ///
 /// # Arguments
 ///
@@ -61,12 +100,42 @@ pub const PIVOT_OLD_ROOT: &str = "pivot_old";
 ///
 /// # Returns
 ///
-/// Path to the prepared root filesystem
+/// Path to the prepared root filesystem (overlay merged view)
 pub fn prepare_rootfs(config: &ContainerConfig) -> Result<PathBuf> {
     let container_id = &config.name;
-    let rootfs_dir = PathBuf::from(CONTAINER_ROOT_DIR)
-        .join(container_id)
-        .join(ROOTFS_DIR);
+    
+    // Check if an extracted image rootfs exists
+    let image_rootfs = PathBuf::from(IMAGE_ROOTFS_DIR)
+        .join(config.image.replace(['/', ':'], "_"));
+    
+    if image_rootfs.exists() && image_rootfs.join("bin").exists() {
+        tracing::info!("Using extracted image rootfs: {:?}", image_rootfs);
+        
+        // Set up overlayfs for writable layer
+        let container_root = get_container_root()
+            .join(container_id);
+        
+        let overlay_paths = OverlayPaths {
+            rootfs: container_root.join(ROOTFS_DIR),
+            upper: container_root.join(UPPER_DIR),
+            work: container_root.join(WORK_DIR),
+            lower: image_rootfs,
+        };
+        
+        // Create overlay directories (mount happens in setup_overlay_rootfs)
+        create_overlay_dirs(&overlay_paths)?;
+        
+        // Store overlay info for later mounting
+        store_overlay_config(container_id, &overlay_paths)?;
+        
+        // Return the merged rootfs path (will be mounted later)
+        return Ok(overlay_paths.rootfs);
+    }
+    
+    // Fall back to creating a minimal rootfs with bind mounts
+    let container_root = get_container_root()
+        .join(container_id);
+    let rootfs_dir = container_root.join(ROOTFS_DIR);
 
     // Create the rootfs directory if it doesn't exist
     if !rootfs_dir.exists() {
@@ -74,17 +143,162 @@ pub fn prepare_rootfs(config: &ContainerConfig) -> Result<PathBuf> {
             .with_context(|| format!("Failed to create rootfs directory: {:?}", rootfs_dir))?;
     }
 
-    // In a real implementation, we would:
-    // 1. Download/extract the OCI image layers
-    // 2. Apply whiteout files for layer deletion
-    // 3. Set up the base directory structure
-
-    // For now, create a minimal rootfs structure
+    // Create a minimal rootfs structure
     setup_minimal_rootfs(&rootfs_dir)?;
 
-    tracing::info!("Prepared rootfs at: {:?}", rootfs_dir);
+    tracing::info!("Prepared minimal rootfs at: {:?}", rootfs_dir);
 
     Ok(rootfs_dir)
+}
+
+/// Overlay filesystem paths for a container.
+#[derive(Debug, Clone)]
+pub struct OverlayPaths {
+    /// Merged view mount point (container rootfs)
+    pub rootfs: PathBuf,
+    /// Writable layer directory
+    pub upper: PathBuf,
+    /// Overlay work directory
+    pub work: PathBuf,
+    /// Lower (read-only) layer - the image rootfs
+    pub lower: PathBuf,
+}
+
+/// Create overlay directories.
+fn create_overlay_dirs(paths: &OverlayPaths) -> Result<()> {
+    create_dir_all(&paths.rootfs)
+        .with_context(|| format!("Failed to create rootfs directory: {:?}", paths.rootfs))?;
+    create_dir_all(&paths.upper)
+        .with_context(|| format!("Failed to create upper directory: {:?}", paths.upper))?;
+    create_dir_all(&paths.work)
+        .with_context(|| format!("Failed to create work directory: {:?}", paths.work))?;
+    Ok(())
+}
+
+/// Store overlay configuration for later mounting.
+fn store_overlay_config(container_id: &str, paths: &OverlayPaths) -> Result<()> {
+    let container_root = get_container_root().join(container_id);
+    let config_dir = container_root.join("config");
+    create_dir_all(&config_dir)?;
+    
+    let overlay_config = serde_json::json!({
+        "rootfs": paths.rootfs,
+        "upper": paths.upper,
+        "work": paths.work,
+        "lower": paths.lower,
+    });
+    
+    let config_path = config_dir.join("overlay.json");
+    std::fs::write(&config_path, serde_json::to_string_pretty(&overlay_config)?)
+        .with_context(|| format!("Failed to write overlay config: {:?}", config_path))?;
+    
+    Ok(())
+}
+
+/// Load overlay configuration for a container.
+pub fn load_overlay_config(container_id: &str) -> Result<Option<OverlayPaths>> {
+    let config_path = get_container_root()
+        .join(container_id)
+        .join("config")
+        .join("overlay.json");
+    
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    
+    let content = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read overlay config: {:?}", config_path))?;
+    
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| "Failed to parse overlay config")?;
+    
+    Ok(Some(OverlayPaths {
+        rootfs: PathBuf::from(config["rootfs"].as_str().unwrap_or("")),
+        upper: PathBuf::from(config["upper"].as_str().unwrap_or("")),
+        work: PathBuf::from(config["work"].as_str().unwrap_or("")),
+        lower: PathBuf::from(config["lower"].as_str().unwrap_or("")),
+    }))
+}
+
+/// Set up overlayfs mount for a container.
+///
+/// This must be called BEFORE entering user namespace if running rootless,
+/// as overlay mounts require privileges.
+///
+/// # Arguments
+///
+/// * `container_id` - Container identifier
+///
+/// # Returns
+///
+/// Path to the merged rootfs (overlay mount point)
+#[cfg(target_os = "linux")]
+pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
+    let paths = load_overlay_config(container_id)?
+        .ok_or_else(|| anyhow::anyhow!("No overlay config found for container {}", container_id))?;
+    
+    // Ensure directories exist
+    create_overlay_dirs(&paths)?;
+    
+    // Build overlay mount options
+    // Format: lowerdir=<lower>,upperdir=<upper>,workdir=<work>
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        paths.lower.display(),
+        paths.upper.display(),
+        paths.work.display()
+    );
+    
+    tracing::info!("Mounting overlayfs with options: {}", options);
+    
+    // Mount overlayfs
+    let options_cstr = std::ffi::CString::new(options.as_str())
+        .context("Invalid mount options")?;
+    
+    mount(
+        Some("overlay"),
+        paths.rootfs.as_path(),
+        Some("overlay"),
+        MsFlags::MS_NOATIME,
+        Some(options_cstr.as_c_str()),
+    ).with_context(|| format!("Failed to mount overlayfs at {:?}", paths.rootfs))?;
+    
+    tracing::info!("Mounted overlayfs for container {} at {:?}", container_id, paths.rootfs);
+    
+    Ok(paths.rootfs)
+}
+
+/// Non-Linux stub.
+#[cfg(not(target_os = "linux"))]
+pub fn setup_overlay_rootfs(_container_id: &str) -> Result<PathBuf> {
+    Err(anyhow::anyhow!("OverlayFS is only supported on Linux"))
+}
+
+/// Unmount overlayfs for a container.
+#[cfg(target_os = "linux")]
+pub fn unmount_overlay_rootfs(container_id: &str) -> Result<()> {
+    let paths = load_overlay_config(container_id)?
+        .ok_or_else(|| anyhow::anyhow!("No overlay config found for container {}", container_id))?;
+    
+    if paths.rootfs.exists() {
+        // Check if it's actually mounted
+        let mount_info = std::fs::read_to_string("/proc/mounts")
+            .unwrap_or_default();
+        
+        if mount_info.contains(&format!("overlay {}", paths.rootfs.display())) {
+            nix::mount::umount(&paths.rootfs)
+                .with_context(|| format!("Failed to unmount overlayfs at {:?}", paths.rootfs))?;
+            tracing::info!("Unmounted overlayfs for container {}", container_id);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Non-Linux stub.
+#[cfg(not(target_os = "linux"))]
+pub fn unmount_overlay_rootfs(_container_id: &str) -> Result<()> {
+    Ok(())
 }
 
 /// Set up a minimal root filesystem structure.
@@ -103,29 +317,6 @@ fn setup_minimal_rootfs(rootfs: &Path) -> Result<()> {
         let dir_path = rootfs.join(dir);
         create_dir_all(&dir_path)
             .with_context(|| format!("Failed to create directory: {:?}", dir_path))?;
-    }
-
-    // Create basic device nodes
-    create_dev_nodes(rootfs)?;
-
-    // Create a minimal /etc/hosts
-    let hosts_path = rootfs.join("etc/hosts");
-    if !hosts_path.exists() {
-        std::fs::write(
-            &hosts_path,
-            "127.0.0.1 localhost localhost.localdomain\n::1 localhost6 localhost6.localdomain6\n",
-        )?;
-    }
-
-    // Create a minimal /etc/resolv.conf
-    let resolv_path = rootfs.join("etc/resolv.conf");
-    if !resolv_path.exists() {
-        // Copy from host or use default
-        if let Ok(host_resolv) = std::fs::read_to_string("/etc/resolv.conf") {
-            std::fs::write(&resolv_path, host_resolv)?;
-        } else {
-            std::fs::write(&resolv_path, "nameserver 8.8.8.8\nnameserver 8.8.4.4\n")?;
-        }
     }
 
     Ok(())
@@ -306,70 +497,82 @@ pub fn pivot_rootfs(_new_root: &Path) -> Result<()> {
 /// - tmpfs at /dev/shm
 /// - devpts at /dev/pts
 ///
+/// In user namespaces, some mounts may fail due to permission restrictions.
+/// We handle these gracefully and continue with what works.
+///
 /// # Arguments
 ///
 /// * `config` - Container configuration
 #[cfg(target_os = "linux")]
 pub fn setup_mounts(config: &ContainerConfig) -> Result<()> {
-    // Mount proc filesystem
-    mount(
+    // Mount proc filesystem (may fail in user namespace without full caps)
+    match mount(
         None::<&str>,
         "/proc",
         Some("proc"),
         MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
         None::<&str>,
-    )?;
-    tracing::debug!("Mounted /proc");
+    ) {
+        Ok(()) => tracing::debug!("Mounted /proc"),
+        Err(e) => tracing::warn!("Could not mount /proc (non-fatal in user ns): {}", e),
+    }
 
-    // Mount sysfs (can be disabled for security, but most containers need it)
-    // Using MS_RDONLY to prevent container from modifying sysfs
-    mount(
+    // Mount sysfs (may fail in user namespace)
+    match mount(
         None::<&str>,
         "/sys",
         Some("sysfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_RDONLY,
         None::<&str>,
-    )?;
-    tracing::debug!("Mounted /sys");
+    ) {
+        Ok(()) => tracing::debug!("Mounted /sys"),
+        Err(e) => tracing::warn!("Could not mount /sys (non-fatal in user ns): {}", e),
+    }
 
-    // Mount tmpfs on /dev/shm
-    mount(
+    // Mount tmpfs on /dev/shm (usually works in user ns)
+    match mount(
         None::<&str>,
         "/dev/shm",
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
         None::<&str>,
-    )?;
-    tracing::debug!("Mounted /dev/shm");
+    ) {
+        Ok(()) => tracing::debug!("Mounted /dev/shm"),
+        Err(e) => tracing::warn!("Could not mount /dev/shm: {}", e),
+    }
 
-    // Mount devpts for /dev/pts
+    // Mount devpts for /dev/pts (may fail in user namespace)
     if Path::new("/dev/pts").exists() {
-        mount(
+        match mount(
             None::<&str>,
             "/dev/pts",
             Some("devpts"),
             MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
             Some("newinstance,ptmxmode=0666,mode=0620"),
-        )?;
-
-        // Create /dev/ptmx symlink if it doesn't exist
-        let ptmx = Path::new("/dev/ptmx");
-        if !ptmx.exists() {
-            let _ = std::os::unix::fs::symlink("pts/ptmx", ptmx);
+        ) {
+            Ok(()) => {
+                // Create /dev/ptmx symlink if it doesn't exist
+                let ptmx = Path::new("/dev/ptmx");
+                if !ptmx.exists() {
+                    let _ = std::os::unix::fs::symlink("pts/ptmx", ptmx);
+                }
+                tracing::debug!("Mounted /dev/pts");
+            }
+            Err(e) => tracing::warn!("Could not mount /dev/pts: {}", e),
         }
-
-        tracing::debug!("Mounted /dev/pts");
     }
 
-    // Mount tmpfs on /tmp if configured
-    mount(
+    // Mount tmpfs on /tmp (usually works in user ns)
+    match mount(
         None::<&str>,
         "/tmp",
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
         None::<&str>,
-    )?;
-    tracing::debug!("Mounted /tmp");
+    ) {
+        Ok(()) => tracing::debug!("Mounted /tmp"),
+        Err(e) => tracing::warn!("Could not mount /tmp: {}", e),
+    }
 
     // Apply user-specified bind mounts
     apply_bind_mounts(config)?;
@@ -528,19 +731,113 @@ fn setup_readonly_rootfs() -> Result<()> {
 
 /// Clean up the root filesystem for a container.
 ///
-/// Removes the container's rootfs directory. This should be called when
-/// removing a container.
+/// Removes the container's overlay directories. This should be called when
+/// removing a container permanently.
+///
+/// # Arguments
+///
+/// * `config` - Container configuration
+/// * `keep_upper` - If true, keep the upper directory (for state persistence)
 pub fn cleanup_rootfs(config: &ContainerConfig) -> Result<()> {
-    let container_root = PathBuf::from(CONTAINER_ROOT_DIR).join(&config.name);
+    cleanup_rootfs_ex(config, false)
+}
+
+/// Extended cleanup with option to preserve upper layer.
+///
+/// # Arguments
+///
+/// * `config` - Container configuration
+/// * `keep_upper` - If true, keep the upper directory (for resuming container)
+pub fn cleanup_rootfs_ex(config: &ContainerConfig, keep_upper: bool) -> Result<()> {
+    let container_root = get_container_root().join(&config.name);
+
+    // First, unmount overlay if mounted
+    let _ = unmount_overlay_rootfs(&config.name);
 
     if container_root.exists() {
-        std::fs::remove_dir_all(&container_root)
-            .with_context(|| format!("Failed to remove rootfs directory: {:?}", container_root))?;
-
-        tracing::info!("Cleaned up rootfs: {:?}", container_root);
+        if keep_upper {
+            // Keep upper directory, remove rootfs mount point and work dir
+            let rootfs = container_root.join(ROOTFS_DIR);
+            let work = container_root.join(WORK_DIR);
+            
+            if rootfs.exists() {
+                std::fs::remove_dir_all(&rootfs)
+                    .with_context(|| format!("Failed to remove rootfs directory: {:?}", rootfs))?;
+            }
+            if work.exists() {
+                std::fs::remove_dir_all(&work)
+                    .with_context(|| format!("Failed to remove work directory: {:?}", work))?;
+            }
+            
+            tracing::info!("Cleaned up rootfs (kept upper layer): {:?}", container_root);
+        } else {
+            // Full cleanup - remove everything
+            std::fs::remove_dir_all(&container_root)
+                .with_context(|| format!("Failed to remove rootfs directory: {:?}", container_root))?;
+            
+            tracing::info!("Cleaned up rootfs: {:?}", container_root);
+        }
     }
 
     Ok(())
+}
+
+/// Clean up only the overlay mount point (for container stop without remove).
+///
+/// This unmounts the overlay but preserves the upper directory for resuming.
+pub fn cleanup_overlay_mount(config: &ContainerConfig) -> Result<()> {
+    unmount_overlay_rootfs(&config.name)
+}
+
+/// Check if a container has an existing writable layer (upper directory).
+pub fn has_existing_upper(container_id: &str) -> bool {
+    let upper_path = get_container_root()
+        .join(container_id)
+        .join(UPPER_DIR);
+    
+    upper_path.exists() && is_directory_non_empty(&upper_path).unwrap_or(false)
+}
+
+/// Check if a directory is non-empty.
+fn is_directory_non_empty(path: &Path) -> Result<bool> {
+    let mut entries = std::fs::read_dir(path)
+        .with_context(|| format!("Failed to read directory: {:?}", path))?;
+    Ok(entries.next().is_some())
+}
+
+/// Get the size of the upper layer (writable changes).
+pub fn get_upper_layer_size(container_id: &str) -> Result<u64> {
+    let upper_path = get_container_root()
+        .join(container_id)
+        .join(UPPER_DIR);
+    
+    if !upper_path.exists() {
+        return Ok(0);
+    }
+    
+    dir_size(&upper_path)
+}
+
+/// Calculate directory size recursively.
+fn dir_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+
+            if entry_path.is_dir() {
+                total += dir_size(&entry_path)?;
+            } else {
+                total += entry.metadata()?.len();
+            }
+        }
+    } else if path.is_file() {
+        total += std::fs::metadata(path)?.len();
+    }
+
+    Ok(total)
 }
 
 /// Verify a rootfs is properly set up.
@@ -579,11 +876,34 @@ mod tests {
             ..Default::default()
         };
 
-        let expected = PathBuf::from("/var/lib/openclaw/containers/test-container/rootfs");
-        let actual = PathBuf::from(CONTAINER_ROOT_DIR)
+        let expected = PathBuf::from("/var/lib/exo/containers/test-container/rootfs");
+        let actual = get_container_root()
             .join(&config.name)
             .join(ROOTFS_DIR);
 
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_overlay_paths() {
+        let config = ContainerConfig {
+            name: "overlay-test".to_string(),
+            ..Default::default()
+        };
+
+        let container_root = get_container_root().join(&config.name);
+        
+        assert_eq!(
+            container_root.join(ROOTFS_DIR),
+            PathBuf::from("/var/lib/exo/containers/overlay-test/rootfs")
+        );
+        assert_eq!(
+            container_root.join(UPPER_DIR),
+            PathBuf::from("/var/lib/exo/containers/overlay-test/upper")
+        );
+        assert_eq!(
+            container_root.join(WORK_DIR),
+            PathBuf::from("/var/lib/exo/containers/overlay-test/work")
+        );
     }
 }

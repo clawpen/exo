@@ -58,14 +58,21 @@ impl ContainerHandle {
 
     /// Get the container root directory.
     pub fn root_dir(&self) -> PathBuf {
-        PathBuf::from(format!("/var/lib/openclaw/containers/{}", self.id))
+        crate::rootfs::get_container_root().join(&self.name)
     }
 
-    /// Get the rootfs path for this container.
+    /// Get the rootfs path for this container (overlay merged view).
     pub fn rootfs_path(&self) -> PathBuf {
-        PathBuf::from(crate::rootfs::CONTAINER_ROOT_DIR)
+        crate::rootfs::get_container_root()
             .join(&self.name)
             .join(crate::rootfs::ROOTFS_DIR)
+    }
+
+    /// Get the upper layer path (writable layer).
+    pub fn upper_path(&self) -> PathBuf {
+        crate::rootfs::get_container_root()
+            .join(&self.name)
+            .join(crate::rootfs::UPPER_DIR)
     }
 
     /// Get the cgroup path for this container.
@@ -73,6 +80,16 @@ impl ContainerHandle {
         PathBuf::from(crate::cgroup::CGROUP_ROOT)
             .join(crate::cgroup::CONTAINMENT_CGROUP)
             .join(&self.name)
+    }
+
+    /// Check if container has existing writable layer.
+    pub fn has_existing_upper(&self) -> bool {
+        rootfs::has_existing_upper(&self.name)
+    }
+
+    /// Get the size of the writable layer.
+    pub fn upper_layer_size(&self) -> Result<u64> {
+        rootfs::get_upper_layer_size(&self.name)
     }
 }
 
@@ -238,9 +255,12 @@ impl Container {
             let _ = cgroup.destroy();
         }
 
+        // Unmount overlay but keep upper layer for persistence
+        rootfs::cleanup_overlay_mount(&self.handle.config)?;
+
         self.process = None;
 
-        tracing::info!("Container {} stopped", self.handle.name);
+        tracing::info!("Container {} stopped (upper layer preserved)", self.handle.name);
 
         Ok(())
     }
@@ -262,9 +282,12 @@ impl Container {
             let _ = cgroup.destroy();
         }
 
+        // Unmount overlay but keep upper layer for persistence
+        rootfs::cleanup_overlay_mount(&self.handle.config)?;
+
         self.process = None;
 
-        tracing::info!("Container {} killed", self.handle.name);
+        tracing::info!("Container {} killed (upper layer preserved)", self.handle.name);
 
         Ok(())
     }
@@ -339,14 +362,17 @@ impl Container {
     }
 
     /// Remove the container (clean up resources).
+    ///
+    /// This permanently removes the container including all its writable layer changes.
     pub fn remove(&mut self) -> Result<()> {
         if self.is_running() {
             self.stop()?;
         }
 
-        // Clean up rootfs
+        // Clean up rootfs including upper layer (full cleanup)
         rootfs::cleanup_rootfs(&self.handle.config)?;
 
+        // Remove container root directory if it still exists
         let root_dir = self.handle.root_dir();
         if root_dir.exists() {
             std::fs::remove_dir_all(root_dir)?;
@@ -354,7 +380,7 @@ impl Container {
 
         self.handle.status = ContainerStatus::Removing;
 
-        tracing::info!("Container {} removed", self.handle.name);
+        tracing::info!("Container {} removed (upper layer deleted)", self.handle.name);
 
         Ok(())
     }

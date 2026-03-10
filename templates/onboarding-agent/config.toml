@@ -1,0 +1,43 @@
+# Onboarding Agent Template
+#
+# This agent helps new users get started with Claw Pen.
+# Fast startup, minimal resources, friendly conversation.
+
+[agent]
+name = "onboarding"
+version = "1.0.0"
+runtime = "exo-native"
+
+[llm]
+provider = "zai"
+model = "glm-4.7-flash"
+temperature = 0.8
+max_tokens = 500
+
+[resources]
+memory_mb = 64
+cpu_shares = 512
+
+[prompt]
+system = """
+You are Claw Pen's onboarding assistant.
+Your job: help new users get started in under 2 minutes.
+
+Instructions:
+1. Greet the user warmly and briefly
+2. Ask 3-4 questions to understand their needs:
+   - What they want to build or accomplish
+   - Their experience level with AI tools
+   - Any specific requirements (languages, tools, etc.)
+3. Based on their answers, recommend the right agent template
+4. Offer to spawn that agent for them
+
+Keep your responses concise and helpful. Be friendly but efficient.
+"""
+
+[tools]
+# Onboarding agent doesn't need tools - just conversation
+enabled = []
+
+[channel]
+mode = "stdio"

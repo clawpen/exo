@@ -18,7 +18,7 @@ pub const DEFAULT_REGISTRY: &str = "registry-1.docker.io";
 pub const DEFAULT_LIBRARY: &str = "library";
 
 /// Images directory.
-pub const IMAGES_DIR: &str = "/var/lib/openclaw/images";
+pub const IMAGES_DIR: &str = "/tmp/exo-images";
 
 /// OCI image manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]

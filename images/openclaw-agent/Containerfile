@@ -1,0 +1,39 @@
+# OpenClaw Agent Image
+# Minimal image for running OpenClaw agents
+
+FROM node:22-slim
+
+# Install essential dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    git \
+    jq \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy OpenClaw from build context
+COPY openclaw/ /usr/local/lib/node_modules/openclaw/
+
+# Create agent workspace
+WORKDIR /agent
+RUN mkdir -p /agent/memory /agent/.openclaw
+
+# Copy default workspace files
+COPY workspace/ /agent/
+
+# Environment
+ENV OPENCLAW_WORKSPACE=/agent
+ENV NODE_ENV=production
+ENV HOME=/root
+ENV PATH="/usr/local/lib/node_modules/openclaw/bin:${PATH}"
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-18789}/health || exit 1
+
+# Expose gateway port
+EXPOSE 18789
+
+# Start OpenClaw gateway
+CMD ["node", "/usr/local/lib/node_modules/openclaw/dist/cli.js", "gateway", "run", "--workspace", "/agent"]

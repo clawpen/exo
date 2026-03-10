@@ -1,0 +1,59 @@
+# Exo Agent Containerfile
+# Minimal container for the exo-agent runtime
+#
+# Build: docker build -t exo-agent:latest -f Containerfile .
+# Run:   docker run -it --rm -e ZAI_API_KEY=xxx exo-agent:latest
+
+# ============================================
+# Stage 1: Build
+# ============================================
+FROM rust:1.75-alpine AS builder
+
+RUN apk add --no-cache musl-dev sqlite-dev
+
+WORKDIR /build
+
+# Copy exo-agent as standalone (not workspace member)
+COPY crates/exo-agent ./exo-agent
+
+WORKDIR /build/exo-agent
+
+# Build release binary
+RUN cargo build --release
+
+# ============================================
+# Stage 2: Runtime
+# ============================================
+FROM alpine:3.19
+
+# Install minimal runtime deps
+RUN apk add --no-cache ca-certificates sqlite-libs
+
+# Create app user
+RUN adduser -D -u 1000 agent
+
+# Create directories
+RUN mkdir -p /app /data /workspace && \
+    chown -R agent:agent /app /data /workspace
+
+WORKDIR /workspace
+
+# Copy binary from builder
+COPY --from=builder /build/exo-agent/target/release/exo-agent /app/exo-agent
+
+# Copy default config (optional)
+COPY images/exo-agent/agent.toml /app/config.toml
+
+# Switch to non-root
+USER agent
+
+# Default environment
+ENV RUST_LOG=info
+ENV EXO_AGENT_CONFIG=/app/config.toml
+
+# Expose workspace
+VOLUME ["/workspace", "/data"]
+
+# Run agent
+ENTRYPOINT ["/app/exo-agent"]
+CMD ["--config", "/app/config.toml"]

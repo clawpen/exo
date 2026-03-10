@@ -7,8 +7,12 @@ edition.workspace = true
 name = "exo"
 path = "src/main.rs"
 
+[features]
+default = []
+registry = ["exo-image/registry"]
+
 [dependencies]
-exo-runtime = { path = "../exo-runtime", features = ["registry"] }
+exo-runtime = { path = "../exo-runtime" }
 exo-gpu = { path = "../exo-gpu" }
 exo-image = { path = "../exo-image" }
 tokio = { workspace = true }
@@ -25,3 +29,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
 exo-wsl = { path = "../exo-wsl" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }

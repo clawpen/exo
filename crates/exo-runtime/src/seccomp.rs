@@ -253,6 +253,8 @@ pub fn default_profile() -> SeccompProfile {
         "memfd_create", "kexec_file_load", "bpf", "execveat", "userfaultfd",
         "membarrier", "mlock2", "copy_file_range", "preadv2", "pwritev2",
         "pkey_mprotect", "pkey_alloc", "pkey_free", "statx",
+        // Directory operations
+        "chdir", "fchdir", "mkdir", "rmdir", "getcwd",
         // Network syscalls
         "socketcall", "bind", "listen", "accept", "connect", "getsockname",
         "getpeername", "sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown",

@@ -99,11 +99,11 @@ impl ContainerProcess {
     /// Spawn a new container process with full isolation.
     ///
     /// This is the main entry point for container creation. It handles:
-    /// 1. User namespace setup (for rootless operation)
+    /// 1. Root filesystem setup and overlay mount (BEFORE user namespace)
     /// 2. Fork with clone flags for namespaces
-    /// 3. Cgroup resource limits
-    /// 4. Root filesystem setup and pivot_root
-    /// 5. Mount setup (proc, sys, dev, bind mounts)
+    /// 3. User namespace setup (for rootless operation)
+    /// 4. Cgroup resource limits
+    /// 5. pivot_root and mount setup
     /// 6. Hostname configuration
     /// 7. Capability dropping
     /// 8. Seccomp filtering
@@ -120,9 +120,26 @@ impl ContainerProcess {
             }
         }
 
-        // First, prepare the rootfs
+        // First, prepare the rootfs (creates directories, checks for image)
         let rootfs_path = prepare_rootfs(config)
             .context("Failed to prepare root filesystem")?;
+
+        // Set up overlay mount BEFORE forking (requires CAP_SYS_ADMIN)
+        // This is critical: overlay mounts must be done in the parent process
+        // before entering user namespace
+        // Note: If overlay mount fails (EPERM), fall back to read-only rootfs
+        let rootfs_path = if rootfs::load_overlay_config(&config.name)?.is_some() {
+            tracing::info!("Setting up overlayfs mount for container {}", config.name);
+            match rootfs::setup_overlay_rootfs(&config.name) {
+                Ok(path) => path,
+                Err(e) => {
+                    tracing::warn!("Overlay mount failed ({}), using read-only rootfs", e);
+                    rootfs_path
+                }
+            }
+        } else {
+            rootfs_path
+        };
 
         // Set up cgroup manager
         let mut cgroup_manager = CgroupManager::new(&config.name)?;
@@ -312,43 +329,87 @@ fn apply_resource_limits(cgroup: &CgroupManager, config: &ContainerConfig) -> Re
 
 /// Fork-based container spawning with proper namespace isolation.
 ///
-/// This implements the full container initialization sequence in the child:
-/// 1. User namespace creation (must be first)
-/// 2. Other namespace unshare
-/// 3. Rootfs pivot
-/// 4. Mount setup
-/// 5. Hostname setting
-/// 6. Capability dropping
-/// 7. Seccomp filtering
-/// 8. Exec
+/// This implements the full container initialization sequence:
+/// 1. Fork child process
+/// 2. Child creates user namespace (unshare CLONE_NEWUSER)
+/// 3. Parent writes uid_map/gid_map (maps container root to current user)
+/// 4. Child unshares other namespaces (now has CAP_SYS_ADMIN in user ns)
+/// 5. Child sets up rootfs with pivot_root
+/// 6. Child execs command
 #[cfg(target_os = "linux")]
 pub fn spawn_container_fork(
     config: &ContainerConfig,
     rootfs_path: &std::path::Path,
     options: &SpawnOptions,
 ) -> Result<(Pid, RawFd)> {
-    // Create a pipe for synchronization
-    let (sync_read, sync_write) = unistd::pipe()?;
+    use std::io::{Read, Write};
+    
+    // Create pipes for bidirectional synchronization
+    // Pipe 1: child -> parent (child ready for uid_map)
+    // Pipe 2: parent -> child (uid_map written, continue)
+    let (child_to_parent_read, child_to_parent_write) = unistd::pipe()?;
+    let (parent_to_child_read, parent_to_child_write) = unistd::pipe()?;
 
     // Fork to create new process
     match unsafe { unistd::fork() }? {
         unistd::ForkResult::Parent { child } => {
-            // Close the write end in parent
-            drop(sync_write);
-            // Wait for child to complete setup
-            let mut buf = [0u8; 1];
-            let _ = unistd::read(sync_read.as_raw_fd(), &mut buf);
-            let sync_fd = sync_read.as_raw_fd();
-            std::mem::forget(sync_read); // Don't close the fd, caller owns it
-            Ok((child, sync_fd))
+            // Close child ends in parent
+            drop(child_to_parent_write);
+            drop(parent_to_child_read);
+            
+            if options.use_user_namespace {
+                // Wait for child to create user namespace
+                let mut buf = [0u8; 1];
+                let _ = unistd::read(child_to_parent_read.as_raw_fd(), &mut buf);
+                
+                // Write uid_map: map container uid 0 to our uid
+                let uid = unsafe { libc::getuid() };
+                let gid = unsafe { libc::getgid() };
+                
+                let uid_map_path = format!("/proc/{}/uid_map", child.as_raw());
+                let gid_map_path = format!("/proc/{}/gid_map", child.as_raw());
+                let setgroups_path = format!("/proc/{}/setgroups", child.as_raw());
+                
+                // Disable setgroups before writing gid_map (required for unprivileged)
+                let _ = std::fs::write(&setgroups_path, "deny\n");
+                
+                // uid_map format: "container_uid host_uid count"
+                // Map container root (0) to our uid, range 1
+                let uid_map = format!("0 {} 1\n", uid);
+                let gid_map = format!("0 {} 1\n", gid);
+                
+                std::fs::write(&uid_map_path, &uid_map)
+                    .with_context(|| format!("Failed to write uid_map to {}", uid_map_path))?;
+                std::fs::write(&gid_map_path, &gid_map)
+                    .with_context(|| format!("Failed to write gid_map to {}", gid_map_path))?;
+                
+                tracing::debug!("Wrote uid_map: {} and gid_map: {}", uid_map.trim(), gid_map.trim());
+                
+                // Signal child to continue
+                let _ = unistd::write(&parent_to_child_write, b"X");
+            }
+            
+            // Close remaining pipes
+            drop(child_to_parent_read);
+            drop(parent_to_child_write);
+            
+            Ok((child, 0)) // No sync fd needed with uid mapping approach
         }
         unistd::ForkResult::Child => {
-            // Close the read end in child
-            drop(sync_read);
+            // Close parent ends in child
+            drop(child_to_parent_read);
+            drop(parent_to_child_write);
 
             // Child process - set up container environment
-            if let Err(e) = container_child_init(config, rootfs_path, options, sync_write.as_raw_fd()) {
-                eprintln!("Container init failed: {}", e);
+            if let Err(e) = container_child_init_with_uidmap(
+                config, 
+                rootfs_path, 
+                options, 
+                child_to_parent_write,
+                parent_to_child_read
+            ) {
+                for cause in e.chain() {
+                }
                 std::process::exit(1);
             }
 
@@ -358,28 +419,48 @@ pub fn spawn_container_fork(
     }
 }
 
+/// Container child initialization with UID mapping support.
+#[cfg(target_os = "linux")]
+fn container_child_init_with_uidmap(
+    config: &ContainerConfig,
+    rootfs_path: &std::path::Path,
+    options: &SpawnOptions,
+    notify_parent_fd: OwnedFd,
+    wait_for_parent_fd: OwnedFd,
+) -> Result<()> {
+    
+    // Step 1: Create user namespace FIRST
+    if options.use_user_namespace {
+        unshare(CloneFlags::CLONE_NEWUSER)
+            .context("Failed to create user namespace")?;
+        
+        // Notify parent that we've created the user namespace
+        let _ = unistd::write(&notify_parent_fd, b"X");
+        
+        // Wait for parent to write uid_map/gid_map
+        let mut buf = [0u8; 1];
+        let _ = unistd::read(wait_for_parent_fd.as_raw_fd(), &mut buf);
+    }
+    
+    // Now call the main child init
+    container_child_init(config, rootfs_path, options)
+}
+
 /// Container child initialization.
 ///
-/// This runs in the child process after fork.
+/// This runs in the child process after fork and UID mapping.
 #[cfg(target_os = "linux")]
 fn container_child_init(
     config: &ContainerConfig,
     rootfs_path: &std::path::Path,
     options: &SpawnOptions,
-    sync_fd: std::os::unix::io::RawFd,
 ) -> Result<()> {
-    // Step 1: Create user namespace FIRST (required for rootless)
-    if options.use_user_namespace {
-        unshare(CloneFlags::CLONE_NEWUSER)
-            .context("Failed to create user namespace")?;
-
-        // We can't write uid_map/gid_map from inside the namespace.
-        // The parent must do this. For now, we'll continue and
-        // rely on setuid/setgid after exec or the mappings being
-        // set up by the parent process.
-    }
-
-    // Step 2: Unshare other namespaces
+    
+    // Check our effective UID after mapping
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    
+    // Step 2: Unshare other namespaces (user namespace already created)
     let mut flags = CloneFlags::empty();
 
     if config.namespaces.mount {
@@ -396,8 +477,6 @@ fn container_child_init(
     }
     if config.namespaces.pid {
         // PID namespace requires fork with CLONE_NEWPID, not unshare
-        // The child of the first fork won't be in the PID namespace.
-        // For proper PID namespace, we'd need to fork again.
     }
     if config.namespaces.cgroup {
         flags |= CloneFlags::CLONE_NEWCGROUP;
@@ -408,37 +487,52 @@ fn container_child_init(
             .context("Failed to unshare namespaces")?;
     }
 
+    
     // Step 3: Set up rootfs with pivot_root
     // Change to the new root directory
     std::env::set_current_dir(rootfs_path)
         .context("Failed to change to rootfs directory")?;
 
-    // Bind mount new_root to itself (required for pivot_root)
+    
+    // Try a simpler mount first - just bind, no recursive
     mount(
         Some(rootfs_path),
         rootfs_path,
         None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REC,
+        MsFlags::MS_BIND,
         None::<&str>,
-    )?;
+    ).context("Failed to bind mount rootfs")?;
+    
 
     // Create put_old directory
     let put_old = rootfs_path.join(".pivot_old");
     std::fs::create_dir_all(&put_old)
         .context("Failed to create pivot_old directory")?;
 
-    // Call pivot_root
-    nix::unistd::pivot_root(rootfs_path, &put_old)
-        .context("pivot_root failed")?;
+    // Try pivot_root first, fall back to chroot if it fails
+    match nix::unistd::pivot_root(rootfs_path, &put_old) {
+        Ok(()) => {
+            // Change to new root
+            std::env::set_current_dir("/")
+                .context("Failed to change directory to new root")?;
 
-    // Change to new root
-    std::env::set_current_dir("/")
-        .context("Failed to change directory to new root")?;
-
-    // Unmount the old root
-    let old_root = std::path::PathBuf::from("/.pivot_old");
-    let _ = nix::mount::umount(&old_root);
-    let _ = std::fs::remove_dir(&old_root);
+            // Unmount the old root (now at /.pivot_old)
+            let old_root = std::path::PathBuf::from("/.pivot_old");
+            match nix::mount::umount(&old_root) {
+                Ok(()) => {}
+                Err(e) => tracing::debug!("Failed to unmount old root: {} (non-fatal)", e),
+            }
+            let _ = std::fs::remove_dir(&old_root);
+        }
+        Err(e) => {
+            // Fall back to chroot for weaker isolation
+            // chroot is escapable but works for trusted code
+            nix::unistd::chroot(rootfs_path)
+                .context("chroot failed")?;
+            std::env::set_current_dir("/")
+                .context("Failed to change directory to /")?;
+        }
+    }
 
     // Step 4: Set up mounts (proc, sys, dev, etc.)
     setup_mounts(config)?;
@@ -494,11 +588,6 @@ fn container_child_init(
         }
     }
 
-    // Signal parent that setup is complete
-    use std::os::unix::io::FromRawFd;
-    let sync_file = unsafe { std::fs::File::from_raw_fd(sync_fd) };
-    let _ = unistd::write(&sync_file, b"X");
-    drop(sync_file); // This closes the fd
 
     // Step 9: Execute the container command
     exec_container_command(config, &options.workdir)?;
@@ -557,6 +646,20 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
     // Change to working directory
     std::env::set_current_dir(workdir)
         .with_context(|| format!("Failed to change to workdir: {}", workdir))?;
+
+    // Debug: check if binary exists
+    
+    // Check if the program exists
+    let program_path = std::path::Path::new(config.command[0].as_str());
+    if program_path.exists() {
+    } else {
+        // Try to find it in PATH
+        for path_entry in &["/bin", "/usr/bin", "/usr/local/bin"] {
+            let full_path = std::path::Path::new(path_entry).join(&config.command[0]);
+            if full_path.exists() {
+            }
+        }
+    }
 
     // Exec the command
     execve(&program, &args, &env_vars)

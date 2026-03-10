@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber;
 
 #[derive(Parser, Debug)]
-#[command(name = "containment")]
+#[command(name = "exo")]
 #[command(author = "Containment Contributors")]
 #[command(version = "0.1.0")]
 #[command(about = "Container runtime optimized for AI agents", long_about = None)]
@@ -91,7 +91,7 @@ enum Commands {
         tty: bool,
 
         /// Detach from container (run in background)
-        #[arg(short, long)]
+        #[arg(short = 'D', long)]
         detach: bool,
     },
 
@@ -101,6 +101,20 @@ enum Commands {
         /// Show all containers (including stopped)
         #[arg(short, long)]
         all: bool,
+
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Start a stopped container
+    Start {
+        /// Container ID or name
+        container: String,
+
+        /// Attach to container output
+        #[arg(short, long)]
+        attach: bool,
     },
 
     /// Stop a running container
@@ -222,8 +236,11 @@ async fn main() -> anyhow::Result<()> {
                 detach,
             }).await?
         }
-        Commands::List { all } => {
-            commands::list::execute(commands::list::ListArgs { all }).await?
+        Commands::List { all, json } => {
+            commands::list::execute(commands::list::ListArgs { all, json }).await?
+        }
+        Commands::Start { container, attach } => {
+            commands::start::execute(commands::start::StartArgs { container, attach }).await?
         }
         Commands::Stop { container, force, time } => {
             commands::stop::execute(commands::stop::StopArgs { container, force, time }).await?
