@@ -3,6 +3,7 @@
 mod commands;
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use tracing_subscriber;
 
 #[derive(Parser, Debug)]
@@ -194,6 +195,16 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+
+    /// Import image from tarball
+    Import {
+        /// Path to image tarball
+        tarball: String,
+        
+        /// Name for imported image (e.g., myimage:latest)
+        #[arg(short, long)]
+        name: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -259,6 +270,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
+        }
+        Commands::Import { tarball, name } => {
+            commands::import::execute(commands::import::ImportArgs {
+                tarball: PathBuf::from(tarball),
+                name,
+            }).await?
         }
     }
 

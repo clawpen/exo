@@ -9,3 +9,4 @@ pub mod logs;
 pub mod exec;
 pub mod pull;
 pub mod images;
+pub mod import;

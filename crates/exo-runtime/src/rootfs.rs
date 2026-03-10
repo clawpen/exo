@@ -489,6 +489,320 @@ pub fn pivot_rootfs(_new_root: &Path) -> Result<()> {
     Err(anyhow::anyhow!("pivot_root is only supported on Linux"))
 }
 
+/// Mount /proc in the container.
+///
+/// Tries regular proc mount first (works in user namespace with CAP_SYS_ADMIN),
+/// falls back to bind mount from host if that fails.
+#[cfg(target_os = "linux")]
+pub fn mount_proc(rootfs: &Path) -> Result<()> {
+    use std::ffi::CString;
+    
+    let proc_path = rootfs.join("proc");
+    
+    // Create directory if it doesn't exist
+    if !proc_path.exists() {
+        create_dir_all(&proc_path)
+            .with_context(|| format!("Failed to create {}", proc_path.display()))?;
+    }
+    
+    let target = CString::new(proc_path.to_str().unwrap())
+        .context("Failed to create CString for proc path")?;
+    
+    // Try regular proc mount first (works in user namespace with CAP_SYS_ADMIN)
+    let result = unsafe {
+        libc::mount(
+            b"proc\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"proc\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+            std::ptr::null(),
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /proc");
+        return Ok(());
+    }
+    
+    let proc_err = std::io::Error::last_os_error();
+    
+    // Fallback: try bind mount from host /proc (only works if host /proc is accessible)
+    let result = unsafe {
+        libc::mount(
+            b"/proc\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC | libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+            std::ptr::null(),
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Bind-mounted /proc from host");
+        return Ok(());
+    }
+    
+    tracing::warn!("Could not mount /proc: {} (bind mount: {})", proc_err, std::io::Error::last_os_error());
+    Err(anyhow::anyhow!("Failed to mount /proc: {}", proc_err))
+}
+
+/// Mount /sys in the container.
+///
+/// Tries regular sysfs mount first, falls back to bind mount if that fails.
+#[cfg(target_os = "linux")]
+pub fn mount_sys(rootfs: &Path) -> Result<()> {
+    use std::ffi::CString;
+    
+    let sys_path = rootfs.join("sys");
+    
+    if !sys_path.exists() {
+        create_dir_all(&sys_path)
+            .with_context(|| format!("Failed to create {}", sys_path.display()))?;
+    }
+    
+    let target = CString::new(sys_path.to_str().unwrap())
+        .context("Failed to create CString for sys path")?;
+    
+    // Try regular sysfs mount first (works in user namespace with CAP_SYS_ADMIN)
+    let result = unsafe {
+        libc::mount(
+            b"sysfs\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"sysfs\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV | libc::MS_RDONLY,
+            std::ptr::null(),
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /sys (read-only)");
+        return Ok(());
+    }
+    
+    // Fallback: try bind mount from host /sys (read-only for safety)
+    let result = unsafe {
+        libc::mount(
+            b"/sys\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+            std::ptr::null(),
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Bind-mounted /sys from host (read-only)");
+        return Ok(());
+    }
+    
+    tracing::warn!("Could not mount /sys: {}", std::io::Error::last_os_error());
+    Ok(()) // Non-fatal
+}
+
+/// Mount /dev in the container.
+///
+/// Tries devtmpfs first, falls back to tmpfs, then bind mount from host.
+#[cfg(target_os = "linux")]
+pub fn mount_dev(rootfs: &Path) -> Result<()> {
+    use std::ffi::CString;
+    
+    let dev_path = rootfs.join("dev");
+    
+    if !dev_path.exists() {
+        create_dir_all(&dev_path)
+            .with_context(|| format!("Failed to create {}", dev_path.display()))?;
+    }
+    
+    let target = CString::new(dev_path.to_str().unwrap())
+        .context("Failed to create CString for dev path")?;
+    
+    // Mount devtmpfs
+    let result = unsafe {
+        libc::mount(
+            b"devtmpfs\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"devtmpfs\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NOEXEC,
+            b"mode=755\0".as_ptr() as *const libc::c_void,
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /dev (devtmpfs)");
+        return Ok(());
+    }
+    
+    let devtmpfs_err = std::io::Error::last_os_error();
+    
+    // Fallback 1: try tmpfs (works in user namespace)
+    let result = unsafe {
+        libc::mount(
+            b"tmpfs\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"tmpfs\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NOEXEC,
+            b"mode=755\0".as_ptr() as *const libc::c_void,
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /dev (tmpfs fallback)");
+        return Ok(());
+    }
+    
+    let tmpfs_err = std::io::Error::last_os_error();
+    
+    // Fallback 2: bind mount host /dev
+    let result = unsafe {
+        libc::mount(
+            b"/dev\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC | libc::MS_NOSUID | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Bind-mounted /dev from host");
+        return Ok(());
+    }
+    
+    tracing::warn!("Could not mount /dev: {} (tmpfs: {}, bind: {})", 
+        devtmpfs_err, 
+        tmpfs_err,
+        std::io::Error::last_os_error());
+    Ok(())
+}
+
+/// Mount /dev/shm in the container.
+///
+/// Mounts tmpfs on /dev/shm.
+#[cfg(target_os = "linux")]
+pub fn mount_dev_shm(rootfs: &Path) -> Result<()> {
+    use std::ffi::CString;
+    
+    let dev_shm_path = rootfs.join("dev/shm");
+    
+    if !dev_shm_path.exists() {
+        create_dir_all(&dev_shm_path)
+            .with_context(|| format!("Failed to create {}", dev_shm_path.display()))?;
+    }
+    
+    let target = CString::new(dev_shm_path.to_str().unwrap())
+        .context("Failed to create CString for dev/shm path")?;
+    
+    // Mount tmpfs on /dev/shm
+    let result = unsafe {
+        libc::mount(
+            b"shm\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"tmpfs\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+            b"size=65536k\0".as_ptr() as *const libc::c_void,
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /dev/shm (tmpfs)");
+        return Ok(());
+    }
+    
+    tracing::warn!("Could not mount /dev/shm: {}", std::io::Error::last_os_error());
+    Ok(())
+}
+
+/// Mount /tmp in the container.
+///
+/// Mounts tmpfs on /tmp.
+#[cfg(target_os = "linux")]
+pub fn mount_tmp(rootfs: &Path) -> Result<()> {
+    use std::ffi::CString;
+    
+    let tmp_path = rootfs.join("tmp");
+    
+    if !tmp_path.exists() {
+        create_dir_all(&tmp_path)
+            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
+    }
+    
+    let target = CString::new(tmp_path.to_str().unwrap())
+        .context("Failed to create CString for tmp path")?;
+    
+    // Mount tmpfs on /tmp
+    let result = unsafe {
+        libc::mount(
+            b"tmpfs\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"tmpfs\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NODEV,
+            b"size=1048576k\0".as_ptr() as *const libc::c_void,
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /tmp (tmpfs)");
+        return Ok(());
+    }
+    
+    tracing::warn!("Could not mount /tmp: {}", std::io::Error::last_os_error());
+    Ok(())
+}
+
+/// Mount /run in the container.
+///
+/// Mounts tmpfs on /run.
+#[cfg(target_os = "linux")]
+pub fn mount_run(rootfs: &Path) -> Result<()> {
+    use std::ffi::CString;
+    
+    let run_path = rootfs.join("run");
+    
+    if !run_path.exists() {
+        create_dir_all(&run_path)
+            .with_context(|| format!("Failed to create {}", run_path.display()))?;
+    }
+    
+    let target = CString::new(run_path.to_str().unwrap())
+        .context("Failed to create CString for run path")?;
+    
+    // Mount tmpfs on /run
+    let result = unsafe {
+        libc::mount(
+            b"tmpfs\0".as_ptr() as *const i8,
+            target.as_ptr(),
+            b"tmpfs\0".as_ptr() as *const i8,
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+            b"size=65536k\0".as_ptr() as *const libc::c_void,
+        )
+    };
+    
+    if result == 0 {
+        tracing::info!("Mounted /run (tmpfs)");
+        return Ok(());
+    }
+    
+    tracing::warn!("Could not mount /run: {}", std::io::Error::last_os_error());
+    Ok(())
+}
+
+/// Set up essential mounts inside the container namespace.
+///
+/// This should be called AFTER pivot_root/chroot, using "/" as rootfs.
+/// Mounts are non-fatal to allow containers to run even with partial isolation.
+#[cfg(target_os = "linux")]
+pub fn setup_container_mounts(rootfs: &Path) -> Result<()> {
+    // Order matters: /dev first, then /dev/shm
+    let _ = mount_dev(rootfs);       // Non-fatal
+    let _ = mount_dev_shm(rootfs);   // Non-fatal
+    let _ = mount_proc(rootfs);      // Non-fatal
+    let _ = mount_sys(rootfs);       // Non-fatal
+    let _ = mount_tmp(rootfs);       // Non-fatal
+    let _ = mount_run(rootfs);       // Non-fatal
+    
+    Ok(())
+}
+
 /// Set up the essential mounts for a container.
 ///
 /// This function mounts:
@@ -505,41 +819,8 @@ pub fn pivot_rootfs(_new_root: &Path) -> Result<()> {
 /// * `config` - Container configuration
 #[cfg(target_os = "linux")]
 pub fn setup_mounts(config: &ContainerConfig) -> Result<()> {
-    // Mount proc filesystem (may fail in user namespace without full caps)
-    match mount(
-        None::<&str>,
-        "/proc",
-        Some("proc"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
-        None::<&str>,
-    ) {
-        Ok(()) => tracing::debug!("Mounted /proc"),
-        Err(e) => tracing::warn!("Could not mount /proc (non-fatal in user ns): {}", e),
-    }
-
-    // Mount sysfs (may fail in user namespace)
-    match mount(
-        None::<&str>,
-        "/sys",
-        Some("sysfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_RDONLY,
-        None::<&str>,
-    ) {
-        Ok(()) => tracing::debug!("Mounted /sys"),
-        Err(e) => tracing::warn!("Could not mount /sys (non-fatal in user ns): {}", e),
-    }
-
-    // Mount tmpfs on /dev/shm (usually works in user ns)
-    match mount(
-        None::<&str>,
-        "/dev/shm",
-        Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    ) {
-        Ok(()) => tracing::debug!("Mounted /dev/shm"),
-        Err(e) => tracing::warn!("Could not mount /dev/shm: {}", e),
-    }
+    // Set up essential mounts first (using "/" as we're inside the container)
+    setup_container_mounts(Path::new("/"))?;
 
     // Mount devpts for /dev/pts (may fail in user namespace)
     if Path::new("/dev/pts").exists() {
@@ -560,18 +841,6 @@ pub fn setup_mounts(config: &ContainerConfig) -> Result<()> {
             }
             Err(e) => tracing::warn!("Could not mount /dev/pts: {}", e),
         }
-    }
-
-    // Mount tmpfs on /tmp (usually works in user ns)
-    match mount(
-        None::<&str>,
-        "/tmp",
-        Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    ) {
-        Ok(()) => tracing::debug!("Mounted /tmp"),
-        Err(e) => tracing::warn!("Could not mount /tmp: {}", e),
     }
 
     // Apply user-specified bind mounts
