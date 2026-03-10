@@ -544,6 +544,14 @@ fn container_child_init(
     std::fs::create_dir_all(&put_old)
         .context("Failed to create pivot_old directory")?;
 
+    // Mount /proc BEFORE pivot_root (requires CAP_SYS_ADMIN which we have now)
+    // This is critical for Node.js and other runtimes that need proper /proc
+    tracing::debug!("Attempting to mount /proc before pivot_root");
+    match crate::rootfs::mount_proc(&rootfs_canonical) {
+        Ok(()) => tracing::info!("Mounted /proc before pivot_root"),
+        Err(e) => tracing::warn!("Could not mount /proc before pivot_root: {} (will retry after)", e),
+    }
+
     // Try pivot_root first, fall back to chroot if it fails
     match nix::unistd::pivot_root(&rootfs_canonical, &put_old) {
         Ok(()) => {

@@ -220,10 +220,13 @@ pub fn load_overlay_config(container_id: &str) -> Result<Option<OverlayPaths>> {
     }))
 }
 
-/// Set up overlayfs mount for a container.
+/// Set up overlay filesystem using kernel overlay or fuse-overlayfs fallback.
 ///
 /// This must be called BEFORE entering user namespace if running rootless,
 /// as overlay mounts require privileges.
+///
+/// In rootless mode, kernel overlay mounts often fail with EPERM. When that
+/// happens, we fall back to fuse-overlayfs which works in userspace.
 ///
 /// # Arguments
 ///
@@ -251,21 +254,43 @@ pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
     
     tracing::info!("Mounting overlayfs with options: {}", options);
     
-    // Mount overlayfs
+    // Try kernel mount first
     let options_cstr = std::ffi::CString::new(options.as_str())
         .context("Invalid mount options")?;
     
-    mount(
+    match mount(
         Some("overlay"),
         paths.rootfs.as_path(),
         Some("overlay"),
         MsFlags::MS_NOATIME,
         Some(options_cstr.as_c_str()),
-    ).with_context(|| format!("Failed to mount overlayfs at {:?}", paths.rootfs))?;
+    ) {
+        Ok(()) => {
+            tracing::info!("Kernel overlay mounted successfully");
+            return Ok(paths.rootfs);
+        }
+        Err(e) => {
+            tracing::warn!("Kernel overlay mount failed: {}, trying fuse-overlayfs", e);
+        }
+    }
     
-    tracing::info!("Mounted overlayfs for container {} at {:?}", container_id, paths.rootfs);
+    // Fallback to fuse-overlayfs
+    let status = std::process::Command::new("fuse-overlayfs")
+        .arg("-o")
+        .arg(&options)
+        .arg(&paths.rootfs)
+        .status()
+        .context("Failed to run fuse-overlayfs")?;
     
-    Ok(paths.rootfs)
+    if status.success() {
+        tracing::info!("fuse-overlayfs mounted successfully");
+        return Ok(paths.rootfs);
+    }
+    
+    // Both failed - return error with read-only fallback hint
+    Err(anyhow::anyhow!(
+        "Both kernel overlay and fuse-overlayfs failed. Falling back to read-only rootfs."
+    ))
 }
 
 /// Non-Linux stub.
@@ -520,29 +545,17 @@ pub fn mount_proc(rootfs: &Path) -> Result<()> {
     };
     
     if result == 0 {
-        tracing::info!("Mounted /proc");
+        tracing::info!("Mounted /proc (procfs)");
         return Ok(());
     }
     
     let proc_err = std::io::Error::last_os_error();
+    tracing::warn!("Regular proc mount failed: {}", proc_err);
     
-    // Fallback: try bind mount from host /proc (only works if host /proc is accessible)
-    let result = unsafe {
-        libc::mount(
-            b"/proc\0".as_ptr() as *const i8,
-            target.as_ptr(),
-            std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC | libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
-            std::ptr::null(),
-        )
-    };
-    
-    if result == 0 {
-        tracing::info!("Bind-mounted /proc from host");
-        return Ok(());
-    }
-    
-    tracing::warn!("Could not mount /proc: {} (bind mount: {})", proc_err, std::io::Error::last_os_error());
+    // DON'T bind mount from host - it has wrong PIDs for our namespace
+    // Instead, return error and let container run without /proc
+    // Some applications may still work
+    tracing::warn!("Could not mount /proc - container may have limited functionality");
     Err(anyhow::anyhow!("Failed to mount /proc: {}", proc_err))
 }
 
