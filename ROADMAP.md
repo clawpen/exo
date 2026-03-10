@@ -139,7 +139,40 @@ A production-ready, agent-first container runtime that replaces Docker for Claw 
 
 - Started: 2026-03-09
 - Target: 2026-04-20 (6 weeks)
-- Current Phase: 1.1 (Persistent Containers)
+- Current Phase: 1.2 (Overlayfs - partially working)
+
+## Completed (2026-03-09)
+
+### Phase 1.1 - Persistent Containers ✅
+- [x] `--name` flag for named containers
+- [x] `exo stop <name>`
+- [x] `exo start <name>`
+- [x] `exo remove <name>`
+- [x] `exo list --json`
+- [x] Container metadata storage
+- [x] ESRCH race condition fix
+
+### Phase 1.2 - Overlayfs Writable Layer ⚠️
+- [x] Create overlay directories
+- [x] Fallback to read-only on EPERM (rootless limitation)
+- [ ] Full writable layer (needs fuse-overlayfs or root)
+
+### Phase 2.1 - OCI Registry Pull ✅
+- [x] Docker Hub authentication
+- [x] Layer download and extraction
+- [x] SHA256 verification
+- [x] Multi-arch manifest support
+
+### Claw Pen Integration ✅
+- [x] ExoRuntimeClient replaces Docker
+- [x] JSON parsing for exo list
+- [x] CLI flags compatible (-m, --detach)
+- [x] Auth token working (access_token/refresh_token)
+
+## Next Up
+- [ ] Volume mounts (Phase 1.3)
+- [ ] TTY/exec (Phase 1.4)
+- [ ] Network namespace (Phase 3)
 
 ## Notes
 
