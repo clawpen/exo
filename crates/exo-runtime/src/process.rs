@@ -128,13 +128,16 @@ impl ContainerProcess {
         // This is critical: overlay mounts must be done in the parent process
         // before entering user namespace
         // Note: If overlay mount fails (EPERM), fall back to read-only rootfs
-        let rootfs_path = if rootfs::load_overlay_config(&config.name)?.is_some() {
+        let rootfs_path = if let Some(overlay_config) = rootfs::load_overlay_config(&config.name)? {
             tracing::info!("Setting up overlayfs mount for container {}", config.name);
             match rootfs::setup_overlay_rootfs(&config.name) {
                 Ok(path) => path,
                 Err(e) => {
-                    tracing::warn!("Overlay mount failed ({}), using read-only rootfs", e);
-                    rootfs_path
+                    // Overlay mount failed - use the actual image rootfs (lower layer)
+                    // NOT the empty mount point directory
+                    tracing::warn!("Overlay mount failed ({}), using read-only image rootfs", e);
+                    tracing::info!("Falling back to image rootfs at: {:?}", overlay_config.lower);
+                    overlay_config.lower
                 }
             }
         } else {
@@ -476,6 +479,8 @@ fn container_child_init(
     let uid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getegid() };
     
+    tracing::debug!("Child process started with euid={}, egid={}", uid, gid);
+    
     // Step 2: Unshare other namespaces (user namespace already created)
     let mut flags = CloneFlags::empty();
 
@@ -499,35 +504,50 @@ fn container_child_init(
     }
 
     if !flags.is_empty() {
+        tracing::debug!("Unsharing namespaces: {:?}", flags);
         unshare(flags)
             .context("Failed to unshare namespaces")?;
     }
 
     
     // Step 3: Set up rootfs with pivot_root
+    // Canonicalize the path to resolve symlinks
+    let rootfs_canonical = rootfs_path.canonicalize()
+        .with_context(|| format!("Failed to canonicalize rootfs path: {:?}", rootfs_path))?;
+    
+    tracing::debug!("Canonicalized rootfs path: {:?}", rootfs_canonical);
+    
+    // Check what's in the rootfs before pivot
+    if rootfs_canonical.join("bin").exists() {
+        tracing::debug!("Rootfs /bin exists");
+    } else {
+        tracing::warn!("Rootfs /bin does not exist!");
+    }
+    
     // Change to the new root directory
-    std::env::set_current_dir(rootfs_path)
+    std::env::set_current_dir(&rootfs_canonical)
         .context("Failed to change to rootfs directory")?;
 
     
     // Try a simpler mount first - just bind, no recursive
+    // This makes the directory a mount point, which is required for pivot_root
     mount(
-        Some(rootfs_path),
-        rootfs_path,
+        Some(&rootfs_canonical),
+        &rootfs_canonical,
         None::<&str>,
         MsFlags::MS_BIND,
         None::<&str>,
     ).context("Failed to bind mount rootfs")?;
-    
 
     // Create put_old directory
-    let put_old = rootfs_path.join(".pivot_old");
+    let put_old = rootfs_canonical.join(".pivot_old");
     std::fs::create_dir_all(&put_old)
         .context("Failed to create pivot_old directory")?;
 
     // Try pivot_root first, fall back to chroot if it fails
-    match nix::unistd::pivot_root(rootfs_path, &put_old) {
+    match nix::unistd::pivot_root(&rootfs_canonical, &put_old) {
         Ok(()) => {
+            tracing::debug!("pivot_root successful");
             // Change to new root
             std::env::set_current_dir("/")
                 .context("Failed to change directory to new root")?;
@@ -535,18 +555,20 @@ fn container_child_init(
             // Unmount the old root (now at /.pivot_old)
             let old_root = std::path::PathBuf::from("/.pivot_old");
             match nix::mount::umount(&old_root) {
-                Ok(()) => {}
-                Err(e) => tracing::debug!("Failed to unmount old root: {} (non-fatal)", e),
+                Ok(()) => tracing::debug!("Unmounted old root"),
+                Err(e) => tracing::warn!("Failed to unmount old root: {} (non-fatal)", e),
             }
             let _ = std::fs::remove_dir(&old_root);
         }
         Err(e) => {
+            tracing::warn!("pivot_root failed: {}, falling back to chroot", e);
             // Fall back to chroot for weaker isolation
             // chroot is escapable but works for trusted code
-            nix::unistd::chroot(rootfs_path)
+            nix::unistd::chroot(&rootfs_canonical)
                 .context("chroot failed")?;
             std::env::set_current_dir("/")
                 .context("Failed to change directory to /")?;
+            tracing::debug!("chroot successful");
         }
     }
 
@@ -639,7 +661,50 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
         anyhow::bail!("No command specified");
     }
 
-    let program = CString::new(config.command[0].as_bytes())
+    // Change to working directory first
+    std::env::set_current_dir(workdir)
+        .with_context(|| format!("Failed to change to workdir: {}", workdir))?;
+
+    // Resolve the program path
+    let program_str = config.command[0].as_str();
+    let program_path = std::path::Path::new(program_str);
+    
+    // Find the actual binary to execute
+    let resolved_program = if program_path.is_absolute() {
+        // Absolute path - use as-is
+        if !program_path.exists() {
+            tracing::error!("Binary not found at absolute path: {:?}", program_path);
+            anyhow::bail!("Binary not found: {}", program_str);
+        }
+        program_str.to_string()
+    } else if program_path.exists() {
+        // Relative path that exists
+        program_str.to_string()
+    } else {
+        // Try to find it in PATH
+        let search_paths = ["/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin"];
+        let mut found = None;
+        
+        for path_entry in &search_paths {
+            let full_path = std::path::Path::new(path_entry).join(program_str);
+            if full_path.exists() {
+                found = Some(full_path.to_string_lossy().to_string());
+                break;
+            }
+        }
+        
+        match found {
+            Some(path) => path,
+            None => {
+                tracing::error!("Binary not found in PATH: {}", program_str);
+                anyhow::bail!("Binary not found: {}", program_str);
+            }
+        }
+    };
+
+    tracing::debug!("Resolved program path: {}", resolved_program);
+
+    let program = CString::new(resolved_program.as_bytes())
         .context("Command contains null bytes")?;
 
     let args: Vec<CString> = config.command.iter()
@@ -659,27 +724,10 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
         env_vars.push(CString::new(env_str.as_bytes())?);
     }
 
-    // Change to working directory
-    std::env::set_current_dir(workdir)
-        .with_context(|| format!("Failed to change to workdir: {}", workdir))?;
-
-    // Debug: check if binary exists
-    
-    // Check if the program exists
-    let program_path = std::path::Path::new(config.command[0].as_str());
-    if program_path.exists() {
-    } else {
-        // Try to find it in PATH
-        for path_entry in &["/bin", "/usr/bin", "/usr/local/bin"] {
-            let full_path = std::path::Path::new(path_entry).join(&config.command[0]);
-            if full_path.exists() {
-            }
-        }
-    }
-
     // Exec the command
+    tracing::info!("Executing: {:?}", resolved_program);
     execve(&program, &args, &env_vars)
-        .context("execve failed")?;
+        .with_context(|| format!("execve failed for {}", resolved_program))?;
 
     // Should never reach here
     unreachable!("execve returned");
