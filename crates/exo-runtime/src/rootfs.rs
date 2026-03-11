@@ -552,11 +552,31 @@ pub fn mount_proc(rootfs: &Path) -> Result<()> {
     let proc_err = std::io::Error::last_os_error();
     tracing::warn!("Regular proc mount failed: {}", proc_err);
     
-    // DON'T bind mount from host - it has wrong PIDs for our namespace
-    // Instead, return error and let container run without /proc
-    // Some applications may still work
-    tracing::warn!("Could not mount /proc - container may have limited functionality");
-    Err(anyhow::anyhow!("Failed to mount /proc: {}", proc_err))
+    // Fallback: bind mount host /proc (read-only, recursive)
+    // This shows host PIDs instead of container PIDs, but allows Node.js and other
+    // tools that need /proc/self to function in rootless mode.
+    tracing::info!("Falling back to bind mount of host /proc (rootless mode)");
+    
+    let host_proc = CString::new("/proc").unwrap();
+    let bind_result = unsafe {
+        libc::mount(
+            host_proc.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    };
+    
+    if bind_result == 0 {
+        tracing::info!("Bind-mounted host /proc (read-only) - note: shows host PIDs");
+        return Ok(());
+    }
+    
+    let bind_err = std::io::Error::last_os_error();
+    tracing::warn!("Bind mount of host /proc also failed: {}", bind_err);
+    tracing::warn!("Container will run without /proc - limited functionality");
+    Err(anyhow::anyhow!("Failed to mount /proc: proc={}, bind={}", proc_err, bind_err))
 }
 
 /// Mount /sys in the container.

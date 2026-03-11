@@ -76,7 +76,7 @@ impl AgentProfile {
             name: "agent-default".to_string(),
             seccomp: Self::default_seccomp(),
             capabilities: vec![],
-            no_new_privs: true,
+            no_new_privs: false,  // Disabled for Node.js compatibility
             network: NetworkAccess::OutboundOnly,
             masked_paths: vec![
                 "/proc/sys".to_string(),
@@ -176,12 +176,13 @@ impl AgentProfile {
             // Basic time
             "clock_gettime", "clock_nanosleep", "nanosleep", "gettimeofday",
             // Scheduling
-            "sched_yield", "sched_getaffinity", "sched_setaffinity",
+            "sched_yield", "sched_getaffinity", "sched_setaffinity", "sched_getparam", "sched_setparam",
             // UIDs/GIDs
             "getuid", "geteuid", "getgid", "getegid", "getresuid", "getresgid",
             "setuid", "setgid", "setresuid", "setresgid",
+            "capget", "capset",
             // Threading
-            "set_tid_address", "set_robust_list", "get_robust_list", "clone", "fork", "vfork",
+            "set_tid_address", "set_robust_list", "get_robust_list", "clone", "clone3", "fork", "vfork",
             "futex", "getpid", "gettid", "getppid",
             // epoll/event
             "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
@@ -196,7 +197,7 @@ impl AgentProfile {
             "dup", "dup2", "dup3",
             "select", "poll", "ppoll", "pselect6",
             // Basic misc
-            "arch_prctl", "uname", "getrlimit", "getrusage", "times",
+            "arch_prctl", "prctl", "uname", "getrlimit", "getrusage", "times",
             "getrandom", "gettimeofday",
             // Sync
             "sync", "syncfs", "fsync", "fdatasync", "sync_file_range",
@@ -204,6 +205,7 @@ impl AgentProfile {
             "statx", "statfs", "fstatfs",
             // Directory operations
             "getdents64", "mkdirat", "unlinkat", "renameat", "renameat2", "symlinkat",
+            "getcwd", "readlink", "readlinkat", "chmod", "fchmod", "fchmodat", "umask",
             // Basic fcntl
             "fcntl", "flock",
             // Memory operations
@@ -211,14 +213,14 @@ impl AgentProfile {
             // Time
             "time", "times",
             // Signals
-            "sigaltstack", "sigreturn",
+            "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack", "sigreturn",
             // Pipe/splice
             "splice", "tee", "vmsplice",
             // Files
             "ioctl", "readahead", "sync_file_range", "fallocate",
             "utimensat", "futimesat",
             // Process
-            "prlimit64", "getpriority", "setpriority",
+            "prlimit64", "getpriority", "setpriority", "rseq",
             // Checksum
             "restart_syscall",
         ];

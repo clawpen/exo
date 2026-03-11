@@ -206,6 +206,20 @@ impl ContainerProcess {
                 tracing::debug!("Process {} already reaped, assuming exit 0", self.pid);
                 Ok(ProcessState::Exited(0))
             }
+            Err(Errno::ECHILD) => {
+                // Not a direct child (e.g., grandchild from double-fork for PID namespace)
+                // Check if process is still running via /proc or kill(0)
+                let proc_path = format!("/proc/{}", self.pid.as_raw());
+                if std::path::Path::new(&proc_path).exists() {
+                    // Process is still running - return Running and let caller poll again
+                    tracing::trace!("Process {} is not a direct child but still running", self.pid);
+                    Ok(ProcessState::Running)
+                } else {
+                    // Process has exited
+                    tracing::debug!("Process {} not a direct child and not in /proc, assuming exit 0", self.pid);
+                    Ok(ProcessState::Exited(0))
+                }
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -355,6 +369,10 @@ fn apply_resource_limits(cgroup: &CgroupManager, config: &ContainerConfig) -> Re
 /// 4. Child unshares other namespaces (now has CAP_SYS_ADMIN in user ns)
 /// 5. Child sets up rootfs with pivot_root
 /// 6. Child execs command
+///
+/// With PID namespace enabled, uses double-fork:
+/// - First fork: intermediate process for namespace setup
+/// - Second fork: actual container process (becomes PID 1 in new namespace)
 #[cfg(target_os = "linux")]
 pub fn spawn_container_fork(
     config: &ContainerConfig,
@@ -362,6 +380,9 @@ pub fn spawn_container_fork(
     options: &SpawnOptions,
 ) -> Result<(Pid, RawFd)> {
     use std::io::{Read, Write};
+    
+    // Check if we need PID namespace (requires double-fork)
+    let use_pid_namespace = config.namespaces.pid;
     
     // Create pipes for bidirectional synchronization
     // Pipe 1: child -> parent (child ready for uid_map)
@@ -408,11 +429,27 @@ pub fn spawn_container_fork(
                 let _ = unistd::write(&parent_to_child_write, b"X");
             }
             
+            // Wait for the actual container PID if using double-fork
+            let container_pid = if use_pid_namespace {
+                // The intermediate process will write the grandchild PID to us
+                let mut pid_buf = [0u8; 16];
+                let n = unistd::read(child_to_parent_read.as_raw_fd(), &mut pid_buf)
+                    .context("Failed to read container PID from intermediate")?;
+                let pid_str = std::str::from_utf8(&pid_buf[..n])
+                    .context("Invalid PID string")?;
+                let pid: i32 = pid_str.trim().parse()
+                    .context("Failed to parse container PID")?;
+                tracing::debug!("Container running in PID namespace as PID {}", pid);
+                Pid::from_raw(pid)
+            } else {
+                child
+            };
+            
             // Close remaining pipes
             drop(child_to_parent_read);
             drop(parent_to_child_write);
             
-            Ok((child, 0)) // No sync fd needed with uid mapping approach
+            Ok((container_pid, 0))
         }
         unistd::ForkResult::Child => {
             // Close parent ends in child
@@ -425,7 +462,8 @@ pub fn spawn_container_fork(
                 rootfs_path, 
                 options, 
                 child_to_parent_write,
-                parent_to_child_read
+                parent_to_child_read,
+                use_pid_namespace,
             ) {
                 for cause in e.chain() {
                 }
@@ -446,6 +484,7 @@ fn container_child_init_with_uidmap(
     options: &SpawnOptions,
     notify_parent_fd: OwnedFd,
     wait_for_parent_fd: OwnedFd,
+    use_pid_namespace: bool,
 ) -> Result<()> {
     
     // Step 1: Create user namespace FIRST
@@ -461,8 +500,36 @@ fn container_child_init_with_uidmap(
         let _ = unistd::read(wait_for_parent_fd.as_raw_fd(), &mut buf);
     }
     
-    // Now call the main child init
-    container_child_init(config, rootfs_path, options)
+    // Step 2: If PID namespace is requested, unshare it now and fork again
+    // unshare(CLONE_NEWPID) only affects *children*, not the calling process
+    if use_pid_namespace {
+        tracing::debug!("Unsharing PID namespace (will affect child process)");
+        unshare(CloneFlags::CLONE_NEWPID)
+            .context("Failed to unshare PID namespace")?;
+        
+        // Fork again - this child will be PID 1 in the new PID namespace
+        match unsafe { unistd::fork() }? {
+            unistd::ForkResult::Parent { child } => {
+                // We're the intermediate process
+                // Send the grandchild PID to the original parent
+                let pid_str = format!("{}\n", child.as_raw());
+                let _ = unistd::write(&notify_parent_fd, pid_str.as_bytes());
+                
+                // Exit - we're just the intermediate
+                std::process::exit(0);
+            }
+            unistd::ForkResult::Child => {
+                // We're now PID 1 in the new PID namespace!
+                tracing::debug!("Running as PID 1 in new PID namespace");
+                
+                // Continue with container setup
+                container_child_init(config, rootfs_path, options)
+            }
+        }
+    } else {
+        // No PID namespace - single fork path
+        container_child_init(config, rootfs_path, options)
+    }
 }
 
 /// Container child initialization.
@@ -497,7 +564,8 @@ fn container_child_init(
         flags |= CloneFlags::CLONE_NEWNET;
     }
     if config.namespaces.pid {
-        // PID namespace requires fork with CLONE_NEWPID, not unshare
+        // PID namespace is handled via double-fork in container_child_init_with_uidmap
+        // We're already running in the new PID namespace if it was requested
     }
     if config.namespaces.cgroup {
         flags |= CloneFlags::CLONE_NEWCGROUP;

@@ -105,10 +105,10 @@ fn default_hostname() -> String {
 }
 
 fn default_namespaces() -> Namespaces {
-    // Default for rootless: only user + mount + uts + ipc
+    // Default for rootless: user + mount + uts + ipc + pid
     // Network and cgroup require privileges
     Namespaces {
-        pid: false,      // Requires fork with CLONE_NEWPID
+        pid: true,       // Now supported via double-fork
         network: false,  // Requires CAP_NET_ADMIN
         ipc: true,       // Works in user namespace
         uts: true,       // Works in user namespace
@@ -491,7 +491,7 @@ mod tests {
     fn test_namespaces_default() {
         let ns = Namespaces::default();
         assert!(ns.user);     // Core of rootless containers
-        assert!(!ns.pid);     // Requires fork with CLONE_NEWPID
+        assert!(ns.pid);      // Now supported via double-fork
         assert!(!ns.network); // Requires CAP_NET_ADMIN
         assert!(ns.mount);    // Works in user namespace
         assert!(ns.uts);      // Works in user namespace

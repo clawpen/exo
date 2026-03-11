@@ -202,13 +202,15 @@ pub fn default_profile() -> SeccompProfile {
         // File operations
         "read", "write", "open", "openat", "close", "stat", "fstat", "lstat",
         "poll", "lseek", "mmap", "mprotect", "munmap", "brk", "rt_sigaction",
+        "readlink",  // Needed for symlink resolution (older syscall)
         "rt_sigprocmask", "rt_sigreturn", "ioctl", "pread64", "pwrite64",
         "readv", "writev", "access", "pipe", "select", "sched_yield",
         "mremap", "msync", "mincore", "madvise", "dup", "dup2", "pause",
+        "fcntl", "fcntl64",  // File control - needed by Node.js
         "nanosleep", "getitimer", "alarm", "setitimer", "getpid", "sendfile",
         "socket", "connect", "accept", "sendto", "recvfrom", "sendmsg",
         "recvmsg", "shutdown", "bind", "listen", "getsockname", "getpeername",
-        "socketpair", "setsockopt", "getsockopt", "clone", "fork", "vfork",
+        "socketpair", "setsockopt", "getsockopt", "clone", "clone3", "fork", "vfork",
         "execve", "exit", "wait4", "kill", "uname", "getrlimit",
         "getrusage", "sysinfo", "times", "getuid", "getgid", "setuid",
         "setgid", "geteuid", "getegid", "setpgid", "getppid", "getpgrp",
@@ -240,7 +242,7 @@ pub fn default_profile() -> SeccompProfile {
         "keyctl", "ioprio_set", "ioprio_get", "inotify_init", "inotify_add_watch",
         "inotify_rm_watch", "migrate_pages", "openat", "mkdirat", "mknodat",
         "fchownat", "futimesat", "newfstatat", "unlinkat", "renameat", "linkat",
-        "symlinkat", "readlinkat", "fchmodat", "faccessat", "pselect6", "ppoll",
+        "symlinkat", "readlinkat", "fchmodat", "faccessat", "chmod", "fchmod", "pselect6", "ppoll",
         "unshare", "set_robust_list", "get_robust_list", "splice", "tee", "sync_file_range",
         "vmsplice", "move_pages", "utimensat", "epoll_pwait", "signalfd", "timerfd_create",
         "eventfd", "fallocate", "timerfd_settime", "timerfd_gettime", "accept4",
@@ -253,8 +255,9 @@ pub fn default_profile() -> SeccompProfile {
         "memfd_create", "kexec_file_load", "bpf", "execveat", "userfaultfd",
         "membarrier", "mlock2", "copy_file_range", "preadv2", "pwritev2",
         "pkey_mprotect", "pkey_alloc", "pkey_free", "statx",
+        "rseq",  // Restartable sequences (needed by modern glibc/Node.js)
         // Directory operations
-        "chdir", "fchdir", "mkdir", "rmdir", "getcwd",
+        "chdir", "fchdir", "mkdir", "rmdir", "getcwd", "umask",
         // Network syscalls
         "socketcall", "bind", "listen", "accept", "connect", "getsockname",
         "getpeername", "sendto", "recvfrom", "sendmsg", "recvmsg", "shutdown",
