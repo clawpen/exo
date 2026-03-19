@@ -1,0 +1,41 @@
+name: time
+version: "1.0.0"
+description: "Time and date utilities"
+author: "Exo"
+
+runtime:
+  type: builtin
+  
+tools:
+  - name: now
+    description: "Get current time"
+    parameters:
+      type: object
+      properties:
+        format:
+          type: string
+          description: "Output format (iso, unix, rfc3339)"
+          enum: ["iso", "unix", "rfc3339"]
+      required: []
+    returns:
+      type: object
+      properties:
+        timestamp:
+          type: integer
+        iso:
+          type: string
+        local:
+          type: string
+    timeout_ms: 5000
+    
+  - name: echo
+    description: "Echo back the input"
+    parameters:
+      type: object
+      properties:
+        message:
+          type: string
+      required: ["message"]
+    returns:
+      type: object
+    timeout_ms: 5000

@@ -121,7 +121,7 @@ tools:
 | Cron Scheduler | ✅ | Time-based job execution |
 | Protocol | ✅ | v1.0.0 message types |
 | CLI Binary | ✅ | exo-agent commands |
-| **Tool Execution** | 🔧 | Needs exo-runtime integration |
+| **Tool Execution** | ✅ | Via docker/podman (exo-runtime integration pending) |
 | **GPU Passthrough** | 🔧 | Needs testing with LLM containers |
 | **WASM Skills** | 📋 | Not yet implemented |
 
@@ -136,14 +136,70 @@ tools:
 ## Running
 
 ```bash
-# Terminal 1: Start gateway
+# Terminal 1: Start gateway with skills
 cd /root/exo
-cargo run -p exo-agent -- gateway --bind 127.0.0.1:8080
+cargo run -p exo-agent -- gateway \
+  --bind 127.0.0.1:8080 \
+  --skills-dir ./skills
 
 # Terminal 2: Connect via wscat
 npx wscat -c ws://127.0.0.1:8080/ws
 > {"type": "hello", "version": "1.0.0", "agent_id": "test", "capabilities": []}
+
+# Terminal 2: Call a tool (using builtin skill)
+> {"type": "tool_request", "request_id": "1", "skill": "time", "tool": "now", "args": {}}
+< {"type": "tool_response", "request_id": "1", "result": {...}}
 ```
+
+## Testing Tool Execution
+
+### Builtin Skills (no container needed)
+The `time` skill is a builtin that works without docker:
+
+```bash
+# Start gateway
+cargo run -p exo-agent -- gateway --bind 127.0.0.1:8080
+
+# In another terminal, use wscat or similar:
+echo '{"type":"hello","version":"1.0.0","agent_id":"test","capabilities":[]}' | websocat ws://127.0.0.1:8080/ws
+echo '{"type":"tool_request","request_id":"1","skill":"time","tool":"now","args":{}}' | websocat ws://127.0.0.1:8080/ws
+```
+
+### Container Skills (requires docker/podman)
+Container runtime temporarily uses docker/podman while exo-runtime integration is pending:
+
+```yaml
+# skills/bash/skill.yaml
+name: bash
+version: "1.0.0"
+description: "Execute bash commands"
+
+runtime:
+  type: container
+  image: alpine:latest
+  resources:
+    memory: "128M"
+    cpu: 0.1
+    gpu: false
+
+tools:
+  - name: exec
+    description: "Execute a bash command"
+    parameters:
+      type: object
+      properties:
+        command:
+          type: string
+      required: ["command"]
+    timeout_ms: 30000
+```
+
+Container execution features:
+- Memory limits enforced
+- CPU limits enforced  
+- Network disabled by default (`--network none`)
+- GPU passthrough available (`gpu: true`)
+- Args passed via stdin as JSON
 
 ## Comparison with OpenClaw
 
