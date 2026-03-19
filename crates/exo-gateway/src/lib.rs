@@ -11,12 +11,14 @@
 //! - **REST API** - External integrations and monitoring
 
 pub mod cron;
+pub mod executor;
 pub mod protocol;
 pub mod server;
 pub mod session;
 pub mod skill;
 
 pub use cron::{CronScheduler, CreateJobRequest, ScheduledJob, CronError};
+pub use executor::{ToolExecutor, ExecutionResult, ExecutionError};
 pub use protocol::{GatewayMessage, ErrorCode, ToolResult, SessionId, RequestId, PROTOCOL_VERSION};
 pub use server::{GatewayServer, AppState, ServerError};
 pub use session::{SessionManager, Session, SessionInfo, SessionError};
@@ -51,6 +53,7 @@ pub struct Gateway {
     config: GatewayConfig,
     session_manager: Arc<SessionManager>,
     skill_registry: Arc<SkillRegistry>,
+    tool_executor: Arc<ToolExecutor>,
     cron_scheduler: Option<Arc<CronScheduler>>,
 }
 
@@ -69,6 +72,14 @@ impl Gateway {
             Arc::new(SkillRegistry::new())
         };
         
+        // Create tool executor
+        let tool_executor = Arc::new(ToolExecutor::new(
+            skill_registry.clone(),
+            config.skills_dir.clone().unwrap_or_else(|| 
+                std::path::PathBuf::from("/var/lib/openclaw/skills")
+            ),
+        ));
+        
         let cron_scheduler = if config.enable_cron {
             let scheduler = CronScheduler::new(session_manager.clone()).await
                 .map_err(|e| GatewayError::Scheduler(e.to_string()))?;
@@ -81,6 +92,7 @@ impl Gateway {
             config,
             session_manager,
             skill_registry,
+            tool_executor,
             cron_scheduler,
         })
     }
@@ -112,6 +124,7 @@ impl Gateway {
             self.config.bind_addr,
             self.session_manager,
             self.skill_registry,
+            self.tool_executor,
             self.cron_scheduler.unwrap_or_else(|| {
                 // Create dummy scheduler if disabled
                 Arc::new(tokio::task::block_in_place(|| {

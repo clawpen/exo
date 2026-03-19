@@ -18,7 +18,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     cron::{CreateJobRequest, CronScheduler},
-    protocol::{ErrorCode, GatewayMessage, SessionId},
+    executor::ToolExecutor,
+    protocol::{ErrorCode, GatewayMessage, SessionId, RequestId},
     session::SessionManager,
     skill::SkillRegistry,
 };
@@ -28,6 +29,7 @@ use crate::{
 pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub skill_registry: Arc<SkillRegistry>,
+    pub tool_executor: Arc<ToolExecutor>,
     pub cron_scheduler: Arc<CronScheduler>,
 }
 
@@ -42,12 +44,14 @@ impl GatewayServer {
         addr: SocketAddr,
         session_manager: Arc<SessionManager>,
         skill_registry: Arc<SkillRegistry>,
+        tool_executor: Arc<ToolExecutor>,
         cron_scheduler: Arc<CronScheduler>,
     ) -> Self {
         Self {
             state: AppState {
                 session_manager,
                 skill_registry,
+                tool_executor,
                 cron_scheduler,
             },
             addr,
@@ -229,7 +233,7 @@ async fn handle_message(
             // Check if skill exists
             if state.skill_registry.get(&skill).await.is_none() {
                 state.session_manager.send_to(session_id, GatewayMessage::ToolResponse {
-                    request_id,
+                    request_id: request_id.clone(),
                     result: crate::protocol::ToolResult::Error {
                         code: ErrorCode::UnknownSkill.to_string(),
                         message: format!("Skill '{}' not found", skill),
@@ -238,18 +242,37 @@ async fn handle_message(
                 return Ok(());
             }
             
-            // For now, echo back a success (actual execution would go through exo-runtime)
-            // TODO: Integrate with exo-runtime for actual tool execution
-            state.session_manager.send_to(session_id, GatewayMessage::ToolResponse {
-                request_id,
-                result: crate::protocol::ToolResult::Success {
-                    output: serde_json::json!({
-                        "message": format!("Tool {}:{} would execute with args: {:?}", skill, tool, args),
-                        "note": "Integration with exo-runtime pending"
-                    }),
-                    execution_time_ms: 0,
-                },
-            }).map_err(|_| MessageError::SessionClosed)?;
+            // Execute the tool
+            let state_clone = state.clone();
+            let session_id_clone = session_id.clone();
+            let request_id_clone = request_id.clone();
+            
+            tokio::spawn(async move {
+                let result = state_clone.tool_executor.execute(
+                    request_id_clone.clone(),
+                    &skill,
+                    &tool,
+                    args,
+                    timeout_ms,
+                ).await;
+                
+                let tool_result = match result {
+                    Ok(result) => result,
+                    Err(e) => crate::protocol::ToolResult::Error {
+                        code: "EXECUTION_ERROR".to_string(),
+                        message: e.to_string(),
+                    },
+                };
+                
+                let response = GatewayMessage::ToolResponse {
+                    request_id: request_id_clone,
+                    result: tool_result,
+                };
+                
+                if let Err(e) = state_clone.session_manager.send_to(&session_id_clone, response) {
+                    warn!(error = %e, "Failed to send tool response");
+                }
+            });
         }
         
         GatewayMessage::Ping => {

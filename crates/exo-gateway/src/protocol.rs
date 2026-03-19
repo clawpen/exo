@@ -71,6 +71,9 @@ pub enum ToolResult {
         code: String,
         message: String,
     },
+    Timeout {
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,7 +141,7 @@ impl TryFrom<&str> for SessionId {
 }
 
 /// Request ID for tracking tool calls
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RequestId(pub Uuid);
 
 impl RequestId {
