@@ -11,6 +11,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+use crate::llm::{ChatRequest, LlmProvider, Message};
 use crate::protocol::{RequestId, ToolResult};
 use crate::skill::{SkillRegistry, SkillRuntime, SkillError};
 
@@ -24,6 +25,8 @@ pub struct ToolExecutor {
     default_timeout: Duration,
     /// Track running executions
     running: Arc<tokio::sync::RwLock<HashMap<String, RunningExecution>>>,
+    /// LLM provider for direct API calls
+    llm_provider: Option<LlmProvider>,
 }
 
 #[derive(Debug)]
@@ -53,11 +56,17 @@ impl ToolExecutor {
             container_storage: container_storage.into(),
             default_timeout: Duration::from_secs(30),
             running: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            llm_provider: Some(LlmProvider::default()),
         }
     }
 
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
+        self
+    }
+
+    pub fn with_llm_provider(mut self, provider: LlmProvider) -> Self {
+        self.llm_provider = Some(provider);
         self
     }
 
@@ -106,37 +115,51 @@ impl ToolExecutor {
         self.running.write().await.insert(request_id.clone(), running_exec);
 
         // Execute based on runtime type
-        let result = match &skill.manifest.runtime {
-            SkillRuntime::Container { image, resources, env } => {
-                self.execute_container(
-                    skill_name,
-                    tool_name,
-                    args,
-                    image,
-                    resources.memory.clone(),
-                    resources.cpu,
-                    resources.gpu,
-                    env.clone(),
-                    abort_rx,
-                ).await
+        let result = if skill_name == "llm" {
+            // Special handling for LLM skill - use HTTP API
+            if let Some(ref provider) = self.llm_provider {
+                self.execute_llm_tool(tool_name, args, provider).await
+            } else {
+                Ok(ExecutionResult {
+                    stdout: serde_json::json!({"error": "LLM provider not configured"}).to_string(),
+                    stderr: "LLM provider not available".to_string(),
+                    exit_code: 1,
+                    execution_time_ms: 0,
+                })
             }
-            SkillRuntime::Wasm { module, memory_limit_mb } => {
-                self.execute_wasm(
-                    skill_name,
-                    tool_name,
-                    args,
-                    module,
-                    *memory_limit_mb,
-                    abort_rx,
-                ).await
-            }
-            SkillRuntime::Builtin => {
-                self.execute_builtin(
-                    skill_name,
-                    tool_name,
-                    args,
-                    abort_rx,
-                ).await
+        } else {
+            match &skill.manifest.runtime {
+                SkillRuntime::Container { image, resources, env } => {
+                    self.execute_container(
+                        skill_name,
+                        tool_name,
+                        args,
+                        image,
+                        resources.memory.clone(),
+                        resources.cpu,
+                        resources.gpu,
+                        env.clone(),
+                        abort_rx,
+                    ).await
+                }
+                SkillRuntime::Wasm { module, memory_limit_mb } => {
+                    self.execute_wasm(
+                        skill_name,
+                        tool_name,
+                        args,
+                        module,
+                        *memory_limit_mb,
+                        abort_rx,
+                    ).await
+                }
+                SkillRuntime::Builtin => {
+                    self.execute_builtin(
+                        skill_name,
+                        tool_name,
+                        args,
+                        abort_rx,
+                    ).await
+                }
             }
         };
 
@@ -316,6 +339,167 @@ impl ToolExecutor {
             exit_code: 1,
             execution_time_ms: 0,
         })
+    }
+
+    /// Execute LLM tool via HTTP API
+    async fn execute_llm_tool(
+        &self,
+        tool: &str,
+        args: serde_json::Value,
+        provider: &LlmProvider,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        let start = std::time::Instant::now();
+        
+        let result = match tool {
+            "chat" => {
+                // Parse chat request from args
+                let model = args.get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("qwen2.5:0.5b")
+                    .to_string();
+                
+                let messages: Vec<Message> = args.get("messages")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| {
+                                let role = m.get("role")?.as_str()?.to_string();
+                                let content = m.get("content")?.as_str()?.to_string();
+                                Some(Message { role, content })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                
+                let temperature = args.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32);
+                let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64()).map(|u| u as u32);
+                
+                let request = ChatRequest {
+                    model,
+                    messages,
+                    temperature,
+                    max_tokens,
+                };
+                
+                match provider.chat(request).await {
+                    Ok(response) => {
+                        let output = serde_json::json!({
+                            "content": response.content,
+                            "model": response.model,
+                            "tokens": {
+                                "prompt": response.tokens.prompt,
+                                "completion": response.tokens.completion
+                            }
+                        });
+                        Ok(ExecutionResult {
+                            stdout: output.to_string(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::ExecutionFailed(e.to_string()))
+                    }
+                }
+            }
+            
+            "list_models" => {
+                match provider.list_models().await {
+                    Ok(models) => {
+                        let output = serde_json::json!({
+                            "models": models.iter().map(|m| {
+                                serde_json::json!({
+                                    "name": m.name,
+                                    "size": m.size,
+                                    "modified": m.modified,
+                                    "parameter_size": m.parameter_size,
+                                    "quantization": m.quantization
+                                })
+                            }).collect::<Vec<_>>()
+                        });
+                        Ok(ExecutionResult {
+                            stdout: output.to_string(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::ExecutionFailed(e.to_string()))
+                    }
+                }
+            }
+            
+            "pull" => {
+                let model = args.get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                if model.is_empty() {
+                    return Ok(ExecutionResult {
+                        stdout: serde_json::json!({"error": "model parameter required"}).to_string(),
+                        stderr: "Missing model parameter".to_string(),
+                        exit_code: 1,
+                        execution_time_ms: 0,
+                    });
+                }
+                
+                match provider.pull_model(&model).await {
+                    Ok(progress) => {
+                        let output = serde_json::json!({
+                            "status": progress.status,
+                            "completed": progress.completed,
+                            "total": progress.total
+                        });
+                        Ok(ExecutionResult {
+                            stdout: output.to_string(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::ExecutionFailed(e.to_string()))
+                    }
+                }
+            }
+            
+            "embeddings" => {
+                let model = args.get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("nomic-embed-text")
+                    .to_string();
+                let text = args.get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                
+                match provider.embeddings(&model, &text).await {
+                    Ok(embeddings) => {
+                        let output = serde_json::json!({
+                            "embeddings": embeddings
+                        });
+                        Ok(ExecutionResult {
+                            stdout: output.to_string(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                            execution_time_ms: start.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::ExecutionFailed(e.to_string()))
+                    }
+                }
+            }
+            
+            _ => {
+                Err(ExecutionError::ToolNotFound(format!("llm:{}", tool)))
+            }
+        };
+        
+        result
     }
 
     /// Execute builtin tool (placeholder for future implementation)

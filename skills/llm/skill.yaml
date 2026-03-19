@@ -1,0 +1,112 @@
+name: llm
+version: "1.0.0"
+description: "Local LLM inference with GPU support"
+author: "Exo"
+
+runtime:
+  type: container
+  image: ollama/ollama:latest
+  resources:
+    memory: "8G"
+    cpu: 4.0
+    gpu: true
+  env:
+    OLLAMA_HOST: "0.0.0.0:11434"
+    OLLAMA_MODELS: "/models"
+
+tools:
+  - name: chat
+    description: "Generate chat completion using local LLM"
+    parameters:
+      type: object
+      properties:
+        model:
+          type: string
+          description: "Model name (e.g., qwen2.5:0.5b, llama3.2:1b)"
+        messages:
+          type: array
+          description: "Chat messages"
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum: ["system", "user", "assistant"]
+              content:
+                type: string
+        temperature:
+          type: number
+          default: 0.7
+        max_tokens:
+          type: integer
+          description: "Maximum tokens to generate"
+      required: ["model", "messages"]
+    returns:
+      type: object
+      properties:
+        content:
+          type: string
+        model:
+          type: string
+        tokens:
+          type: object
+          properties:
+            prompt:
+              type: integer
+            completion:
+              type: integer
+    timeout_ms: 120000
+
+  - name: list_models
+    description: "List available local models"
+    parameters:
+      type: object
+    returns:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              size:
+                type: integer
+              modified:
+                type: string
+    timeout_ms: 10000
+
+  - name: pull
+    description: "Download a model from Ollama registry"
+    parameters:
+      type: object
+      properties:
+        model:
+          type: string
+          description: "Model name to pull (e.g., qwen2.5:0.5b)"
+      required: ["model"]
+    returns:
+      type: object
+    timeout_ms: 300000
+
+  - name: embeddings
+    description: "Generate embeddings for text"
+    parameters:
+      type: object
+      properties:
+        model:
+          type: string
+          description: "Embedding model name"
+        text:
+          type: string
+          description: "Text to embed"
+      required: ["model", "text"]
+    returns:
+      type: object
+      properties:
+        embeddings:
+          type: array
+          items:
+            type: number
+    timeout_ms: 30000

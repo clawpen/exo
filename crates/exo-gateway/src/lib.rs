@@ -12,6 +12,7 @@
 
 pub mod cron;
 pub mod executor;
+pub mod llm;
 pub mod protocol;
 pub mod server;
 pub mod session;
@@ -19,6 +20,7 @@ pub mod skill;
 
 pub use cron::{CronScheduler, CreateJobRequest, ScheduledJob, CronError};
 pub use executor::{ToolExecutor, ExecutionResult, ExecutionError};
+pub use llm::{LlmProvider, ChatRequest, ChatResponse, Message, ModelInfo, LlmError};
 pub use protocol::{GatewayMessage, ErrorCode, ToolResult, SessionId, RequestId, PROTOCOL_VERSION};
 pub use server::{GatewayServer, AppState, ServerError};
 pub use session::{SessionManager, Session, SessionInfo, SessionError};

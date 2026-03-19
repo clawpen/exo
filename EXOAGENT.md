@@ -123,7 +123,8 @@ tools:
 | CLI Binary | ✅ | exo-agent commands |
 | **Tool Execution** | ✅ | Via docker/podman (exo-runtime integration pending) |
 | **Shell/REPL** | ✅ | Interactive shell with command history |
-| **GPU Passthrough** | 🔧 | Needs testing with LLM containers |
+| **Local LLM** | ✅ | Ollama integration with chat, embeddings, model pull |
+| **GPU Passthrough** | 🔧 | Available for LLM containers |
 | **WASM Skills** | 📋 | Not yet implemented |
 
 ## Next Steps
@@ -133,6 +134,92 @@ tools:
 3. **Implement LLM provider** for local model management with GPU passthrough
 4. **Build skill marketplace** (discover, install skills)
 5. **Add authentication** (API keys, JWT)
+
+## LLM Integration (Local Models)
+
+Exo Agent includes built-in support for local LLM inference via Ollama:
+
+### Quick Start
+
+```bash
+# 1. Start gateway with LLM skill
+cargo run -p exo-agent -- gateway \
+  --bind 127.0.0.1:8080 \
+  --skills-dir ./skills
+
+# 2. Pull a small model (in another terminal)
+docker run --rm -p 11434:11434 ollama/ollama
+
+# Or use the shell to pull via the gateway
+exo-agent shell
+curl http://localhost:11434/api/pull -d '{"name":"qwen2.5:0.5b"}'
+```
+
+### LLM Tools
+
+| Tool | Description |
+|------|-------------|
+| `llm.chat` | Generate chat completions |
+| `llm.list_models` | List available local models |
+| `llm.pull` | Download a model from registry |
+| `llm.embeddings` | Generate text embeddings |
+
+### Example: Chat Completion
+
+```bash
+exo-agent shell
+exo> /call llm chat '{"model":"qwen2.5:0.5b","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Or via WebSocket:
+```json
+{
+  "type": "tool_request",
+  "request_id": "1",
+  "skill": "llm",
+  "tool": "chat",
+  "args": {
+    "model": "qwen2.5:0.5b",
+    "messages": [
+      {"role": "user", "content": "What is Rust?"}
+    ],
+    "temperature": 0.7
+  }
+}
+```
+
+### GPU Passthrough
+
+Enable GPU for LLM inference in `skills/llm/skill.yaml`:
+
+```yaml
+runtime:
+  type: container
+  image: ollama/ollama:latest
+  resources:
+    memory: "8G"
+    cpu: 4.0
+    gpu: true  # ← Enable GPU
+```
+
+The container will be started with `--gpus all` flag.
+
+### Architecture
+
+```
+┌─────────────┐    HTTP API    ┌─────────────────┐
+│   Agent     │ ─────────────→ │  Ollama Server  │
+│  (shell)    │                │   (container)   │
+└─────────────┘                └─────────────────┘
+                                      │
+                                      ↓
+                              ┌───────────────┐
+                              │  Local Model  │
+                              │  (GPU/CPU)    │
+                              └───────────────┘
+```
+
+The LLM skill uses a direct HTTP bridge to communicate with Ollama, bypassing stdin/stdout for better streaming support.
 
 ## Interactive Shell/REPL
 
