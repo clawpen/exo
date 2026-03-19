@@ -1,0 +1,28 @@
+[package]
+name = "exo-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "exo-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace deps
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+# Internal
+exo-gateway = { path = "../exo-gateway" }
+
+# CLI extras
+directories = "5.0"
+config = "0.14"
