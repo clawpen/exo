@@ -122,16 +122,87 @@ tools:
 | Protocol | ✅ | v1.0.0 message types |
 | CLI Binary | ✅ | exo-agent commands |
 | **Tool Execution** | ✅ | Via docker/podman (exo-runtime integration pending) |
+| **Shell/REPL** | ✅ | Interactive shell with command history |
 | **GPU Passthrough** | 🔧 | Needs testing with LLM containers |
 | **WASM Skills** | 📋 | Not yet implemented |
 
 ## Next Steps
 
-1. **Integrate exo-runtime** for actual container execution
-2. **Add shell/REPL mode** for interactive development
-3. **Implement LLM provider** for local model management
+1. ~~Integrate exo-runtime for actual container execution~~ (docker/podman bridge working)
+2. ~~Add shell/REPL mode~~ (✅ Complete)
+3. **Implement LLM provider** for local model management with GPU passthrough
 4. **Build skill marketplace** (discover, install skills)
 5. **Add authentication** (API keys, JWT)
+
+## Interactive Shell/REPL
+
+Exo Agent includes a full interactive shell for testing and development:
+
+```bash
+# Connect to a running gateway
+exo-agent shell --url ws://127.0.0.1:8080/ws
+
+# Or with a custom agent ID
+exo-agent shell --agent-id my-test-agent
+```
+
+### Shell Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/ping` | Send ping to gateway |
+| `/skills` | Request skills list |
+| `/tools` | Request tools list |
+| `/call <skill> <tool> [args]` | Call a tool |
+| `/exit` | Exit the shell |
+
+### Example Session
+
+```
+╔═══════════════════════════════════════╗
+║      Exo Agent Interactive Shell      ║
+╚═══════════════════════════════════════╝
+
+Connecting to ws://127.0.0.1:8080/ws...
+Connected!
+
+Type /help for available commands
+
+exo> /help
+Available Commands:
+  /help, /h - Show this help
+  /skills, /s - List available skills
+  /tools, /t - List available tools
+  /call, /c <skill> <tool> [args] - Call a tool
+  /ping - Send ping to server
+  /exit, /quit, /q - Exit the shell
+
+exo> /ping
+►─ Ping sent
+◄─ Pong!
+
+exo> /call time now
+►─ Calling time:now...
+[1a2b3c4d] ✓ Success
+{
+  "timestamp": 1700000000,
+  "iso": "2026-03-20T05:30:00Z",
+  "local": "2026-03-20 13:30:00 CST"
+}
+
+exo> /exit
+Disconnecting...
+Goodbye!
+```
+
+### Raw JSON Messages
+
+You can also send raw JSON messages for debugging:
+
+```
+exo> {"type": "tool_request", "request_id": "1", "skill": "time", "tool": "now", "args": {}}
+```
 
 ## Running
 
