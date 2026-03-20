@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    auth::{AuthManager, AuthResult},
     cron::{CreateJobRequest, CronScheduler},
     executor::ToolExecutor,
     protocol::{ErrorCode, GatewayMessage, SessionId, RequestId},
@@ -31,6 +32,7 @@ pub struct AppState {
     pub skill_registry: Arc<SkillRegistry>,
     pub tool_executor: Arc<ToolExecutor>,
     pub cron_scheduler: Arc<CronScheduler>,
+    pub auth_manager: Arc<AuthManager>,
 }
 
 /// Gateway server
@@ -46,6 +48,7 @@ impl GatewayServer {
         skill_registry: Arc<SkillRegistry>,
         tool_executor: Arc<ToolExecutor>,
         cron_scheduler: Arc<CronScheduler>,
+        auth_manager: Arc<AuthManager>,
     ) -> Self {
         Self {
             state: AppState {
@@ -53,6 +56,7 @@ impl GatewayServer {
                 skill_registry,
                 tool_executor,
                 cron_scheduler,
+                auth_manager,
             },
             addr,
         }

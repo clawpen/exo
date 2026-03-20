@@ -10,6 +10,7 @@
 //! - **Cron scheduling** - Time-based job execution
 //! - **REST API** - External integrations and monitoring
 
+pub mod auth;
 pub mod cron;
 pub mod executor;
 pub mod llm;
@@ -18,6 +19,7 @@ pub mod server;
 pub mod session;
 pub mod skill;
 
+pub use auth::{AuthManager, AuthResult, AuthError};
 pub use cron::{CronScheduler, CreateJobRequest, ScheduledJob, CronError};
 pub use executor::{ToolExecutor, ExecutionResult, ExecutionError};
 pub use llm::{LlmProvider, ChatRequest, ChatResponse, Message, ModelInfo, LlmError};
@@ -37,6 +39,10 @@ pub struct GatewayConfig {
     pub skills_dir: Option<std::path::PathBuf>,
     pub session_timeout_secs: u64,
     pub enable_cron: bool,
+    /// API keys for authentication (optional)
+    pub api_keys: Vec<String>,
+    /// JWT secret for authentication (optional)
+    pub jwt_secret: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -44,8 +50,10 @@ impl Default for GatewayConfig {
         Self {
             bind_addr: "127.0.0.1:8080".parse().unwrap(),
             skills_dir: None,
-            session_timeout_secs: 300, // 5 minutes
+            session_timeout_secs: 300,
             enable_cron: true,
+            api_keys: Vec::new(),
+            jwt_secret: None,
         }
     }
 }
@@ -57,6 +65,7 @@ pub struct Gateway {
     skill_registry: Arc<SkillRegistry>,
     tool_executor: Arc<ToolExecutor>,
     cron_scheduler: Option<Arc<CronScheduler>>,
+    auth_manager: Arc<AuthManager>,
 }
 
 impl Gateway {
@@ -74,13 +83,24 @@ impl Gateway {
             Arc::new(SkillRegistry::new())
         };
         
-        // Create tool executor
-        let tool_executor = Arc::new(ToolExecutor::new(
-            skill_registry.clone(),
-            config.skills_dir.clone().unwrap_or_else(|| 
-                std::path::PathBuf::from("/var/lib/openclaw/skills")
-            ),
-        ));
+        // Create auth manager
+        let auth_manager = if !config.api_keys.is_empty() {
+            Arc::new(AuthManager::with_api_keys(config.api_keys.clone()))
+        } else if let Some(ref secret) = config.jwt_secret {
+            Arc::new(AuthManager::with_jwt(secret, "exo-gateway"))
+        } else {
+            Arc::new(AuthManager::disabled())
+        };
+        
+        // Create tool executor with auth
+        let tool_executor = Arc::new(
+            ToolExecutor::new(
+                skill_registry.clone(),
+                config.skills_dir.clone().unwrap_or_else(|| 
+                    std::path::PathBuf::from("/var/lib/openclaw/skills")
+                ),
+            )
+        );
         
         let cron_scheduler = if config.enable_cron {
             let scheduler = CronScheduler::new(session_manager.clone()).await
@@ -96,6 +116,7 @@ impl Gateway {
             skill_registry,
             tool_executor,
             cron_scheduler,
+            auth_manager,
         })
     }
     
@@ -128,13 +149,13 @@ impl Gateway {
             self.skill_registry,
             self.tool_executor,
             self.cron_scheduler.unwrap_or_else(|| {
-                // Create dummy scheduler if disabled
                 Arc::new(tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
                         CronScheduler::new(Arc::new(SessionManager::new())).await.unwrap()
                     })
                 }))
             }),
+            self.auth_manager,
         );
         
         info!("Gateway ready at {}", self.config.bind_addr);

@@ -34,6 +34,14 @@ enum Commands {
         /// Disable cron scheduler
         #[arg(long)]
         no_cron: bool,
+
+        /// API keys for authentication (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        api_keys: Vec<String>,
+
+        /// JWT secret for authentication
+        #[arg(long)]
+        jwt_secret: Option<String>,
     },
 
     /// List available skills
@@ -75,6 +83,14 @@ enum Commands {
         /// Agent ID
         #[arg(short, long)]
         agent_id: Option<String>,
+        
+        /// API key for authentication
+        #[arg(long)]
+        api_key: Option<String>,
+        
+        /// JWT token for authentication
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -91,19 +107,21 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Gateway { bind, skills_dir, session_timeout, no_cron } => {
+        Commands::Gateway { bind, skills_dir, session_timeout, no_cron, api_keys, jwt_secret } => {
             info!("Starting Exo Agent Gateway");
-
+            
             let bind_addr: SocketAddr = bind.parse()
                 .map_err(|e| anyhow::anyhow!("Invalid bind address: {}", e))?;
-
+            
             let config = GatewayConfig {
                 bind_addr,
                 skills_dir,
                 session_timeout_secs: session_timeout,
                 enable_cron: !no_cron,
+                api_keys,
+                jwt_secret,
             };
-
+            
             let gateway = Gateway::new(config).await?;
             gateway.run().await?;
         }
@@ -145,8 +163,8 @@ async fn main() -> anyhow::Result<()> {
             create_skill_template(&name, &output).await?;
         }
 
-        Commands::Shell { url, agent_id } => {
-            run_shell(&url, agent_id).await?;
+        Commands::Shell { url, agent_id, api_key, token } => {
+            run_shell(&url, agent_id, api_key, token).await?;
         }
     }
 
