@@ -105,10 +105,11 @@ fn default_hostname() -> String {
 }
 
 fn default_namespaces() -> Namespaces {
-    // Default for rootless: user + mount + uts + ipc + pid
+    // Default for rootless: user + mount + uts + ipc
     // Network and cgroup require privileges
+    // PID namespace DISABLED: causes hangs with node.js processes in WSL2
     Namespaces {
-        pid: true,       // Now supported via double-fork
+        pid: false,      // DISABLED: double-fork hangs with node.js
         network: false,  // Requires CAP_NET_ADMIN
         ipc: true,       // Works in user namespace
         uts: true,       // Works in user namespace
@@ -491,7 +492,7 @@ mod tests {
     fn test_namespaces_default() {
         let ns = Namespaces::default();
         assert!(ns.user);     // Core of rootless containers
-        assert!(ns.pid);      // Now supported via double-fork
+        assert!(!ns.pid);     // DISABLED: hangs with node.js in WSL2
         assert!(!ns.network); // Requires CAP_NET_ADMIN
         assert!(ns.mount);    // Works in user namespace
         assert!(ns.uts);      // Works in user namespace

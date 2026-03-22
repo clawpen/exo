@@ -9,21 +9,31 @@ pub struct ListArgs {
 }
 
 pub async fn execute(args: ListArgs) -> Result<()> {
+    // For JSON output, suppress tracing warnings to stdout by redirecting to stderr
+    // This prevents corruption of JSON output
+    if args.json {
+        // Redirect tracing to stderr for JSON output
+        let subscriber = tracing_subscriber::FmtSubscriber::builder()
+            .with_writer(std::io::stderr)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+
     let manager = ContainerManager::new()?;
-    
+
     // Refresh status for all containers
     let mut containers = manager.list()?;
     for container in &mut containers {
         let _ = manager.refresh_status(container);
     }
-    
+
     // Re-load after refresh
     containers = if args.all {
         manager.list()?
     } else {
         manager.list_running()?
     };
-    
+
     if args.json {
         // JSON output format
         let json_containers: Vec<exo_runtime::ContainerJson> = containers

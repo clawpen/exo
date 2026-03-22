@@ -75,7 +75,11 @@ impl AgentProfile {
         Self {
             name: "agent-default".to_string(),
             seccomp: Self::default_seccomp(),
-            capabilities: vec![],
+            // Keep essential capabilities for basic process operation
+            capabilities: vec![
+                crate::security::Capability::CAP_SETUID,
+                crate::security::Capability::CAP_SETGID,
+            ],
             no_new_privs: false,  // Disabled for Node.js compatibility
             network: NetworkAccess::OutboundOnly,
             masked_paths: vec![

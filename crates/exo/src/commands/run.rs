@@ -293,7 +293,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
     let pid = container.handle().pid.unwrap();
     metadata.id = container.handle().id.clone();
     metadata.set_running(pid);
-    
+
     // Save container metadata (for persistence)
     if !rm {
         manager.save(&metadata)?;

@@ -242,7 +242,7 @@ pub fn default_profile() -> SeccompProfile {
         "keyctl", "ioprio_set", "ioprio_get", "inotify_init", "inotify_add_watch",
         "inotify_rm_watch", "migrate_pages", "openat", "mkdirat", "mknodat",
         "fchownat", "futimesat", "newfstatat", "unlinkat", "renameat", "linkat",
-        "symlinkat", "readlinkat", "fchmodat", "faccessat", "chmod", "fchmod", "pselect6", "ppoll",
+        "symlinkat", "readlinkat", "fchmodat", "faccessat", "chmod", "fchmod", "unlink", "pselect6", "ppoll",
         "unshare", "set_robust_list", "get_robust_list", "splice", "tee", "sync_file_range",
         "vmsplice", "move_pages", "utimensat", "epoll_pwait", "signalfd", "timerfd_create",
         "eventfd", "fallocate", "timerfd_settime", "timerfd_gettime", "accept4",

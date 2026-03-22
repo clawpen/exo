@@ -43,6 +43,7 @@ pub mod image;
 pub mod channel;
 pub mod agent;
 pub mod manager;
+pub mod network;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use manager::{ContainerManager, ContainerMetadata, ContainerJson, ContainerListJson, CONTAINER_STATE_DIR};

@@ -6,7 +6,7 @@
 
 use crate::cgroup::{self, CgroupManager};
 use crate::config::ContainerConfig;
-use crate::rootfs::{self, pivot_rootfs, prepare_rootfs, setup_mounts};
+use crate::rootfs::{self, pivot_rootfs, prepare_rootfs, setup_mounts, apply_bind_mounts_before_pivot};
 use crate::seccomp::{self, apply_seccomp, default_profile};
 use crate::security::{self, drop_capabilities, get_default_caps};
 use crate::userns::{self, setup_user_namespace, GidMap, UidMap};
@@ -172,6 +172,11 @@ impl ContainerProcess {
 
         // Open namespace handles for later access
         let namespaces = open_namespace_handles(pid)?;
+
+        // Set up port forwarding if needed
+        if !config.network.port_mappings.is_empty() {
+            setup_port_forwarding_for_container(config, pid)?;
+        }
 
         Ok(Self {
             pid,
@@ -592,6 +597,14 @@ fn container_child_init(
         tracing::warn!("Rootfs /bin does not exist!");
     }
     
+    // NOTE: We do NOT apply bind mounts before pivot_root because:
+    // 1. The bind mount source is on the host filesystem
+    // 2. After pivot_root, the old root (with the source) moves to /.pivot_old
+    // 3. The bind mount would then point to a path on the old root
+    // 
+    // Instead, we apply bind mounts AFTER pivot_root, when the container's
+    // root is properly set up and we're in the new mount namespace.
+    
     // Change to the new root directory
     std::env::set_current_dir(&rootfs_canonical)
         .context("Failed to change to rootfs directory")?;
@@ -649,21 +662,28 @@ fn container_child_init(
     }
 
     // Step 4: Set up mounts (proc, sys, dev, etc.)
+    tracing::debug!("About to call setup_mounts");
     setup_mounts(config)?;
+    tracing::debug!("setup_mounts completed");
 
     // Step 5: Set hostname if UTS namespace is isolated
     if config.namespaces.uts && !config.hostname.is_empty() {
+        tracing::debug!("Setting hostname");
         unistd::sethostname(&config.hostname)
             .context("Failed to set hostname")?;
+        tracing::debug!("Hostname set successfully");
     }
 
     // Step 6: Set up network (basic loopback)
     if config.namespaces.network {
+        tracing::debug!("Setting up loopback network");
         setup_loopback_network()?;
+        tracing::debug!("Loopback network setup completed");
     }
 
     // Step 7: Apply security profile
     if !config.privileged {
+        tracing::debug!("About to apply security profile");
         // Check if this is an agent container and use agent-specific security
         if config.is_agent() {
             let agent_profile = get_agent_profile(config);
@@ -671,9 +691,12 @@ fn container_child_init(
 
             // Drop capabilities according to agent profile
             drop_capabilities(&agent_profile.capabilities)?;
+            tracing::debug!("Capabilities dropped");
 
             // Apply agent seccomp filter
+            tracing::debug!("About to apply seccomp filter");
             apply_seccomp(&agent_profile.seccomp)?;
+            tracing::debug!("Seccomp filter applied");
 
             // Set no_new_privs if configured
             if agent_profile.no_new_privs {
@@ -695,15 +718,19 @@ fn container_child_init(
                 get_default_caps().into_iter().collect()
             };
             drop_capabilities(&caps_to_keep)?;
+            tracing::debug!("Standard capabilities dropped");
 
             // Apply standard seccomp filter
             let profile = default_profile();
             apply_seccomp(&profile)?;
+            tracing::debug!("Standard seccomp filter applied");
         }
+        tracing::debug!("Security profile application completed");
     }
 
 
     // Step 9: Execute the container command
+    tracing::debug!("About to execute container command");
     exec_container_command(config, &options.workdir)?;
 
     Ok(())
@@ -850,6 +877,94 @@ pub fn get_process_caps(pid: Pid) -> Result<String> {
     }
 
     Err(anyhow::anyhow!("CapEff not found in process status"))
+}
+
+/// Set up port forwarding for a container.
+/// 
+/// For containers with isolated network namespace, we use socat to proxy
+/// traffic from the host port to the container's network namespace.
+/// For containers sharing the host network (default for rootless), 
+/// no forwarding is needed - the container can bind directly.
+#[cfg(target_os = "linux")]
+fn setup_port_forwarding_for_container(config: &ContainerConfig, pid: Pid) -> Result<()> {
+    use std::process::Command;
+    
+    // If network namespace is NOT isolated, container shares host network
+    // and can bind directly to ports - no forwarding needed
+    if !config.namespaces.network {
+        tracing::info!(
+            "Container {} shares host network namespace - port forwarding not needed (container can bind directly)",
+            config.name
+        );
+        for pm in &config.network.port_mappings {
+            tracing::info!(
+                "  Port {}: container can bind directly to port {}",
+                pm.host_port, pm.container_port
+            );
+        }
+        return Ok(());
+    }
+
+    // Network namespace is isolated - need to set up forwarding
+    tracing::info!(
+        "Container {} has isolated network namespace - setting up port forwarding",
+        config.name
+    );
+
+    // Check if socat is available
+    let socat_available = Command::new("which")
+        .arg("socat")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !socat_available {
+        tracing::warn!(
+            "socat not available - port forwarding will not work. \
+             Install socat for port forwarding support with isolated network namespaces."
+        );
+        tracing::warn!(
+            "Alternative: use --network host to share the host network namespace"
+        );
+        return Ok(());
+    }
+
+    // For each port mapping, spawn a socat process that:
+    // 1. Listens on the host port
+    // 2. Uses nsenter to enter the container's network namespace
+    // 3. Connects to the container's localhost:container_port
+    for pm in &config.network.port_mappings {
+        let host_port = pm.host_port;
+        let container_port = pm.container_port;
+        let pid_num = pid.as_raw();
+
+        // Spawn socat with nsenter to forward into the container's network namespace
+        // This is a background process that will forward traffic
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "socat TCP-LISTEN:{},fork,reuseaddr EXEC:'nsenter --target={} --net socat - TCP:127.0.0.1:{}'",
+                host_port, pid_num, container_port
+            ))
+            .spawn();
+
+        match child {
+            Ok(_handle) => {
+                tracing::info!(
+                    "Started port forwarding: host {} -> container PID {} port {}",
+                    host_port, pid_num, container_port
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to start port forwarding {} -> {}: {}",
+                    host_port, container_port, e
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

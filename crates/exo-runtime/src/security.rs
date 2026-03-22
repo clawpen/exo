@@ -383,26 +383,43 @@ pub fn drop_capabilities(keep: &[Capability]) -> Result<()> {
         .map(|c| c.as_caps_capability())
         .collect();
 
+    tracing::debug!("Keeping capabilities: {:?}", keep);
+
     // Get all capabilities currently in the effective set
     let current = caps::read(None, CapSet::Effective)
         .context("Failed to read current capabilities")?;
 
+    tracing::debug!("Current effective capabilities: {:?}", current);
+
     // Drop capabilities not in keep set
-    for cap in current {
+    for cap in current.clone() {
         if !keep_set.contains(&cap) {
+            tracing::debug!("About to drop effective capability: {:?}", cap);
             caps::drop(None, CapSet::Effective, cap)
                 .with_context(|| format!("Failed to drop capability: {:?}", cap))?;
-            tracing::debug!("Dropped capability: {:?}", cap);
+            tracing::debug!("Successfully dropped effective capability: {:?}", cap);
+        } else {
+            tracing::debug!("Keeping effective capability: {:?}", cap);
         }
     }
+
+    tracing::debug!("Effective set done, reading permitted set");
 
     // Also drop from permitted set
     let permitted = caps::read(None, CapSet::Permitted)
         .context("Failed to read permitted capabilities")?;
 
-    for cap in permitted {
+    tracing::debug!("Current permitted capabilities: {:?}", permitted);
+
+    for cap in permitted.clone() {
         if !keep_set.contains(&cap) {
-            let _ = caps::drop(None, CapSet::Permitted, cap);
+            tracing::debug!("About to drop permitted capability: {:?}", cap);
+            match caps::drop(None, CapSet::Permitted, cap) {
+                Ok(_) => tracing::debug!("Successfully dropped permitted capability: {:?}", cap),
+                Err(e) => tracing::warn!("Failed to drop permitted capability {:?}: {}", cap, e),
+            }
+        } else {
+            tracing::debug!("Keeping permitted capability: {:?}", cap);
         }
     }
 

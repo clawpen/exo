@@ -92,7 +92,7 @@ enum Commands {
         tty: bool,
 
         /// Detach from container (run in background)
-        #[arg(short = 'D', long)]
+        #[arg(short, long)]
         detach: bool,
     },
 
@@ -222,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(std::io::stderr)
         .init();
 
     // Run the appropriate command

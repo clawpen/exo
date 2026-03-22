@@ -893,20 +893,23 @@ pub fn setup_mounts(_config: &ContainerConfig) -> Result<()> {
     Err(anyhow::anyhow!("Mount setup is only supported on Linux"))
 }
 
-/// Apply user-specified bind mounts.
+/// Apply bind mounts BEFORE pivot_root (while still in host mount namespace).
 ///
-/// Bind mounts allow selective access to host directories.
+/// This is critical for bind mounts to work: they must be set up while still
+/// in the host's mount namespace, then they get carried through pivot_root.
 ///
 /// # Arguments
 ///
 /// * `config` - Container configuration with mount specifications
+/// * `rootfs` - The container rootfs path (bind targets are relative to this)
 #[cfg(target_os = "linux")]
-pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
+pub fn apply_bind_mounts_before_pivot(config: &ContainerConfig, rootfs: &Path) -> Result<()> {
     for mount_spec in &config.mounts {
         match mount_spec.mount_type.as_str() {
             "bind" => {
                 let source = Path::new(&mount_spec.source);
-                let target = Path::new(&mount_spec.target);
+                // Target is inside the rootfs
+                let target = rootfs.join(mount_spec.target.trim_start_matches('/'));
 
                 // Ensure source exists on host
                 if !source.exists() {
@@ -914,21 +917,24 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
                     continue;
                 }
 
-                // Ensure target directory exists in container
+                tracing::info!("Setting up bind mount BEFORE pivot: {:?} -> {:?}", source, target);
+
+                // Ensure target directory exists in container rootfs
                 if let Some(parent) = target.parent() {
                     create_dir_all(parent)
                         .with_context(|| format!("Failed to create mount parent: {:?}", parent))?;
                 }
                 if !target.exists() {
                     if source.is_dir() {
-                        create_dir_all(target)
+                        create_dir_all(&target)
                             .with_context(|| format!("Failed to create mount target: {:?}", target))?;
                     } else {
-                        // Create parent for file
+                        // Create parent for file mount
                         if let Some(parent) = target.parent() {
                             create_dir_all(parent)?;
                         }
-                        File::create(target)?;
+                        File::create(&target)
+                            .with_context(|| format!("Failed to create mount target file: {:?}", target))?;
                     }
                 }
 
@@ -950,27 +956,152 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
                     flags |= MsFlags::MS_RDONLY;
                 }
 
-                // First bind
+                // First bind mount
                 mount(
                     Some(source),
-                    target,
+                    &target,
                     None::<&str>,
                     MsFlags::MS_BIND | MsFlags::MS_REC,
                     None::<&str>,
-                )?;
+                ).with_context(|| format!("Failed to bind mount {:?} -> {:?}", source, target))?;
 
                 // Remount with flags (to apply read-only etc.)
                 if mount_spec.readonly || !mount_spec.propagation.is_empty() {
                     mount(
                         Some(source),
-                        target,
+                        &target,
                         None::<&str>,
                         flags | MsFlags::MS_REMOUNT,
                         None::<&str>,
-                    )?;
+                    ).with_context(|| format!("Failed to remount with flags: {:?}", target))?;
                 }
 
-                tracing::debug!("Applied bind mount: {:?} -> {:?}", source, target);
+                tracing::info!("Applied bind mount BEFORE pivot: {:?} -> {:?}", source, target);
+            }
+            "tmpfs" => {
+                // tmpfs mounts should be done after pivot_root, skip here
+                tracing::debug!("Deferring tmpfs mount until after pivot_root: {}", mount_spec.target);
+            }
+            _ => {
+                tracing::warn!("Unsupported mount type: {}", mount_spec.mount_type);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply user-specified bind mounts (called AFTER pivot_root).
+///
+/// This function applies bind mounts after pivot_root has been completed.
+/// The source paths may need to be prefixed with /.pivot_old if they're on
+/// the old root filesystem (which is still accessible until we unmount it).
+///
+/// # Arguments
+///
+/// * `config` - Container configuration with mount specifications
+#[cfg(target_os = "linux")]
+pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
+    // Check if old root is still accessible (pivot_root may have failed or old root not unmounted)
+    let old_root = Path::new("/.pivot_old");
+    let old_root_exists = old_root.exists();
+    
+    for mount_spec in &config.mounts {
+        match mount_spec.mount_type.as_str() {
+            "bind" => {
+                let original_source = Path::new(&mount_spec.source);
+                let target = Path::new(&mount_spec.target);
+
+                // Check if already mounted
+                let mount_info = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+                if mount_info.contains(&format!(" {} ", target.display())) {
+                    tracing::debug!("Bind mount already active: {:?}", target);
+                    continue;
+                }
+
+                // Try to find the source:
+                // 1. First try the original path (might work if we're not fully isolated)
+                // 2. Then try via old root at /.pivot_old
+                let source = if original_source.exists() {
+                    original_source.to_path_buf()
+                } else if old_root_exists {
+                    let via_old_root = old_root.join(mount_spec.source.trim_start_matches('/'));
+                    if via_old_root.exists() {
+                        tracing::debug!("Using old root path for bind mount source: {:?}", via_old_root);
+                        via_old_root
+                    } else {
+                        tracing::warn!("Bind mount source not found: {:?} (also tried via old root: {:?})", 
+                            original_source, via_old_root);
+                        continue;
+                    }
+                } else {
+                    tracing::warn!("Bind mount source not accessible after pivot_root: {:?} (old root not available)", 
+                        original_source);
+                    continue;
+                };
+
+                tracing::info!("Applying bind mount after pivot_root: {:?} -> {:?}", source, target);
+
+                // Ensure target directory exists in container
+                if let Some(parent) = target.parent() {
+                    create_dir_all(parent)
+                        .with_context(|| format!("Failed to create mount parent: {:?}", parent))?;
+                }
+                if !target.exists() {
+                    // Check if source is a directory
+                    let is_dir = source.is_dir();
+                    if is_dir {
+                        create_dir_all(target)
+                            .with_context(|| format!("Failed to create mount target: {:?}", target))?;
+                    } else {
+                        if let Some(parent) = target.parent() {
+                            create_dir_all(parent)?;
+                        }
+                        File::create(target)?;
+                    }
+                }
+
+                // Set up mount flags
+                let mut flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+
+                match mount_spec.propagation.as_str() {
+                    "rprivate" | "" => flags |= MsFlags::MS_PRIVATE,
+                    "rshared" => flags |= MsFlags::MS_SHARED | MsFlags::MS_REC,
+                    "rslave" => flags |= MsFlags::MS_SLAVE | MsFlags::MS_REC,
+                    "ro" => flags |= MsFlags::MS_RDONLY,
+                    "rw" => {}
+                    _ => {}
+                }
+
+                if mount_spec.readonly {
+                    flags |= MsFlags::MS_RDONLY;
+                }
+
+                // Apply the bind mount
+                match mount(
+                    Some(&source),
+                    target,
+                    None::<&str>,
+                    MsFlags::MS_BIND | MsFlags::MS_REC,
+                    None::<&str>,
+                ) {
+                    Ok(()) => {
+                        // Remount with flags (to apply read-only etc.)
+                        if mount_spec.readonly || !mount_spec.propagation.is_empty() {
+                            let _ = mount(
+                                Some(&source),
+                                target,
+                                None::<&str>,
+                                flags | MsFlags::MS_REMOUNT,
+                                None::<&str>,
+                            );
+                        }
+                        tracing::info!("Successfully applied bind mount: {:?} -> {:?}", source, target);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to apply bind mount {:?} -> {:?}: {}", source, target, e);
+                    }
+                }
             }
             "tmpfs" => {
                 let target = Path::new(&mount_spec.target);
