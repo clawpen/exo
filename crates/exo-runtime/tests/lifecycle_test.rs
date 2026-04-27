@@ -64,12 +64,9 @@ fn test_cgroup_lifecycle() {
     let test_id = format!("lifecycle_test_{}", std::process::id());
     let mut mgr = CgroupManager::new(&test_id).expect("Failed to create cgroup");
 
-    // Initial state: not initialized
-    assert!(!mgr.initialized);
-
-    // Initialize
+    // Initialize (initialized field is private; rely on path().exists() as the
+    // observable post-condition).
     mgr.initialize().expect("Failed to initialize");
-    assert!(mgr.initialized);
     assert!(mgr.path().exists());
 
     // Set resource limits
@@ -274,8 +271,12 @@ fn test_seccomp_default_profile() {
     // Should have many allowed syscalls
     assert!(profile.allow.len() > 10);
 
-    // Essential syscalls should be allowed
-    let syscall_names: Vec<_> = profile.allow.iter().map(|s| s.name.as_str()).collect();
+    // Essential syscalls should be allowed (Syscall is an enum, match on Name variant)
+    use exo_runtime::seccomp::Syscall;
+    let syscall_names: Vec<&str> = profile.allow.iter().filter_map(|s| match s {
+        Syscall::Name(n) => Some(n.as_str()),
+        Syscall::Number(_) => None,
+    }).collect();
     assert!(syscall_names.contains(&"read"));
     assert!(syscall_names.contains(&"write"));
     assert!(syscall_names.contains(&"exit"));

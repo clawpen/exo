@@ -16,6 +16,7 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use exo_runtime::{Container, ContainerConfig};
 //!
 //! let config = ContainerConfig {
@@ -25,7 +26,9 @@
 //!     ..Default::default()
 //! };
 //!
-//! let container = Container::spawn(config)?;
+//! let container = Container::new(config)?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod namespace;
@@ -44,6 +47,8 @@ pub mod channel;
 pub mod agent;
 pub mod manager;
 pub mod network;
+pub mod events;
+pub mod reconcile;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use manager::{ContainerManager, ContainerMetadata, ContainerJson, ContainerListJson, CONTAINER_STATE_DIR};
@@ -58,6 +63,9 @@ pub use storage::{OverlayfsDriver, ContainerOverlay};
 pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};
 pub use channel::{AgentChannel, AgentMessage, ToolRequest, ToolResponse};
 pub use agent::{AgentProfile, NetworkAccess, get_agent_profile, AgentConfigExt};
+pub use events::{Event, EventLog, EventType};
+pub use config::RestartPolicy;
+pub use reconcile::{Reconciler, ReconcileOptions, ReconcileSummary, DEFAULT_CGROUP_ROOT};
 
 use anyhow::Result;
 

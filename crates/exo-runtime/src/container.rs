@@ -478,6 +478,7 @@ mod tests {
             readonly_rootfs: false,
             architecture: None,
             platform: None,
+            restart_policy: Default::default(),
         }
     }
 

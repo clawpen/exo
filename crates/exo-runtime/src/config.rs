@@ -67,6 +67,26 @@ pub struct ContainerConfig {
     /// Platform in OCI format (os/arch variant)
     #[serde(default)]
     pub platform: Option<String>,
+
+    /// What the reconciler should do if this container's process is gone.
+    /// Defaults to Never (record exit, no restart).
+    #[serde(default)]
+    pub restart_policy: RestartPolicy,
+}
+
+/// When the reconciler should re-spawn a container whose process has died.
+///
+/// Intentionally minimal — `Always`, `OnFailure`, backoff and max-retry counts
+/// are deferred to v2 (see `project_v2_restart_policy.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartPolicy {
+    /// Record the exit, do not restart.
+    #[default]
+    Never,
+    /// Restart only when discovered during the daemon's startup recovery pass
+    /// (i.e., the daemon itself died — not the container exiting on its own).
+    OnDaemonRestart,
 }
 
 impl Default for ContainerConfig {
@@ -88,6 +108,7 @@ impl Default for ContainerConfig {
             readonly_rootfs: false,
             architecture: None,
             platform: None,
+            restart_policy: RestartPolicy::default(),
         }
     }
 }

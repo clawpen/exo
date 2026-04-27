@@ -200,10 +200,52 @@ enum Commands {
     Import {
         /// Path to image tarball
         tarball: String,
-        
+
         /// Name for imported image (e.g., myimage:latest)
         #[arg(short, long)]
         name: Option<String>,
+    },
+
+    /// Show the daemon's lifecycle event log
+    Events {
+        /// Filter to one container (by id or name)
+        #[arg(short, long)]
+        container: Option<String>,
+
+        /// Maximum events to show (newest first)
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Daemon mode - run a persistent server for faster operations
+    Daemon {
+        /// Run in foreground (don't detach)
+        #[arg(long)]
+        foreground: bool,
+
+        /// Stop the daemon
+        #[arg(long)]
+        stop: bool,
+
+        /// Show daemon status
+        #[arg(long)]
+        status: bool,
+
+        /// Socket path (default: /tmp/exo-daemon.sock)
+        #[arg(long, value_name = "PATH")]
+        socket: Option<String>,
+
+        /// Request timeout in milliseconds
+        #[arg(long, default_value = "30000")]
+        timeout: u64,
+
+        /// Show status in JSON format
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -277,6 +319,23 @@ async fn main() -> anyhow::Result<()> {
                 tarball: PathBuf::from(tarball),
                 name,
             }).await?
+        }
+        Commands::Events { container, limit, json } => {
+            commands::events::execute(commands::events::EventsArgs { container, limit, json }).await?
+        }
+        Commands::Daemon { foreground, stop, status, socket, timeout, json } => {
+            if stop {
+                commands::daemon::stop()?;
+            } else if status {
+                commands::daemon::status(commands::daemon::DaemonStatusArgs { json })?;
+            } else {
+                commands::daemon::start(commands::daemon::DaemonArgs {
+                    socket_path: socket,
+                    timeout: Some(timeout),
+                    foreground,
+                    stop: false,
+                })?;
+            }
         }
     }
 

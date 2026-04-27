@@ -63,7 +63,7 @@ impl TestEnv {
         if Path::new("/bin/sh").exists() {
             if let Ok(_) = fs::copy("/bin/sh", rootfs.join("bin/sh")) {
                 // Try to copy dependencies
-                Self::copy_dependencies("/bin/sh", &rootfs)?;
+                Self::copy_dependencies(Path::new("/bin/sh"), &rootfs)?;
             }
         }
 
