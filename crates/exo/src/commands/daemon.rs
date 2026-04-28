@@ -5,9 +5,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::io::{BufRead, BufReader, Write};
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
+
+/// Tokio runtime handle captured at daemon startup so worker threads (which
+/// run outside the tokio context) can `block_on` async work like image pulls.
+#[cfg(unix)]
+static RUNTIME_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -335,12 +340,14 @@ fn run_daemon(config: DaemonConfig) -> Result<()> {
     std::fs::set_permissions(&config.socket_path, perms)?;
 
     // Spawn the periodic reconcile loop on the tokio runtime (the binary is
-    // launched under #[tokio::main], so a runtime is already live).
+    // launched under #[tokio::main], so a runtime is already live). Also
+    // stash the handle for sync worker threads (image-pull block_on).
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let _ = RUNTIME_HANDLE.set(handle.clone());
         let rec = reconciler.clone();
         handle.spawn(async move { rec.run_loop().await });
     } else {
-        tracing::warn!("no current tokio runtime; periodic reconciler disabled");
+        tracing::warn!("no current tokio runtime; periodic reconciler disabled and image pulls will fail");
     }
 
     // Build admission-control semaphores.
@@ -525,6 +532,9 @@ fn execute_run(
         Ok(p) => p,
         Err(_) => {
             tracing::warn!("rejected start of {}: at concurrency cap", spec.name);
+            if let Some(log) = events {
+                let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some("admission: start-concurrency cap"));
+            }
             return DaemonResponse::Error {
                 message: "daemon at start-concurrency cap; retry shortly".to_string(),
             };
@@ -568,6 +578,9 @@ fn execute_run(
     let manager = match ContainerManager::new() {
         Ok(m) => m,
         Err(e) => {
+            if let Some(log) = events {
+                let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some(&format!("manager init: {}", e)));
+            }
             return DaemonResponse::Error {
                 message: format!("Failed to open state dir: {}", e),
             };
@@ -575,16 +588,44 @@ fn execute_run(
     };
 
     if manager.exists(&spec.name) {
+        if let Some(log) = events {
+            let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some("name already in use"));
+        }
         return DaemonResponse::Error {
             message: format!("Container name already in use: {}", spec.name),
         };
     }
 
+    // Ensure the image rootfs is ready *before* Container::new looks for it.
+    // This is the daemon's equivalent of run.rs::execute_linux's ensure_rootfs
+    // call. Without this, agents whose image hasn't been pre-pulled fail
+    // silently inside Container::new with a confusing rootfs error.
+    if let Err(e) = ensure_image_rootfs(&spec.image) {
+        if let Some(log) = events {
+            let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some(&format!("image pull: {}", e)));
+        }
+        return DaemonResponse::Error {
+            message: format!("Failed to prepare image '{}': {}", spec.image, e),
+        };
+    }
+
     let mut metadata = ContainerMetadata::new(spec.name.clone(), config.clone());
+    // Stable identifier for events from this point until Container::new
+    // assigns its own id. Events emitted before the swap use this; after
+    // start succeeds, metadata.id is replaced with container.handle().id
+    // and Started is emitted under that one. Both are linked by container_name.
+    let pre_id = metadata.id.clone();
+
+    if let Some(log) = events {
+        let _ = log.record(&pre_id, &spec.name, EventType::Created, None);
+    }
 
     let mut container = match Container::new(config) {
         Ok(c) => c,
         Err(e) => {
+            if let Some(log) = events {
+                let _ = log.record(&pre_id, &spec.name, EventType::Failed, Some(&format!("Container::new: {}", e)));
+            }
             return DaemonResponse::Error {
                 message: format!("Failed to create container: {}", e),
             };
@@ -592,6 +633,9 @@ fn execute_run(
     };
 
     if let Err(e) = container.start() {
+        if let Some(log) = events {
+            let _ = log.record(&pre_id, &spec.name, EventType::Failed, Some(&format!("Container::start: {}", e)));
+        }
         return DaemonResponse::Error {
             message: format!("Failed to start container: {}", e),
         };
@@ -607,10 +651,12 @@ fn execute_run(
         // Container is running but metadata failed to persist — log and continue.
         // The reconciler will adopt the orphan via cgroup-based detection.
         tracing::warn!("Container {} started but metadata save failed: {}", spec.name, e);
+        if let Some(log) = events {
+            let _ = log.record(&id, &spec.name, EventType::Failed, Some(&format!("metadata save: {}", e)));
+        }
     }
 
     if let Some(log) = events {
-        let _ = log.record(&id, &spec.name, EventType::Created, None);
         let detail = metadata.pid.map(|p| format!("pid={}", p));
         let _ = log.record(&id, &spec.name, EventType::Started, detail.as_deref());
     }
@@ -760,6 +806,60 @@ fn execute_status(container_id: &str) -> DaemonResponse {
             message: format!("Lookup failed: {}", e),
         },
     }
+}
+
+/// Prepare the image rootfs for `image` before `Container::new` looks for it.
+///
+/// 1. Parse the image reference.
+/// 2. `block_on` `ImageManager::ensure_rootfs` (no-op if already extracted).
+/// 3. Symlink the resulting rootfs into `/tmp/exo-images/rootfs/<sanitized>`
+///    where the runtime expects to find it (see `rootfs.rs::prepare_rootfs`).
+///
+/// Without the `registry` feature, this still verifies the rootfs is present
+/// locally and returns a clear error if not — which is strictly better than
+/// the current silent failure inside `Container::new`.
+#[cfg(unix)]
+fn ensure_image_rootfs(image: &str) -> Result<()> {
+    use exo_image::ImageManager;
+
+    let runtime = RUNTIME_HANDLE
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("daemon runtime handle not initialized"))?;
+
+    let manager = ImageManager::new()?;
+    let image_ref = manager.parse_image_reference(image)?;
+
+    // Where the runtime looks for the prepared rootfs.
+    let link_path = PathBuf::from("/tmp/exo-images/rootfs")
+        .join(image.replace(['/', ':'], "_"));
+
+    // Fast path: symlink already in place from a previous run.
+    if link_path.exists() && link_path.join("bin").exists() {
+        tracing::debug!("Image rootfs already prepared at {:?}", link_path);
+        return Ok(());
+    }
+
+    // Run the async ensure_rootfs from this sync worker thread.
+    let actual = runtime.block_on(manager.ensure_rootfs(&image_ref))?;
+
+    // Make the well-known path point at the actual rootfs. Idempotent:
+    // skip if it's already there.
+    if !link_path.exists() {
+        if let Some(parent) = link_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&actual, &link_path) {
+            // EEXIST is fine — race between two concurrent starts of the
+            // same image both racing to create the symlink. Anything else
+            // is a real error.
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e).map_err(|e| anyhow::anyhow!("symlink {:?} -> {:?}: {}", link_path, actual, e))?;
+            }
+        }
+        tracing::info!("Prepared image rootfs: {:?} -> {:?}", link_path, actual);
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

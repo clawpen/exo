@@ -42,8 +42,13 @@ pub struct Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
+    /// Admission accepted; we are about to attempt Container::new.
     Created,
+    /// Container::start succeeded; pid recorded in detail.
     Started,
+    /// Anything between Created and Started failed (Container::new error,
+    /// Container::start error, metadata save error). Detail carries the cause.
+    Failed,
     StopRequested,
     Killed,
     Exited,
@@ -57,6 +62,7 @@ impl EventType {
         match self {
             EventType::Created => "created",
             EventType::Started => "started",
+            EventType::Failed => "failed",
             EventType::StopRequested => "stop_requested",
             EventType::Killed => "killed",
             EventType::Exited => "exited",
@@ -70,6 +76,7 @@ impl EventType {
         Some(match s {
             "created" => EventType::Created,
             "started" => EventType::Started,
+            "failed" => EventType::Failed,
             "stop_requested" => EventType::StopRequested,
             "killed" => EventType::Killed,
             "exited" => EventType::Exited,
@@ -278,6 +285,7 @@ mod tests {
         let cases = [
             EventType::Created,
             EventType::Started,
+            EventType::Failed,
             EventType::StopRequested,
             EventType::Killed,
             EventType::Exited,
