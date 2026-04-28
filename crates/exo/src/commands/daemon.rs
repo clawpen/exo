@@ -317,11 +317,23 @@ fn run_daemon(config: DaemonConfig) -> Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3_000);
+    // Opt-in auto-removal of exited containers and their overlay artifacts.
+    // Default `None` (off) preserves the user's expectation that stopped
+    // containers stick around until `exo rm`. Setting this is the
+    // recommended switch at scale to keep disk usage bounded.
+    let stale_after = std::env::var("EXO_STALE_AFTER_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    if let Some(d) = stale_after {
+        tracing::info!("auto-removing exited containers older than {:?}", d);
+    }
     let reconciler = Reconciler::new(
         manager.clone(),
         events.clone(),
         ReconcileOptions {
             interval: Duration::from_millis(reconcile_interval_ms),
+            stale_after,
             ..Default::default()
         },
     );

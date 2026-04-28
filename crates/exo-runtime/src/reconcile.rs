@@ -337,11 +337,12 @@ impl Reconciler {
 
     fn cleanup_full(&self, name: &str) {
         self.cleanup_cgroup(name);
-        // Overlay upper layer is under the container's root dir; the manager's
-        // `remove` will rm -rf the metadata dir but the rootfs lives elsewhere.
-        // For M2 we leave overlay cleanup to the existing `Container::remove`
-        // path on next manual rm; reconciler stale-pass only handles cgroup +
-        // metadata. (Full overlay GC is a v2 concern.)
+        // Overlay upper/work/rootfs/fs/config dirs live under the manager's
+        // state_dir at `<state_dir>/<name>/`. The caller invokes
+        // `self.manager.remove(name)` immediately after, which does
+        // `fs::remove_dir_all(<state_dir>/<name>)` — that removes all overlay
+        // artifacts. So nothing extra to do here unless container state is
+        // ever stored outside the manager's state_dir (it currently isn't).
     }
 
     fn emit(&self, container_id: &str, container_name: &str, ty: EventType, detail: Option<&str>) {
@@ -477,6 +478,48 @@ mod tests {
         let summary = rec.run_once(false);
         assert_eq!(summary.stale, 1);
         assert!(!manager.exists("old-exited"));
+    }
+
+    #[test]
+    fn test_stale_removal_gcs_overlay_artifacts() {
+        // Stale removal should rm -rf the entire {state_dir}/<name>/ tree,
+        // including overlay upper/, work/, rootfs/, fs/, and config/.
+        let state_dir = TempDir::new().unwrap();
+        let cgroup_dir = TempDir::new().unwrap();
+        let manager = Arc::new(
+            ContainerManager::with_state_dir(state_dir.path()).unwrap(),
+        );
+        let opts = ReconcileOptions {
+            interval: Duration::from_secs(1),
+            cgroup_root: cgroup_dir.path().to_path_buf(),
+            stale_after: Some(Duration::from_millis(1)),
+        };
+        let rec = Reconciler::new(manager.clone(), None, opts);
+
+        // Create a stale exited container with overlay artifacts on disk.
+        let mut m = make_metadata("agent-with-overlay", 1);
+        m.set_stopped(Some(0));
+        m.stopped_at = Some(Utc::now() - chrono::Duration::seconds(60));
+        manager.save(&m).unwrap();
+
+        // Fake the overlay/fs/config/upper/work/rootfs subdirs the runtime
+        // would have created. Each holds a sentinel file we can grep for.
+        let container_dir = state_dir.path().join("agent-with-overlay");
+        for sub in ["upper", "work", "rootfs", "fs", "config"] {
+            let p = container_dir.join(sub);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("sentinel"), b"x").unwrap();
+        }
+        // Pre-conditions.
+        assert!(container_dir.join("upper/sentinel").exists());
+        assert!(container_dir.join("rootfs/sentinel").exists());
+
+        let summary = rec.run_once(false);
+        assert_eq!(summary.stale, 1);
+
+        // Post-conditions: every overlay subtree is gone.
+        assert!(!container_dir.exists(), "container dir should be removed");
+        assert!(!manager.exists("agent-with-overlay"));
     }
 
     #[test]
