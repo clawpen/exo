@@ -59,9 +59,34 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
     use exo_wsl::command::{ContainerSpec, MountSpec};
     use exo_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
     use exo_wsl::deploy::WslDeployer;
+    use exo_wsl::daemon_client::DaemonClient;
     use tracing::{info, debug};
 
     info!("Running container via WSL2 backend");
+
+    // Check if we should use daemon mode
+    let use_daemon = std::env::var("EXO_NO_DAEMON").is_err();
+
+    if use_daemon {
+        // Try daemon mode first for performance
+        let daemon_client = DaemonClient::new(&exo_wsl::WslConfig::default());
+
+        // Initialize WSL environment and deploy runtime first
+        let wsl_manager = exo_wsl::WslDistroManager::new(exo_wsl::WslConfig::default());
+        wsl_manager.initialize()?;
+
+        let deployer = exo_wsl::WslDeployer::new(exo_wsl::WslConfig::default());
+        deployer.ensure_wsl_ready()?;
+        deployer.deploy_runtime()?;
+
+        // Check if daemon is available
+        if daemon_client.is_running() || daemon_client.ensure_running().is_ok() {
+            info!("Using exo daemon for faster execution");
+            return execute_with_daemon(config, detach, rm, name, daemon_client).await;
+        } else {
+            debug!("Daemon not available, using direct mode");
+        }
+    }
 
     // Initialize WSL environment
     let wsl_manager = WslDistroManager::new(WslConfig::default());
@@ -74,7 +99,9 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
 
     // Set up networking for agents
     let net_config = AgentNetworkConfig::default();
-    let network_manager = NetworkManager::new(
+    let wsl_config = WslConfig::default();
+    let network_manager = NetworkManager::from_config(
+        &wsl_config,
         &net_config.bridge_name,
         &net_config.subnet,
         &net_config.gateway_ip,
@@ -84,7 +111,7 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
     network_manager.create_bridge()?;
 
     // Convert Windows paths to WSL paths for mounts
-    let wsl_mount = WslMount::new(WslConfig::default());
+    let wsl_mount = WslMount::new(wsl_config.clone());
 
     let mounts: Vec<MountSpec> = config.mounts
         .iter()
@@ -175,37 +202,135 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
     wsl_cmd.exec(&format!("mkdir -p {}", deployer.state_dir()))?;
     deployer.cleanup_stale_containers()?;
 
-    // Start container
-    let container_id = wsl_cmd.start_container(&container_spec)?;
-
-    info!("Container started: {}", container_id);
-    info!("Network: {} @ {}", container_network.ip, config.name);
-
     if detach {
+        // Start container in detached mode
+        let container_id = wsl_cmd.start_container(&container_spec)?;
+
+        info!("Container started: {}", container_id);
+        info!("Network: {} @ {}", container_network.ip, config.name);
+
+        // Set up Windows port forwarding for published ports
+        if !config.network.port_mappings.is_empty() {
+            use exo_wsl::{WindowsPortForwarder, PortForwardingRule, PortProtocol};
+
+            let forwarder = WindowsPortForwarder::new(WslConfig::default());
+
+            for port_mapping in &config.network.port_mappings {
+                let rule = PortForwardingRule {
+                    host_port: port_mapping.host_port,
+                    container_port: port_mapping.container_port,
+                    protocol: if port_mapping.protocol == "udp" {
+                        PortProtocol::Udp
+                    } else {
+                        PortProtocol::Tcp
+                    },
+                    listen_address: port_mapping.host_ip.clone(),
+                };
+
+                match forwarder.add_port_forward(&config.name, rule) {
+                    Ok(()) => {
+                        println!("Port forwarding: {}:{} -> {}", port_mapping.host_port, port_mapping.container_port, config.name);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to set up port forwarding: {}", e);
+                    }
+                }
+            }
+        }
+
         println!("Container running in background: {}", container_id);
         println!("Agent reachable at {}:{}", container_network.ip, config.name);
         return Ok(());
     }
 
-    // Wait for container to finish
-    let status = wsl_cmd.container_status(&container_id)?;
+    // Run container synchronously
+    info!("Running container synchronously...");
+    let (exit_code, stdout) = wsl_cmd.run_container_sync(&container_spec)?;
 
-    match status {
-        exo_wsl::command::ContainerStatus::Running => {
-            // Attach to logs
-            let mut log_stream = wsl_cmd.stream_logs(&container_id).await?;
-            while let Some(line) = log_stream.next_line().await? {
-                println!("{}", line);
-            }
-            log_stream.wait().await?;
-        }
-        _ => {
-            println!("Container status: {:?}", status);
-        }
+    // Print container output
+    if !stdout.is_empty() {
+        print!("{}", stdout);
     }
 
+    if exit_code != 0 {
+        anyhow::bail!("Container exited with code {}", exit_code);
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+/// Execute container using the daemon (faster mode).
+async fn execute_with_daemon(
+    config: ContainerConfig,
+    detach: bool,
+    rm: bool,
+    name: Option<String>,
+    daemon_client: exo_wsl::DaemonClient,
+) -> anyhow::Result<()> {
+    use tracing::info;
+    use exo_wsl::mount::WslMount;
+    use exo_wsl::WslConfig;
+
+    // Convert Windows paths to WSL paths for mounts
+    let wsl_mount = WslMount::new(WslConfig::default());
+
+    let mounts: Vec<exo_wsl::DaemonMountSpec> = config.mounts
+        .iter()
+        .map(|m| {
+            let source = if m.source.contains(':') {
+                wsl_mount.windows_to_wsl(&m.source)
+            } else {
+                m.source.clone()
+            };
+
+            exo_wsl::DaemonMountSpec {
+                source,
+                target: m.target.clone(),
+                readonly: m.readonly,
+            }
+        })
+        .collect();
+
+    let env: Vec<String> = config.env.iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+
+    // Create container spec for daemon
+    let spec = exo_wsl::DaemonContainerSpec {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: config.name.clone(),
+        image: config.image.clone(),
+        command: config.command.clone(),
+        workdir: config.workdir.to_string_lossy().to_string(),
+        env,
+        mounts,
+        gpu: config.gpu.is_some(),
+        memory_mb: config.resources.memory.as_ref()
+            .and_then(|m| parse_memory_mb(m).ok()),
+        cpu_shares: config.resources.cpu_shares,
+    };
+
+    // Start container via daemon
+    let result = daemon_client.run_container(&spec)?;
+
+    if !result.success {
+        anyhow::bail!("Failed to start container: {}", result.message);
+    }
+
+    println!("{}", result.message);
+
+    if detach {
+        return Ok(());
+    }
+
+    // For non-detach mode, we'd need to stream logs via daemon
+    // For now, just note that container is running
+    info!("Container started in detached mode");
+
     if rm {
-        wsl_cmd.stop_container(&container_id)?;
+        // Clean up container
+        let _ = daemon_client.stop_container(&spec.id);
     }
 
     Ok(())
@@ -215,6 +340,24 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
 async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
     use exo_runtime::{Container, ContainerStatus};
     use exo_gpu::{GpuConfig, GpuType};
+
+    // If --detach and the daemon is running, delegate to it. The daemon is a
+    // long-lived root supervisor — the container outlives our CLI invocation
+    // (which is what --detach is supposed to mean). Inline detach is broken:
+    // the spawned container inherits our terminal session and gets SIGHUP'd
+    // when this process exits.
+    if detach && std::path::Path::new("/tmp/exo-daemon.sock").exists() {
+        match daemon_run_detached(&config).await {
+            Ok(id_or_name) => {
+                println!("{}", id_or_name);
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("daemon delegation failed: {}; falling back to inline", e);
+                // Fall through to inline path below.
+            }
+        }
+    }
 
     // Initialize container manager for persistence
     let manager = ContainerManager::new()?;
@@ -252,12 +395,15 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
     let rootfs = match image_manager.ensure_rootfs(&image_ref).await {
         Ok(path) => {
             tracing::info!("Image rootfs ready at: {:?}", path);
-            // Create a symlink so the runtime can find it
-            let link_path = std::path::PathBuf::from("/tmp/exo-images/rootfs")
-                .join(config.image.replace(['/', ':'], "_"));
-            if !link_path.exists() {
-                let _ = std::fs::create_dir_all(link_path.parent().unwrap());
-                let _ = std::os::unix::fs::symlink(&path, &link_path);
+            // Create a symlink so the runtime can find it (Linux only)
+            #[cfg(unix)]
+            {
+                let link_path = std::path::PathBuf::from("/tmp/exo-images/rootfs")
+                    .join(config.image.replace(['/', ':'], "_"));
+                if !link_path.exists() {
+                    let _ = std::fs::create_dir_all(link_path.parent().unwrap());
+                    let _ = std::os::unix::fs::symlink(&path, &link_path);
+                }
             }
             path
         }
@@ -500,4 +646,73 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         gpu,
         ..Default::default()
     })
+}
+
+/// Send a `Run` request to the daemon at `/tmp/exo-daemon.sock` and return
+/// the container name (which serves as a stable identifier for downstream
+/// stop/list/exec calls). Caller is responsible for checking that the
+/// socket exists; this just connects and speaks the line-delimited JSON
+/// protocol the daemon expects.
+#[cfg(not(windows))]
+async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let env_strs: Vec<String> = config
+        .env
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+    let mounts_json: Vec<serde_json::Value> = config
+        .mounts
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "source": m.source,
+                "target": m.target,
+                "readonly": m.readonly,
+            })
+        })
+        .collect();
+
+    let req = serde_json::json!({
+        "type": "run",
+        "content": {
+            "spec": {
+                "name": config.name,
+                "image": config.image,
+                "workdir": config.workdir.to_string_lossy(),
+                "env": env_strs,
+                "command": config.command,
+                "mounts": mounts_json,
+            }
+        }
+    });
+
+    let mut stream = UnixStream::connect("/tmp/exo-daemon.sock")
+        .map_err(|e| anyhow::anyhow!("connect daemon socket: {}", e))?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    stream.write_all(req.to_string().as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+
+    let resp: serde_json::Value = serde_json::from_str(line.trim())?;
+    let resp_type = resp.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match resp_type {
+        "ok" => Ok(config.name.clone()),
+        "error" => {
+            let msg = resp
+                .get("content")
+                .and_then(|c| c.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("daemon returned error");
+            anyhow::bail!("{}", msg)
+        }
+        other => anyhow::bail!("unexpected daemon response type: {}", other),
+    }
 }
