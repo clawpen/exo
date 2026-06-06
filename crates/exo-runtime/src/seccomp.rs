@@ -13,10 +13,13 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use exo_runtime::seccomp::{apply_seccomp, default_profile};
 //!
 //! let profile = default_profile();
 //! apply_seccomp(&profile)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result};
@@ -195,6 +198,9 @@ impl Default for SeccompProfile {
 /// while blocking dangerous syscalls. Compatible with Docker's
 /// default seccomp profile.
 pub fn default_profile() -> SeccompProfile {
+    if std::env::var("EXO_SECCOMP_PERMISSIVE").is_ok() {
+        return SeccompProfile::blacklist();
+    }
     let mut profile = SeccompProfile::whitelist();
 
     // Essential syscalls for basic operation

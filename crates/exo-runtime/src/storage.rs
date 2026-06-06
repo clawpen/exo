@@ -568,6 +568,11 @@ mod tests {
             std::env::temp_dir().join("overlay2_test2")
         ).unwrap();
 
+        // Use a layer ID that works on both Linux and Windows
+        // (colons in directory names aren't supported on Windows)
+        #[cfg(windows)]
+        let layer_id = "sha256-abcdef1234567890";
+        #[cfg(not(windows))]
         let layer_id = "sha256:abcdef1234567890";
         let data = b"test layer data";
 

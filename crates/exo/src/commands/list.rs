@@ -1,5 +1,7 @@
 //! List containers command
 
+#[cfg(windows)]
+use exo_wsl::WslCommand;
 use exo_runtime::ContainerManager;
 use anyhow::Result;
 
@@ -9,6 +11,38 @@ pub struct ListArgs {
 }
 
 pub async fn execute(args: ListArgs) -> Result<()> {
+    #[cfg(windows)]
+    {
+        return execute_windows(args).await;
+    }
+
+    #[cfg(not(windows))]
+    {
+        return execute_linux(args).await;
+    }
+}
+
+#[cfg(windows)]
+async fn execute_windows(args: ListArgs) -> Result<()> {
+    use exo_wsl::WslConfig;
+
+    let wsl_cmd = WslCommand::new(WslConfig::default());
+
+    let list_arg = if args.all { "--all" } else { "" };
+    let result = wsl_cmd.exec(&format!("exo-runtime list {}", list_arg))?;
+
+    if result.exit_code != 0 {
+        anyhow::bail!("Failed to list containers: {}", result.stderr);
+    }
+
+    // Print the output directly from exo-runtime
+    print!("{}", result.stdout);
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn execute_linux(args: ListArgs) -> Result<()> {
     // For JSON output, suppress tracing warnings to stdout by redirecting to stderr
     // This prevents corruption of JSON output
     if args.json {
@@ -40,15 +74,15 @@ pub async fn execute(args: ListArgs) -> Result<()> {
             .into_iter()
             .map(exo_runtime::ContainerJson::from)
             .collect();
-        
+
         let output = exo_runtime::ContainerListJson {
             containers: json_containers,
         };
-        
+
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
-    
+
     // Table output format
     if containers.is_empty() {
         if args.all {
@@ -58,14 +92,14 @@ pub async fn execute(args: ListArgs) -> Result<()> {
         }
         return Ok(());
     }
-    
+
     // Print header
     println!(
         "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
         "CONTAINER ID", "NAME", "IMAGE", "STATUS", "PID", "CREATED"
     );
     println!("{}", "-".repeat(90));
-    
+
     // Print containers
     for container in containers {
         let id_short = &container.id[..8.min(container.id.len())];
@@ -76,13 +110,13 @@ pub async fn execute(args: ListArgs) -> Result<()> {
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".to_string());
         let created = format_created(container.created_at);
-        
+
         println!(
             "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
             id_short, name, image, status, pid, created
         );
     }
-    
+
     Ok(())
 }
 
@@ -98,10 +132,10 @@ fn truncate(s: &str, max_len: usize) -> String {
 /// Format creation timestamp as relative time.
 fn format_created(created: chrono::DateTime<chrono::Utc>) -> String {
     use chrono::Utc;
-    
+
     let now = Utc::now();
     let duration = now.signed_duration_since(created);
-    
+
     if duration.num_minutes() < 1 {
         "Just now".to_string()
     } else if duration.num_minutes() < 60 {

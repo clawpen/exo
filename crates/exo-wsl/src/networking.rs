@@ -1,4 +1,4 @@
-//! Networking support for Containment containers.
+//! Networking support for Exo containers.
 //!
 //! Simplified networking focused on AI agent communication via Tailnet.
 //! Since Tailnet handles service discovery, we just need:
@@ -6,6 +6,7 @@
 //! - Port mapping from host to container
 //! - Static IP assignment
 
+use crate::WslConfig;
 use anyhow::Result;
 use std::process::Command;
 use tracing::{info, debug, warn};
@@ -55,6 +56,16 @@ pub enum PortProtocol {
     Both,
 }
 
+impl PortProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PortProtocol::Tcp => "TCP",
+            PortProtocol::Udp => "UDP",
+            PortProtocol::Both => "TCP", // Default to TCP for "both"
+        }
+    }
+}
+
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
@@ -73,6 +84,7 @@ pub struct NetworkManager {
     bridge_name: String,
     subnet: String,
     gateway_ip: String,
+    distro_name: String,
 }
 
 impl NetworkManager {
@@ -82,10 +94,32 @@ impl NetworkManager {
             bridge_name: bridge_name.to_string(),
             subnet: subnet.to_string(),
             gateway_ip: gateway_ip.to_string(),
+            distro_name: WslConfig::default().distro_name,
+        })
+    }
+
+    /// Create a new network manager with a specific distro.
+    pub fn with_distro(bridge_name: &str, subnet: &str, gateway_ip: &str, distro: &str) -> Result<Self> {
+        Ok(Self {
+            bridge_name: bridge_name.to_string(),
+            subnet: subnet.to_string(),
+            gateway_ip: gateway_ip.to_string(),
+            distro_name: distro.to_string(),
+        })
+    }
+
+    /// Create a new network manager with full config.
+    pub fn from_config(config: &WslConfig, bridge_name: &str, subnet: &str, gateway_ip: &str) -> Result<Self> {
+        Ok(Self {
+            bridge_name: bridge_name.to_string(),
+            subnet: subnet.to_string(),
+            gateway_ip: gateway_ip.to_string(),
+            distro_name: config.distro_name.clone(),
         })
     }
 
     /// Create the bridge network for containers.
+    /// In WSL2, this may not work due to limited capabilities, so we fall back gracefully.
     pub fn create_bridge(&self) -> Result<()> {
         // Check if bridge already exists
         if self.bridge_exists()? {
@@ -93,30 +127,33 @@ impl NetworkManager {
             return Ok(());
         }
 
-        info!("Creating bridge: {}", self.bridge_name);
+        info!("Attempting to create bridge: {}", self.bridge_name);
 
-        // Create bridge
+        // Try to create bridge - this may fail in WSL2 due to limited capabilities
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "bash", "-c",
+            .args(["--distribution", &self.distro_name, "--", "bash", "-c",
                 &format!("ip link add name {} type bridge && ip addr add {} dev {} && ip link set {} up",
                     self.bridge_name, self.subnet, self.bridge_name, self.bridge_name)])
             .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to create bridge: {}", stderr);
+            warn!("Could not create bridge (this is expected in WSL2): {}. Containers will use host networking.", stderr.trim());
+            // Don't fail - just log and continue. Containers will fall back to host networking.
+            return Ok(());
         }
 
         // Enable IP forwarding
         self.enable_ip_forwarding()?;
 
+        info!("Bridge {} created successfully", self.bridge_name);
         Ok(())
     }
 
     /// Check if the bridge exists.
     fn bridge_exists(&self) -> Result<bool> {
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "ip", "link", "show", &self.bridge_name])
+            .args(["--distribution", &self.distro_name, "--", "ip", "link", "show", &self.bridge_name])
             .output()?;
 
         Ok(output.status.success())
@@ -125,7 +162,7 @@ impl NetworkManager {
     /// Enable IP forwarding for container networking.
     fn enable_ip_forwarding(&self) -> Result<()> {
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "bash", "-c",
+            .args(["--distribution", &self.distro_name, "--", "bash", "-c",
                 "sysctl -w net.ipv4.ip_forward=1"])
             .output()?;
 
@@ -138,6 +175,7 @@ impl NetworkManager {
     }
 
     /// Set up networking for a specific container.
+    /// In WSL2, falls back to simplified networking if bridge creation fails.
     pub fn setup_container_network(
         &self,
         container_name: &str,
@@ -148,11 +186,41 @@ impl NetworkManager {
         let ip = config.container_ip.clone()
             .unwrap_or_else(|| self.generate_ip());
 
+        // Check if bridge exists - if not, use simplified networking
+        if !self.bridge_exists().unwrap_or(false) {
+            info!("Bridge not available, using simplified networking for container {}", container_name);
+
+            // For WSL2 without bridge, we return a minimal network config
+            // The container will use the default WSL2 networking
+            return Ok(ContainerNetwork {
+                veth_host: "host".to_string(),
+                veth_container: "eth0".to_string(),
+                bridge_name: "wsl".to_string(),
+                ip: "127.0.0.1".to_string(),  // Use localhost for WSL2
+            });
+        }
+
         // Create veth pair (host side in WSL2, container side inside container)
-        self.create_veth_pair(&veth_host, veth_container)?;
+        if let Err(e) = self.create_veth_pair(&veth_host, veth_container) {
+            warn!("Failed to create veth pair: {}. Using simplified networking.", e);
+            return Ok(ContainerNetwork {
+                veth_host: "host".to_string(),
+                veth_container: "eth0".to_string(),
+                bridge_name: "wsl".to_string(),
+                ip: "127.0.0.1".to_string(),
+            });
+        }
 
         // Attach veth host to bridge
-        self.attach_to_bridge(&veth_host)?;
+        if let Err(e) = self.attach_to_bridge(&veth_host) {
+            warn!("Failed to attach to bridge: {}. Using simplified networking.", e);
+            return Ok(ContainerNetwork {
+                veth_host: "host".to_string(),
+                veth_container: "eth0".to_string(),
+                bridge_name: "wsl".to_string(),
+                ip: "127.0.0.1".to_string(),
+            });
+        }
 
         // Set up port mappings
         for mapping in &config.port_mappings {
@@ -172,7 +240,7 @@ impl NetworkManager {
         info!("Creating veth pair: {} <-> {}", veth_host, veth_container);
 
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "bash", "-c",
+            .args(["--distribution", &self.distro_name, "--", "bash", "-c",
                 &format!("ip link add {} {} type veth peer name {} && ip link set {} up && ip link set {} up",
                     veth_host, veth_host, veth_container, veth_host, veth_container)])
             .output()?;
@@ -188,7 +256,7 @@ impl NetworkManager {
     /// Attach the host veth to the bridge.
     fn attach_to_bridge(&self, veth_host: &str) -> Result<()> {
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "bash", "-c",
+            .args(["--distribution", &self.distro_name, "--", "bash", "-c",
                 &format!("ip link set master {} dev {}", self.bridge_name, veth_host)])
             .output()?;
 
@@ -211,7 +279,7 @@ impl NetworkManager {
         };
 
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "bash", "-c",
+            .args(["--distribution", &self.distro_name, "--", "bash", "-c",
                 &format!("iptables -t nat -A PREROUTING -p {} --destination 127.0.0.1:{} -j DNAT --to-destination {}:{}",
                     protocol, mapping.host_port, mapping.container_port, mapping.container_port)])
             .output()?;
@@ -236,7 +304,7 @@ impl NetworkManager {
 
         // Delete veth pair
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "ip", "link", "delete", &veth_host])
+            .args(["--distribution", &self.distro_name, "--", "ip", "link", "delete", &veth_host])
             .output()?;
 
         if !output.status.success() {
@@ -259,7 +327,7 @@ impl NetworkManager {
     /// Clean up the bridge when shutting down.
     pub fn cleanup_bridge(&self) -> Result<()> {
         let output = Command::new("wsl")
-            .args(["--distribution", "containment", "--", "ip", "link", "delete", &self.bridge_name])
+            .args(["--distribution", &self.distro_name, "--", "ip", "link", "delete", &self.bridge_name])
             .output()?;
 
         if !output.status.success() {

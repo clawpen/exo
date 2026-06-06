@@ -161,7 +161,15 @@ impl AgentProfile {
     /// Default seccomp profile for agent containers.
     ///
     /// Allows common operations while blocking dangerous syscalls.
+    ///
+    /// When `EXO_SECCOMP_PERMISSIVE` is set in the daemon's env, fall back to
+    /// blacklist mode (default-allow). Useful in rootless WSL where the kernel
+    /// returns EPERM for some allowed syscalls due to overlayfs+seccomp
+    /// interactions (e.g. openclaw fsync on its audit log).
     fn default_seccomp() -> SeccompProfile {
+        if std::env::var("EXO_SECCOMP_PERMISSIVE").is_ok() {
+            return SeccompProfile::blacklist();
+        }
         let mut profile = SeccompProfile::whitelist();
 
         // Essential syscalls for basic operation
@@ -473,7 +481,7 @@ mod tests {
     fn test_agent_profile_default() {
         let profile = AgentProfile::default();
         assert_eq!(profile.name, "agent-default");
-        assert!(profile.no_new_privs);
+        assert!(!profile.no_new_privs);  // Disabled for Node.js compatibility
         assert_eq!(profile.network, NetworkAccess::OutboundOnly);
     }
 

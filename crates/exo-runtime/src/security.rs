@@ -13,6 +13,7 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use exo_runtime::security::{Capability, drop_capabilities};
 //!
 //! // Keep only essential capabilities for a web container
@@ -22,6 +23,8 @@
 //!     Capability::CAP_SETGID,
 //! ];
 //! drop_capabilities(&keep)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result};

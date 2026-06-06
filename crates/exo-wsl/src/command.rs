@@ -27,16 +27,29 @@ impl WslCommand {
 
     /// Execute a command synchronously in WSL2.
     pub fn exec(&self, command: &str) -> Result<WslResult> {
+        tracing::debug!("WSL executing: {}", command);
+
+        // Use -- shell syntax to properly execute shell commands
+        // The -- signals end of WSL options, everything after goes to the shell
         let output = Command::new("wsl")
             .args([
-                "--distribution",
+                "-d",
                 &self.config.distro_name,
-                "--user",
+                "-u",
                 "root",
-                "--command",
+                "--",
+                "sh",
+                "-c",
                 command,
             ])
             .output()?;
+
+        tracing::debug!(
+            "WSL result: exit_code={:?}, stdout='{}', stderr='{}'",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
 
         Ok(WslResult {
             exit_code: output.status.code().unwrap_or(-1),
@@ -56,21 +69,138 @@ impl WslCommand {
     }
 
     /// Start a container in WSL2.
-    pub fn start_container(&self, config: &ContainerSpec) -> Result<String> {
-        // Serialize the config to JSON
-        let config_json = serde_json::to_string(config)?;
+    /// Runs exo-runtime in background with proper process group handling.
+    pub fn start_container(&self, spec: &ContainerSpec) -> Result<String> {
+        // Build the command line args from ContainerSpec
+        let mut args: Vec<String> = vec![
+            "run".to_string(),
+            "--name".to_string(),
+            spec.name.clone(),
+            "--detach".to_string(),
+        ];
 
-        // Write config to a temp file in WSL
-        let temp_file = format!("/tmp/exo-{}.json", uuid::Uuid::new_v4());
-        self.exec(&format!("cat << 'EOF' > {}\n{}\nEOF", temp_file, config_json))?;
+        // Add workdir if specified
+        if !spec.workdir.is_empty() && spec.workdir != "/" {
+            args.push("--workdir".to_string());
+            args.push(spec.workdir.clone());
+        }
 
-        // Run the container runtime
-        let container_id = self.exec_stdout(&format!(
-            "exo-runtime run --config {} --id-only",
-            temp_file
-        ))?;
+        // Add environment variables
+        for env_var in &spec.env {
+            args.push("--env".to_string());
+            args.push(env_var.clone());
+        }
 
-        Ok(container_id.trim().to_string())
+        // Add mounts
+        for mount in &spec.mounts {
+            let mount_spec = if mount.readonly {
+                format!("{}:{}:ro", mount.source, mount.target)
+            } else {
+                format!("{}:{}", mount.source, mount.target)
+            };
+            args.push("--volume".to_string());
+            args.push(mount_spec);
+        }
+
+        // Add image
+        args.push(spec.image.clone());
+
+        // Add command
+        args.extend(spec.command.iter().cloned());
+
+        // Run exo-runtime with setsid to create new session (daemonize)
+        // Output to temp file for parsing
+        let log_file = format!("/tmp/exo-start-{}.log", spec.name);
+        let cmd = format!(
+            "setsid exo-runtime {} > {} 2>&1 < /dev/null & PID=$!; echo $PID > /tmp/exo-pid-{}.txt; sleep 3; cat {}",
+            args.join(" "),
+            log_file,
+            spec.name,
+            log_file
+        );
+        tracing::debug!("Starting container with: {}", cmd);
+
+        let output = self.exec(&cmd)?;
+
+        // Don't fail on exit code - setsid/background causes non-zero exit
+        // Parse container ID from output
+        let stdout = output.stdout.trim();
+        tracing::debug!("start_container output:\n{}", stdout);
+
+        // Try to extract the container ID (UUID format)
+        if let Some(uuid_line) = stdout.lines().find(|line| {
+            line.contains("Container running in background:") ||
+            line.contains("Starting container:")
+        }) {
+            // Extract UUID from the line
+            if let Some(uuid) = uuid_line
+                .split_whitespace()
+                .find(|s| s.len() == 36 && s.matches('-').count() == 4)
+            {
+                return Ok(uuid.to_string());
+            }
+        }
+
+        // Fallback: extract any UUID from the output
+        for line in stdout.lines() {
+            for word in line.split_whitespace() {
+                if word.len() == 36 && word.matches('-').count() == 4 {
+                    return Ok(word.to_string());
+                }
+            }
+        }
+
+        // Final fallback: use the name as ID
+        tracing::warn!("Could not parse container ID from output, using name: {}", spec.name);
+        Ok(spec.name.clone())
+    }
+
+    /// Run a container synchronously (for non-detached mode).
+    /// Returns the exit code and combined stdout/stderr output.
+    pub fn run_container_sync(&self, spec: &ContainerSpec) -> Result<(i32, String)> {
+        // Build the command line args from ContainerSpec
+        let mut args: Vec<String> = vec![
+            "run".to_string(),
+            "--name".to_string(),
+            spec.name.clone(),
+        ];
+
+        // Add workdir if specified
+        if !spec.workdir.is_empty() && spec.workdir != "/" {
+            args.push("--workdir".to_string());
+            args.push(spec.workdir.clone());
+        }
+
+        // Add environment variables
+        for env_var in &spec.env {
+            args.push("--env".to_string());
+            args.push(env_var.clone());
+        }
+
+        // Add mounts
+        for mount in &spec.mounts {
+            let mount_spec = if mount.readonly {
+                format!("{}:{}:ro", mount.source, mount.target)
+            } else {
+                format!("{}:{}", mount.source, mount.target)
+            };
+            args.push("--volume".to_string());
+            args.push(mount_spec);
+        }
+
+        // Add image
+        args.push(spec.image.clone());
+
+        // Add command
+        args.extend(spec.command.iter().cloned());
+
+        // Run synchronously without detach - capture output
+        let cmd = format!("exo-runtime {}", args.join(" "));
+        tracing::debug!("Running container synchronously: {}", cmd);
+
+        let result = self.exec(&cmd)?;
+
+        Ok((result.exit_code, result.stdout))
     }
 
     /// Stop a running container.
@@ -81,27 +211,44 @@ impl WslCommand {
 
     /// Get container status.
     pub fn container_status(&self, container_id: &str) -> Result<ContainerStatus> {
-        let output = self.exec_stdout(&format!(
-            "exo-runtime status {} 2>/dev/null || echo 'unknown'",
+        // Use 'list' command and grep for the container
+        let output = self.exec(&format!(
+            "exo-runtime list --all 2>/dev/null | grep -w '{}' || echo 'not_found'",
             container_id
         ))?;
 
-        Ok(match output.trim() {
-            "running" => ContainerStatus::Running,
-            "stopped" => ContainerStatus::Stopped,
-            "paused" => ContainerStatus::Paused,
-            _ => ContainerStatus::Unknown,
-        })
+        let stdout = output.stdout.trim();
+
+        // Check if the container exists and its status
+        if stdout.contains("not_found") || stdout.is_empty() {
+            return Ok(ContainerStatus::Unknown);
+        }
+
+        // Parse status from list output
+        // Format: <id> <name> <image> <status> ...
+        if stdout.contains("running") {
+            Ok(ContainerStatus::Running)
+        } else if stdout.contains("stopped") || stdout.contains("exited") {
+            Ok(ContainerStatus::Stopped)
+        } else if stdout.contains("paused") {
+            Ok(ContainerStatus::Paused)
+        } else {
+            Ok(ContainerStatus::Unknown)
+        }
     }
 
     /// Stream container logs.
     pub async fn stream_logs(&self, container_id: &str) -> Result<LogStream> {
         let child = AsyncCommand::new("wsl")
             .args([
-                "--distribution",
+                "-d",
                 &self.config.distro_name,
-                "--command",
-                &format!("exo-runtime logs -f {}", container_id),
+                "-u",
+                "root",
+                "exo-runtime",
+                "logs",
+                "-f",
+                container_id,
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

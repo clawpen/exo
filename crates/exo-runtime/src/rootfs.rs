@@ -27,6 +27,7 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use exo_runtime::rootfs::{prepare_rootfs, pivot_rootfs, setup_mounts};
 //! use exo_runtime::config::ContainerConfig;
 //!
@@ -34,6 +35,8 @@
 //! let rootfs_path = prepare_rootfs(&config)?;
 //! pivot_rootfs(&rootfs_path)?;
 //! setup_mounts(&config)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::config::ContainerConfig;

@@ -7,6 +7,8 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
+//! # #[cfg(target_os = "linux")] {
 //! use exo_runtime::userns::{UidMap, GidMap, setup_user_namespace};
 //! use nix::unistd::Pid;
 //!
@@ -23,6 +25,9 @@
 //! };
 //!
 //! setup_user_namespace(Pid::from_raw(1234), &uid_map, &gid_map)?;
+//! # }
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result};

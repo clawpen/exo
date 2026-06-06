@@ -54,4 +54,8 @@ REM until the rootless spawn path is finished). The daemon owns /tmp/exo-daemon.
 REM at 777 perms so non-root callers can still reach it via the socket protocol,
 REM but `exo run`'s CLI path goes through Container::new directly which needs
 REM cgroup access. Running as root is the simplest fix for Phase 1.
-wsl -u root -e bash -c "%EXO_BINARY% %*"
+REM
+REM Direct exec (no `bash -c`) so args with spaces survive — bash re-parses
+REM the joined string and splits on whitespace, breaking volume paths like
+REM "/mnt/f/Software/Claw Pen/data:/data".
+wsl -u root -e %EXO_BINARY% %*

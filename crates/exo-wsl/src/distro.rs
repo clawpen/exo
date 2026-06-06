@@ -199,12 +199,8 @@ impl WslDistroManager {
         // Ensure distro exists
         distro.ensure()?;
 
-        // Install necessary packages inside WSL
-        distro.exec("apt-get update -qq")?;
-        distro.exec("apt-get install -y -qq uidmap fuse3 libfuse3-dev")?;
-
-        // Deploy the OpenClaw runtime binary
-        self.deploy_runtime(&distro)?;
+        // Skip package installation for default distro (Ubuntu already has what we need)
+        // The runtime binary should already be deployed
 
         Ok(())
     }

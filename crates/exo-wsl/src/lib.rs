@@ -14,19 +14,33 @@ pub mod gpu;
 pub mod networking;
 #[cfg(windows)]
 pub mod deploy;
+#[cfg(windows)]
+pub mod paths;
+#[cfg(windows)]
+pub mod daemon_client;
+#[cfg(windows)]
+pub mod windows_networking;
+#[cfg(windows)]
+pub mod wsl_daemon;
 
 #[cfg(windows)]
 pub use distro::{WslDistro, WslDistroManager};
 #[cfg(windows)]
 pub use command::{WslCommand, WslResult};
 #[cfg(windows)]
-pub use mount::WslMount;
+pub use mount::{WslMount, MountSpec};
 #[cfg(windows)]
 pub use gpu::{WslGpuDetector, GpuInfo, GpuVendor, WslGpuConfig};
 #[cfg(windows)]
 pub use networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, ContainerNetwork, DnsEntry, AgentNetworkConfig};
 #[cfg(windows)]
 pub use deploy::WslDeployer;
+#[cfg(windows)]
+pub use paths::PathTranslator;
+#[cfg(windows)]
+pub use daemon_client::{DaemonClient, ContainerSpec as DaemonContainerSpec, MountSpec as DaemonMountSpec, RunResult};
+#[cfg(windows)]
+pub use windows_networking::{WindowsPortForwarder, PortForwardingRule};
 
 #[cfg(windows)]
 use anyhow::Result;
@@ -57,7 +71,7 @@ pub struct WslConfig {
 impl Default for WslConfig {
     fn default() -> Self {
         Self {
-            distro_name: "exo".to_string(),
+            distro_name: "Ubuntu".to_string(),  // Use default Ubuntu distro
             distro_path: "%LOCALAPPDATA%\\exo\\wsl".to_string(),
             memory_limit: None,
             swap_size: Some(4),

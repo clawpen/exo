@@ -1,0 +1,71 @@
+name: Windows (WSL2) Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows-wsl2:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install WSL2
+        shell: powershell
+        run: |
+          Write-Host "Installing WSL2..."
+          wsl --install --no-distribution --accept-license
+          # WSL2 may require a restart, but GitHub Actions Windows runners come with it pre-installed
+
+      - name: Check WSL2 status
+        shell: powershell
+        run: |
+          wsl --status
+          wsl --version
+
+      - name: Install Ubuntu in WSL2
+        shell: powershell
+        run: |
+          wsl --install -d Ubuntu --no-launch
+          # Initialize Ubuntu with a default user
+          wsl -d Ubuntu -u root -- apt-get update
+          wsl -d Ubuntu -u root -- apt-get install -y curl ca-certificates
+
+      - name: Install Rust in WSL2
+        shell: powershell
+        run: |
+          wsl -e bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+          wsl -e bash -c "echo 'export PATH=$HOME/.cargo/bin:$PATH' >> ~/.bashrc"
+
+      - name: Build exo (WSL2)
+        shell: powershell
+        run: |
+          wsl -e bash -c "cd /mnt/d/a/exo && ~/.cargo/bin/cargo build --release"
+          # Handle if path is different
+          if ($LASTEXITCODE -ne 0) {
+            wsl -e bash -c "cd $PWD && ~/.cargo/bin/cargo build --release"
+          }
+
+      - name: Run Windows tests
+        shell: powershell
+        run: |
+          .\scripts\test-wsl.ps1
+
+      - name: Test exo --help
+        shell: powershell
+        run: |
+          # Test via wrapper script
+          if (Test-Path .\exo.cmd) {
+            .\exo.cmd --help
+          }
+
+      - name: Check WSL networking
+        shell: powershell
+        run: |
+          wsl -e bash -c "ip addr show"
+          wsl -e bash -c "ip route show"

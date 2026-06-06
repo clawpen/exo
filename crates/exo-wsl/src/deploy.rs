@@ -23,7 +23,6 @@ impl WslDeployer {
     pub fn is_runtime_installed(&self) -> Result<bool> {
         let cmd = WslCommand::new(self.config.clone());
         let result = cmd.exec(&format!("which {}", RUNTIME_BINARY_NAME))?;
-
         Ok(result.exit_code == 0)
     }
 
@@ -46,10 +45,17 @@ impl WslDeployer {
         tracing::info!("Deploying Exo runtime to WSL...");
 
         // Check if runtime is already installed
-        if self.is_runtime_installed()? {
-            let installed_version = self.installed_version()?;
-            tracing::info!("Runtime already installed: {:?}", installed_version);
-            return Ok(());
+        match self.is_runtime_installed() {
+            Ok(true) => {
+                tracing::info!("Runtime already installed in WSL");
+                return Ok(());
+            }
+            Ok(false) => {
+                tracing::info!("Runtime not found in WSL, deploying...");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to check runtime status: {}, attempting deployment...", e);
+            }
         }
 
         // For development, we look for the runtime in the project
@@ -123,7 +129,7 @@ impl WslDeployer {
         #[cfg(target_os = "linux")]
         let alt_path = project_root.join("target/x86_64-unknown-linux-gnu/release");
         #[cfg(not(target_os = "linux"))]
-        let alt_path = project_root.join("target/release");
+        let _alt_path = project_root.join("target/release");
 
         // Try primary path first
         let binary_path = release_path.join(binary_name);
@@ -158,18 +164,44 @@ impl WslDeployer {
 
     /// Ensure WSL is properly initialized
     pub fn ensure_wsl_ready(&self) -> Result<()> {
+        use std::process::Command;
+
         // Check WSL is installed
-        let cmd = WslCommand::new(self.config.clone());
-        let result = cmd.exec("--version")?;
-        if result.exit_code != 0 {
+        let result = Command::new("wsl")
+            .arg("--version")
+            .output()?;
+        if !result.status.success() {
             anyhow::bail!("WSL not available. Install WSL2 first.");
         }
 
-        // Check the distro exists
-        let result = cmd.exec(&format!("wsl -l -q {}", self.config.distro_name))?;
+        // Skip distro creation - Ubuntu should already exist
+        // Just ensure socat is installed for daemon communication
+        let cmd = WslCommand::new(self.config.clone());
+        let result = cmd.exec("which socat")?;
         if result.exit_code != 0 {
-            tracing::info!("Distro '{}' not found, initializing...", self.config.distro_name);
-            self.initialize_distro()?;
+            tracing::info!("Installing socat for daemon communication...");
+            let install_result = cmd.exec("apt-get update -qq && apt-get install -y socat 2>/dev/null")?;
+            if install_result.exit_code != 0 {
+                tracing::warn!("Could not install socat, daemon mode may not work");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure socat is installed for Unix socket communication.
+    fn ensure_socat_installed(&self) -> Result<()> {
+        let cmd = WslCommand::new(self.config.clone());
+
+        // Check if socat is installed
+        let result = cmd.exec("which socat")?;
+        if result.exit_code != 0 {
+            tracing::info!("Installing socat for daemon communication...");
+            // Install socat quietly
+            let install_result = cmd.exec("apt-get install -y socat 2>/dev/null || apt-get update -qq && apt-get install -y socat")?;
+            if install_result.exit_code != 0 {
+                tracing::warn!("Could not install socat, daemon mode may not work");
+            }
         }
 
         Ok(())
@@ -226,6 +258,6 @@ mod tests {
     fn test_wsl_deployer() {
         let deployer = WslDeployer::new(WslConfig::default());
         // Just verify it can be created
-        assert_eq!(deployer.config.distro_name, "exo");
+        assert_eq!(deployer.config.distro_name, "Ubuntu");
     }
 }

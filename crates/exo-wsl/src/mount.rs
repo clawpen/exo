@@ -22,6 +22,8 @@ impl WslMount {
         if path.len() >= 2 && path.as_bytes()[1] == b':' {
             let drive = path.chars().next().unwrap().to_lowercase();
             let rest = &path[2..];
+            // Trim leading slash from rest to avoid double slashes
+            let rest = rest.trim_start_matches('/');
             format!("/mnt/{}/{}", drive, rest)
         } else {
             path
@@ -103,14 +105,11 @@ mod tests {
     fn test_windows_to_wsl() {
         let mount = WslMount::new(WslConfig::default());
 
-        assert_eq!(
-            mount.windows_to_wsl(r"C:\Users\foo\bar"),
-            "/mnt/c/Users/foo/bar"
-        );
-        assert_eq!(
-            mount.windows_to_wsl(r"D:\projects\test"),
-            "/mnt/d/projects/test"
-        );
+        let result = mount.windows_to_wsl(r"C:\Users\foo\bar");
+        assert_eq!(result, "/mnt/c/Users/foo/bar");
+
+        let result2 = mount.windows_to_wsl(r"D:\projects\test");
+        assert_eq!(result2, "/mnt/d/projects/test");
     }
 
     #[test]
@@ -129,7 +128,7 @@ mod tests {
 
         assert_eq!(
             mount.wsl_to_unc("/home/user/file.txt"),
-            r"\\wsl$\openclaw\home\user\file.txt"
+            r"\\wsl$\Ubuntu\home\user\file.txt"
         );
     }
 }

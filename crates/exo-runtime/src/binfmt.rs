@@ -15,12 +15,15 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use exo_runtime::binfmt::{register_binfmt, is_qemu_available, Architecture};
 //!
 //! // Check if QEMU is available for ARM64
 //! if is_qemu_available(Architecture::Aarch64) {
 //!     register_binfmt(Architecture::Aarch64)?;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result};
@@ -213,10 +216,13 @@ pub fn ensure_binfmt_mounted() -> Result<()> {
 /// # Example
 ///
 /// ```no_run
+/// # fn main() -> anyhow::Result<()> {
 /// use exo_runtime::binfmt::{register_binfmt, Architecture};
 ///
 /// // Enable ARM64 binary execution
 /// register_binfmt(Architecture::Aarch64)?;
+/// # Ok(())
+/// # }
 /// ```
 pub fn register_binfmt(arch: Architecture) -> Result<()> {
     ensure_binfmt_mounted()?;

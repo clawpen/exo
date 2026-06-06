@@ -6,7 +6,7 @@
 
 use crate::cgroup::{self, CgroupManager};
 use crate::config::ContainerConfig;
-use crate::rootfs::{self, pivot_rootfs, prepare_rootfs, setup_mounts, apply_bind_mounts_before_pivot};
+use crate::rootfs::{self, pivot_rootfs, prepare_rootfs, setup_mounts};
 use crate::seccomp::{self, apply_seccomp, default_profile};
 use crate::security::{self, drop_capabilities, get_default_caps};
 use crate::userns::{self, setup_user_namespace, GidMap, UidMap};

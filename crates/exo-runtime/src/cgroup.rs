@@ -20,13 +20,16 @@
 //! # Example
 //!
 //! ```no_run
+//! # fn main() -> anyhow::Result<()> {
 //! use exo_runtime::cgroup::CgroupManager;
 //!
 //! let mut mgr = CgroupManager::new("my-container")?;
 //! mgr.set_memory_limit(512 * 1024 * 1024)?;  // 512 MB
 //! mgr.set_cpu_limit(100000, 100000)?;        // 1 CPU
 //! mgr.set_pids_limit(100)?;
-//! mgr.add_process(1234)?;
+//! // On Linux, use mgr.add_process(pid)?
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result};
@@ -37,7 +40,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
 
-/// Cgroup v2 unified hierarchy mount point.
+#[cfg(target_os = "linux")]
+use libc;
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// Containment cgroup subdirectory.
@@ -50,13 +54,14 @@ pub const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 pub const PIDS_MAX: &str = "max";
 
 /// Get the base cgroup path for this user (supports rootless operation)
+#[cfg(target_os = "linux")]
 fn get_user_cgroup_base() -> PathBuf {
     // Try user's delegated cgroup first (systemd user.slice)
     let uid = unsafe { libc::getuid() };
     let user_slice = PathBuf::from(CGROUP_ROOT)
         .join("user.slice")
         .join(format!("user-{}.slice", uid));
-    
+
     if user_slice.exists() && user_slice.join("cgroup.type").exists() {
         tracing::debug!("Using user delegated cgroup: {:?}", user_slice);
         user_slice
@@ -65,6 +70,13 @@ fn get_user_cgroup_base() -> PathBuf {
         tracing::debug!("Using system cgroup root (may require privileges)");
         PathBuf::from(CGROUP_ROOT)
     }
+}
+
+/// Stub implementation for non-Linux platforms
+#[cfg(not(target_os = "linux"))]
+fn get_user_cgroup_base() -> PathBuf {
+    // Cgroups don't exist on non-Linux platforms, return a dummy path
+    PathBuf::from("/sys/fs/cgroup")
 }
 
 /// Cgroup manager for container resource control.

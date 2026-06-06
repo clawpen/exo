@@ -35,3 +35,4 @@ exo-wsl = { path = "../exo-wsl" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
+libc = "0.2"
