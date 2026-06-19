@@ -17,7 +17,7 @@ mod cas;
 pub use reference::ImageReference;
 pub use store::ImageStore;
 pub use extractor::LayerExtractor;
-pub use cas::{DiskUsage, ImageIndex, ImageRecord, LayerStore};
+pub use cas::{DiskUsage, ImageIndex, ImageInfo, ImageRecord, LayerInfo, LayerStore};
 
 #[cfg(feature = "registry")]
 mod registry;

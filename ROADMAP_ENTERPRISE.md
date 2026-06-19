@@ -62,7 +62,7 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 - [x] `exo push` to any OCI registry — pull,push-scoped token, HEAD-skip
       existing blobs, monolithic blob upload, manifest PUT by tag
 - [x] `exo rmi` — unregister image + auto-prune its now-orphaned layers
-- [ ] `exo image inspect`
+- [x] `exo image inspect` — per-layer size, refcount, shared-vs-exclusive disk
 - [ ] Optional: zstd layer compression + lazy/stargz pull (further space + cold-start win)
 - [ ] Follow-up: switch rootfs composition to overlay lowerdirs where the kernel
       allows it (zero-copy vs hardlink), keeping hardlink as the rootless fallback

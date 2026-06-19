@@ -15,3 +15,4 @@ pub mod events;
 pub mod system;
 pub mod rmi;
 pub mod push;
+pub mod image;

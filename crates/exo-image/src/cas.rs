@@ -67,6 +67,28 @@ impl DiskUsage {
     }
 }
 
+/// Per-layer detail for `exo image inspect`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerInfo {
+    pub digest: String,
+    /// Extracted size on disk (bytes).
+    pub size: u64,
+    /// How many images reference this layer (>1 means shared).
+    pub refcount: usize,
+}
+
+/// Full inspection of a locally-stored image.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInfo {
+    pub reference: String,
+    pub config_digest: String,
+    pub layers: Vec<LayerInfo>,
+    /// Sum of this image's layer sizes (its logical footprint).
+    pub total_size: u64,
+    /// Bytes unique to this image (layers only it references).
+    pub exclusive_size: u64,
+}
+
 /// Content-addressed layer store.
 #[derive(Clone)]
 pub struct LayerStore {
@@ -276,6 +298,44 @@ impl LayerStore {
             link_layer_onto(&src, &src, dest)?;
         }
         Ok(())
+    }
+
+    /// Inspect a registered image: its layers, their sizes, and how much disk
+    /// is shared with other images vs. exclusive to this one.
+    pub fn inspect(&self, reference: &str) -> Result<Option<ImageInfo>> {
+        let index = self.load_index()?;
+        let Some(record) = index.images.get(reference) else {
+            return Ok(None);
+        };
+
+        let mut layers = Vec::new();
+        let mut total_size = 0u64;
+        let mut exclusive_size = 0u64;
+        for digest in &record.layers {
+            let size = dir_size(&self.layer_dir(digest));
+            let refcount = index
+                .images
+                .values()
+                .filter(|r| r.layers.iter().any(|l| l == digest))
+                .count();
+            total_size += size;
+            if refcount <= 1 {
+                exclusive_size += size;
+            }
+            layers.push(LayerInfo {
+                digest: digest.clone(),
+                size,
+                refcount,
+            });
+        }
+
+        Ok(Some(ImageInfo {
+            reference: reference.to_string(),
+            config_digest: record.config_digest.clone(),
+            layers,
+            total_size,
+            exclusive_size,
+        }))
     }
 
     /// Root path of the store.
@@ -494,6 +554,28 @@ mod tests {
         assert!(df.logical_bytes > df.physical_bytes);
         assert_eq!(df.reclaimable_via_dedup(), df.logical_bytes - df.physical_bytes);
         assert_eq!(store.refcount("sha256:base").unwrap(), 2);
+    }
+
+    #[test]
+    fn inspect_separates_shared_from_exclusive() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+        let base = write_blob(tmp.path(), "base.tgz", &make_layer(&[("lib", &[7u8; 2048])]));
+        let topa = write_blob(tmp.path(), "a.tgz", &make_layer(&[("a", &[1u8; 1024])]));
+        store.extract_layer(&base, "sha256:base").unwrap();
+        store.extract_layer(&topa, "sha256:a").unwrap();
+        store
+            .register_image("imgA", vec!["sha256:base".into(), "sha256:a".into()], "c1".into())
+            .unwrap();
+        store
+            .register_image("imgB", vec!["sha256:base".into()], "c2".into())
+            .unwrap();
+
+        let info = store.inspect("imgA").unwrap().unwrap();
+        assert_eq!(info.layers.len(), 2);
+        // base is shared (refcount 2), a is exclusive (refcount 1).
+        assert!(info.exclusive_size < info.total_size);
+        assert!(store.inspect("nope").unwrap().is_none());
     }
 
     #[test]

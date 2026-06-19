@@ -196,6 +196,12 @@ enum Commands {
         all: bool,
     },
 
+    /// Inspect a local image (layers, sizes, shared vs exclusive disk)
+    Image {
+        #[command(subcommand)]
+        cmd: ImageCmd,
+    },
+
     /// Push a locally-stored image to its registry
     Push {
         /// Image to push (e.g., ghcr.io/me/agent:latest)
@@ -279,6 +285,18 @@ enum SystemCmd {
     Prune,
 }
 
+#[derive(Subcommand, Debug)]
+enum ImageCmd {
+    /// Show an image's layers, sizes, and shared-vs-exclusive disk usage
+    Inspect {
+        /// Image to inspect (e.g., python:3.12)
+        image: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -343,6 +361,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
+        }
+        Commands::Image { cmd } => match cmd {
+            ImageCmd::Inspect { image, json } => {
+                commands::image::inspect(commands::image::InspectArgs { image, json }).await?
+            }
         }
         Commands::Push { image } => {
             commands::push::execute(commands::push::PushArgs { image }).await?
