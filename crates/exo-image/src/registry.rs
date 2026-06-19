@@ -542,18 +542,25 @@ impl RegistryClient {
     ) -> Result<()> {
         let rootfs = self.store.rootfs_path(reference);
 
-        // Clean existing rootfs
-        if rootfs.exists() {
-            std::fs::remove_dir_all(&rootfs)?;
-        }
-        std::fs::create_dir_all(&rootfs)?;
+        // Route through the content-addressed layer store (E1): each layer is
+        // extracted once and shared across images, then the per-image rootfs is
+        // composed by hardlinking out of the shared store (real dedup on disk).
+        let cas = crate::LayerStore::new(self.store.root().to_path_buf());
 
-        // Extract each layer in order
+        let mut layer_digests = Vec::new();
         for layer in manifest.layers() {
             let digest = layer.digest().to_string();
             let blob_path = self.store.blob_path(&digest);
-            crate::extract_layer(&blob_path, &rootfs)?;
+            cas.extract_layer(&blob_path, &digest)?;
+            layer_digests.push(digest);
         }
+
+        // Record image -> layers so refcounting, `system df`, and prune work.
+        let config_digest = manifest.config().digest().to_string();
+        cas.register_image(&reference.to_string(), layer_digests.clone(), config_digest)?;
+
+        // Compose the usable rootfs from the shared layers.
+        cas.compose_rootfs(&rootfs, &layer_digests)?;
 
         Ok(())
     }

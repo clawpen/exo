@@ -12,10 +12,12 @@ pub use oci_spec::image::{ImageManifest, MediaType};
 mod reference;
 mod store;
 mod extractor;
+mod cas;
 
 pub use reference::ImageReference;
 pub use store::ImageStore;
 pub use extractor::LayerExtractor;
+pub use cas::{DiskUsage, ImageIndex, ImageRecord, LayerStore};
 
 #[cfg(feature = "registry")]
 mod registry;

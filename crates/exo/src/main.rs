@@ -221,6 +221,12 @@ enum Commands {
         json: bool,
     },
 
+    /// Show layer-store disk usage and dedup savings
+    System {
+        #[command(subcommand)]
+        cmd: SystemCmd,
+    },
+
     /// Daemon mode - run a persistent server for faster operations
     Daemon {
         /// Run in foreground (don't detach)
@@ -247,6 +253,18 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SystemCmd {
+    /// Show image-store disk usage and dedup savings
+    Df {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove extracted layers no image references anymore
+    Prune,
 }
 
 #[tokio::main]
@@ -322,6 +340,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Events { container, limit, json } => {
             commands::events::execute(commands::events::EventsArgs { container, limit, json }).await?
+        }
+        Commands::System { cmd } => match cmd {
+            SystemCmd::Df { json } => {
+                commands::system::df(commands::system::DfArgs { json }).await?
+            }
+            SystemCmd::Prune => commands::system::prune().await?,
         }
         Commands::Daemon { foreground, stop, status, socket, timeout, json } => {
             if stop {

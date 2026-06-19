@@ -1,0 +1,117 @@
+# Exo Enterprise Roadmap
+
+> From **agent runtime** → **Docker-replacement product**.
+> Branch: `exo-enterprise`. Created 2026-06-19.
+
+## Thesis
+
+Exo already has the hard part: a working single-host runtime (namespaces, cgroups
+v2, seccomp, capability drop, rootless, overlayfs, OCI pull, GPU, lifecycle daemon
+at 1000+ container scale, WSL2). What's missing to be a *product* is **distribution,
+build, local networking, and proof** — plus polish.
+
+**Two things we are NOT building** (they already exist in `F:\Software\Claw Pen`'s
+orchestrator and are the control-plane's job, not the runtime's):
+
+| Owned by Claw Pen orchestrator | File |
+| --- | --- |
+| Cross-host overlay mesh (Tailscale/WireGuard/ZeroTier) | `orchestrator/src/network.rs` |
+| Secret management / rotation | `orchestrator/src/secret_manager.rs` |
+| Volume attachment & orchestration | `orchestrator/src/volume_attachment.rs` |
+| Service discovery / service registry | `orchestrator/src/api.rs` |
+| Multi-agent scaling, workflows, teams, snapshots | `orchestrator/src/{executor,teams,snapshots,workflow}.rs` |
+
+Exo provides the *primitives* these consume (the mount, the local veth, the env
+injection point); it must not reimplement the orchestration on top of them.
+
+---
+
+## Headline: Space savings & efficiency vs Docker
+
+The differentiator we lead with. Measured by `scripts/bench-vs-docker.sh` →
+`results/bench-*.json`. Four cost-mapped axes:
+
+1. **Disk footprint** — content-addressed layer store with cross-image dedup.
+2. **Cold spawn** — daemonless/light-daemon path vs dockerd round-trip.
+3. **Idle control-plane RSS** — exo daemon vs `dockerd` baseline.
+4. **Density** — concurrent containers per GB RAM.
+
+### E0 — Prove it (do this first; it's the sales story)
+- [x] `scripts/bench-vs-docker.sh` harness (disk / spawn / idle RSS / summary JSON)
+- [ ] Density sub-benchmark: ramp N containers, record RSS/container & failure point
+- [ ] CI job publishing `results/bench-*.json` as artifacts per commit (regression gate)
+- [ ] `docs/benchmarks.md` with reproducible methodology + a results table
+- [ ] One-shot reproducer container so external users can verify our claims
+
+Where the wins come from (validate each with the harness, don't assume):
+- Content-addressed dedup across shared base layers (E1)
+- No HTTP/dockerd per-op overhead; agent stdio bus instead of REST
+- Rootless + minimal daemon → low idle RSS
+- Smaller agent-tuned base images
+
+---
+
+## E1 — Image distribution & storage *(biggest functional gap)*
+OCI-compatible at the boundary so we inherit the whole ecosystem.
+- [x] OCI registry pull + Docker Hub auth + multi-arch (done)
+- [x] **Content-addressed layer store** — extract each layer once into `layers/<digest>/`,
+      image→layers index for refcounting, hardlink-composed per-image rootfs
+      (shared inodes = real dedup, works rootless without overlay). `crates/exo-image/src/cas.rs`
+- [x] `exo system df` — physical vs logical bytes + dedup % (drives the benchmark)
+- [x] `exo system prune` — GC layers no image references
+- [ ] `exo push` to any OCI registry (token auth, `docker login` creds)
+- [ ] `exo rmi` — unregister image + auto-prune its now-orphaned layers
+- [ ] `exo image inspect`
+- [ ] Optional: zstd layer compression + lazy/stargz pull (further space + cold-start win)
+- [ ] Follow-up: switch rootfs composition to overlay lowerdirs where the kernel
+      allows it (zero-copy vs hardlink), keeping hardlink as the rootless fallback
+
+## E2 — Build
+- [ ] `exo build -t name .` — Dockerfile subset (FROM/RUN/COPY/ENV/CMD/WORKDIR)
+- [ ] Layer commit + build cache (reuse E1 CAS)
+- [ ] **Agent manifest** (`exo.toml`) as native alternative: declare tools, model
+      endpoints, resource budget, egress policy → our differentiation vs Dockerfile
+- [ ] `.exoignore`
+
+## E3 — Local networking (single-host primitives only)
+> Mesh/discovery stays in Claw Pen. Exo provides the local plumbing it can't.
+- [ ] Bridge (`exo0`) + veth pair + IP allocation per container
+- [ ] `-p host:container` publish via nftables
+- [ ] Container-local DNS + `/etc/hosts`
+- [ ] `network mode` already in CLI — wire up `bridge|host|none` backends
+
+## E4 — Runtime completeness
+- [ ] Full writable overlay via fuse-overlayfs (finish the rootless gap from old roadmap)
+- [ ] `exo stats` — live cgroup metrics (CPU/mem/io)
+- [ ] Healthcheck primitive (`--health-cmd`) + status surfaced in `list`
+- [ ] `--restart` policies (no/on-failure/always) in the daemon reconciler
+- [ ] `exo cp`, `exo inspect`, `exo events` (events partially present)
+
+## E5 — Programmability & trust (enterprise table stakes)
+- [ ] Stable, versioned daemon API + SDK (formalize the existing Unix socket protocol)
+- [ ] Image signing/verification (cosign/sigstore) + SBOM emission
+- [ ] Vulnerability scan hook on pull/build
+- [ ] Prometheus `/metrics` endpoint on the daemon
+- [ ] Structured audit log + log rotation
+- [ ] Single-binary installer + package repos; Docker→Exo migration guide
+
+## E6 — Compose-lite (optional, only if Claw Pen doesn't cover it)
+- [ ] `exo-compose.yml` for multi-container *local* dev stacks (agent + vector DB + tools)
+- [ ] Defer real orchestration to Claw Pen; this is a dev-loop convenience only
+
+---
+
+## Sequencing
+
+1. **E0** — benchmark harness + docs (proof first, it guides everything)
+2. **E1** — CAS dedup + push (unlocks the disk-savings claim *and* distribution)
+3. **E3 / E4** — local networking + runtime completeness (feature parity)
+4. **E2** — build + agent manifest (differentiation)
+5. **E5** — trust/observability (enterprise readiness)
+6. **E6** — compose-lite only if a gap remains
+
+## Principles
+- OCI-compatible at every boundary; original engineering only on agent-native parts.
+- Never duplicate Claw Pen's control plane — provide primitives, not orchestration.
+- Every efficiency claim must be reproducible via `scripts/bench-vs-docker.sh`.
+- Keep rootless default; maintain CLI backward compatibility; test Linux + WSL2.
