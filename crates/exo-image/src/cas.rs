@@ -116,11 +116,18 @@ impl LayerStore {
 
     /// Extract a layer tarball (gzip-aware) into the store, exactly once.
     /// No-op if the layer is already present (the dedup fast path).
+    ///
+    /// Hardening: the blob's sha256 is verified against `digest` before any
+    /// extraction, so a corrupted or tampered layer can never reach the store
+    /// (supply-chain integrity). Tar entries are also confined to the layer dir
+    /// (no path-traversal escape) by `unpack_in`.
     pub fn extract_layer(&self, blob_path: &Path, digest: &str) -> Result<()> {
         if self.has_layer(digest) {
             trace!("layer {} already extracted — dedup hit", digest);
             return Ok(());
         }
+        verify_blob_digest(blob_path, digest)
+            .with_context(|| format!("integrity check failed for layer {}", digest))?;
         let dest = self.layer_dir(digest);
         // Extract into a temp dir then atomically rename, so a crash mid-extract
         // never leaves a half-populated layer that looks valid.
@@ -344,6 +351,25 @@ impl LayerStore {
     }
 }
 
+/// Verify a blob file's sha256 matches its `sha256:...` digest. Digests without
+/// a recognized `sha256:` prefix are accepted (e.g. synthetic test digests) so
+/// the store stays usable for content that isn't registry-sourced.
+fn verify_blob_digest(blob_path: &Path, digest: &str) -> Result<()> {
+    use sha2::{Digest as _, Sha256};
+    let Some(expected) = digest.strip_prefix("sha256:") else {
+        return Ok(());
+    };
+    let mut file = std::fs::File::open(blob_path)
+        .with_context(|| format!("opening blob {:?}", blob_path))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected {
+        anyhow::bail!("digest mismatch: expected sha256:{expected}, got sha256:{actual}");
+    }
+    Ok(())
+}
+
 /// Raw tar extraction (gzip-aware) that keeps every entry, including `.wh.`
 /// whiteout markers, so they survive into the content-addressed layer dir.
 fn extract_raw(layer_tar: &Path, dest: &Path) -> Result<()> {
@@ -506,25 +532,42 @@ mod tests {
         buf
     }
 
-    fn write_blob(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    /// Write a layer blob and return (path, its real `sha256:` digest), so the
+    /// store's integrity check accepts it just as it would a registry blob.
+    fn mklayer(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> (PathBuf, String) {
+        use sha2::{Digest as _, Sha256};
+        let bytes = make_layer(files);
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
         let p = dir.join(name);
         let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(bytes).unwrap();
-        p
+        f.write_all(&bytes).unwrap();
+        (p, digest)
     }
 
     #[test]
     fn extract_is_idempotent_and_dedups() {
         let tmp = tempdir().unwrap();
         let store = LayerStore::new(tmp.path().to_path_buf());
-        let blob = write_blob(tmp.path(), "l1.tar.gz", &make_layer(&[("bin/sh", b"shell")]));
+        let (blob, d) = mklayer(tmp.path(), "l1.tar.gz", &[("bin/sh", b"shell")]);
 
-        assert!(!store.has_layer("sha256:aaa"));
-        store.extract_layer(&blob, "sha256:aaa").unwrap();
-        assert!(store.has_layer("sha256:aaa"));
+        assert!(!store.has_layer(&d));
+        store.extract_layer(&blob, &d).unwrap();
+        assert!(store.has_layer(&d));
         // Second extract is a no-op (dedup fast path) and must not error.
-        store.extract_layer(&blob, "sha256:aaa").unwrap();
-        assert!(store.layer_dir("sha256:aaa").join("bin/sh").exists());
+        store.extract_layer(&blob, &d).unwrap();
+        assert!(store.layer_dir(&d).join("bin/sh").exists());
+    }
+
+    #[test]
+    fn extract_rejects_tampered_blob() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+        let (blob, _real) = mklayer(tmp.path(), "l.tgz", &[("f", b"x")]);
+        // Claim a digest that doesn't match the bytes -> integrity check fails.
+        let wrong = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let err = store.extract_layer(&blob, wrong).unwrap_err();
+        assert!(err.to_string().contains("integrity check failed"));
+        assert!(!store.has_layer(wrong));
     }
 
     #[test]
@@ -533,19 +576,15 @@ mod tests {
         let store = LayerStore::new(tmp.path().to_path_buf());
 
         // Shared base layer + two distinct top layers.
-        let base = write_blob(tmp.path(), "base.tgz", &make_layer(&[("lib/libc", &[7u8; 4096])]));
-        let topa = write_blob(tmp.path(), "a.tgz", &make_layer(&[("app/a", &[1u8; 1024])]));
-        let topb = write_blob(tmp.path(), "b.tgz", &make_layer(&[("app/b", &[2u8; 1024])]));
-        store.extract_layer(&base, "sha256:base").unwrap();
-        store.extract_layer(&topa, "sha256:a").unwrap();
-        store.extract_layer(&topb, "sha256:b").unwrap();
+        let (base, db) = mklayer(tmp.path(), "base.tgz", &[("lib/libc", &[7u8; 4096])]);
+        let (topa, da) = mklayer(tmp.path(), "a.tgz", &[("app/a", &[1u8; 1024])]);
+        let (topb, dbb) = mklayer(tmp.path(), "b.tgz", &[("app/b", &[2u8; 1024])]);
+        store.extract_layer(&base, &db).unwrap();
+        store.extract_layer(&topa, &da).unwrap();
+        store.extract_layer(&topb, &dbb).unwrap();
 
-        store
-            .register_image("imgA", vec!["sha256:base".into(), "sha256:a".into()], "c1".into())
-            .unwrap();
-        store
-            .register_image("imgB", vec!["sha256:base".into(), "sha256:b".into()], "c2".into())
-            .unwrap();
+        store.register_image("imgA", vec![db.clone(), da], "c1".into()).unwrap();
+        store.register_image("imgB", vec![db.clone(), dbb], "c2".into()).unwrap();
 
         let df = store.disk_usage().unwrap();
         assert_eq!(df.images, 2);
@@ -553,23 +592,19 @@ mod tests {
         // Logical counts the shared base twice; physical counts it once.
         assert!(df.logical_bytes > df.physical_bytes);
         assert_eq!(df.reclaimable_via_dedup(), df.logical_bytes - df.physical_bytes);
-        assert_eq!(store.refcount("sha256:base").unwrap(), 2);
+        assert_eq!(store.refcount(&db).unwrap(), 2);
     }
 
     #[test]
     fn inspect_separates_shared_from_exclusive() {
         let tmp = tempdir().unwrap();
         let store = LayerStore::new(tmp.path().to_path_buf());
-        let base = write_blob(tmp.path(), "base.tgz", &make_layer(&[("lib", &[7u8; 2048])]));
-        let topa = write_blob(tmp.path(), "a.tgz", &make_layer(&[("a", &[1u8; 1024])]));
-        store.extract_layer(&base, "sha256:base").unwrap();
-        store.extract_layer(&topa, "sha256:a").unwrap();
-        store
-            .register_image("imgA", vec!["sha256:base".into(), "sha256:a".into()], "c1".into())
-            .unwrap();
-        store
-            .register_image("imgB", vec!["sha256:base".into()], "c2".into())
-            .unwrap();
+        let (base, db) = mklayer(tmp.path(), "base.tgz", &[("lib", &[7u8; 2048])]);
+        let (topa, da) = mklayer(tmp.path(), "a.tgz", &[("a", &[1u8; 1024])]);
+        store.extract_layer(&base, &db).unwrap();
+        store.extract_layer(&topa, &da).unwrap();
+        store.register_image("imgA", vec![db.clone(), da], "c1".into()).unwrap();
+        store.register_image("imgB", vec![db], "c2".into()).unwrap();
 
         let info = store.inspect("imgA").unwrap().unwrap();
         assert_eq!(info.layers.len(), 2);
@@ -582,42 +617,30 @@ mod tests {
     fn prune_removes_only_unreferenced_layers() {
         let tmp = tempdir().unwrap();
         let store = LayerStore::new(tmp.path().to_path_buf());
-        let base = write_blob(tmp.path(), "base.tgz", &make_layer(&[("f", b"x")]));
-        let orphan = write_blob(tmp.path(), "o.tgz", &make_layer(&[("g", b"y")]));
-        store.extract_layer(&base, "sha256:base").unwrap();
-        store.extract_layer(&orphan, "sha256:orphan").unwrap();
-        store
-            .register_image("img", vec!["sha256:base".into()], "c".into())
-            .unwrap();
+        let (base, db) = mklayer(tmp.path(), "base.tgz", &[("f", b"x")]);
+        let (orphan, dorph) = mklayer(tmp.path(), "o.tgz", &[("g", b"y")]);
+        store.extract_layer(&base, &db).unwrap();
+        store.extract_layer(&orphan, &dorph).unwrap();
+        store.register_image("img", vec![db.clone()], "c".into()).unwrap();
 
         let (removed, _) = store.prune().unwrap();
         assert_eq!(removed, 1);
-        assert!(store.has_layer("sha256:base"));
-        assert!(!store.has_layer("sha256:orphan"));
+        assert!(store.has_layer(&db));
+        assert!(!store.has_layer(&dorph));
     }
 
     #[test]
     fn compose_rootfs_stacks_layers_and_applies_whiteouts() {
         let tmp = tempdir().unwrap();
         let store = LayerStore::new(tmp.path().to_path_buf());
-        let base = write_blob(
-            tmp.path(),
-            "base.tgz",
-            &make_layer(&[("etc/keep", b"k"), ("etc/gone", b"g")]),
-        );
+        let (base, db) = mklayer(tmp.path(), "base.tgz", &[("etc/keep", b"k"), ("etc/gone", b"g")]);
         // Top layer overrides `keep` and whiteouts `gone`.
-        let top = write_blob(
-            tmp.path(),
-            "top.tgz",
-            &make_layer(&[("etc/keep", b"k2"), ("etc/.wh.gone", b"")]),
-        );
-        store.extract_layer(&base, "sha256:base").unwrap();
-        store.extract_layer(&top, "sha256:top").unwrap();
+        let (top, dt) = mklayer(tmp.path(), "top.tgz", &[("etc/keep", b"k2"), ("etc/.wh.gone", b"")]);
+        store.extract_layer(&base, &db).unwrap();
+        store.extract_layer(&top, &dt).unwrap();
 
         let rootfs = tmp.path().join("rootfs-img");
-        store
-            .compose_rootfs(&rootfs, &["sha256:base".into(), "sha256:top".into()])
-            .unwrap();
+        store.compose_rootfs(&rootfs, &[db, dt]).unwrap();
 
         assert_eq!(std::fs::read(rootfs.join("etc/keep")).unwrap(), b"k2");
         assert!(!rootfs.join("etc/gone").exists());

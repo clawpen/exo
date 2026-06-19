@@ -100,6 +100,39 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 - [ ] `exo-compose.yml` for multi-container *local* dev stacks (agent + vector DB + tools)
 - [ ] Defer real orchestration to Claw Pen; this is a dev-loop convenience only
 
+## E7 — Production hardening pass *(gate before any GA/enterprise claim)*
+A dedicated security/robustness sweep, not folded into feature work. Done when an
+external pentest and a fuzzing run come back clean and the checklist below is met.
+
+### Supply-chain & content integrity
+- [x] Layer blob digest verification before extraction into the CAS (`cas.rs`)
+- [x] Tar extraction confined to target dir (no path-traversal escape via `unpack_in`)
+- [ ] Reject symlink/hardlink entries that escape the rootfs at compose time
+- [ ] Manifest/config/layer size + count limits (decompression-bomb & OOM guards)
+- [ ] Verify config digest + manifest↔config consistency on pull
+- [ ] Enforce image signature verification (cosign) as a gate, not just emit (ties to E5)
+
+### Concurrency & state integrity
+- [ ] File-locked, crash-safe index mutations (concurrent `pull`/`rmi`/`prune` races)
+- [ ] `exo system check` — detect & repair store inconsistencies (orphan blobs, dangling refs)
+- [ ] Fsync + atomic-rename audit across all on-disk writes
+- [ ] Quotas: max store size, per-image disk cap, eviction policy
+
+### Runtime isolation hardening
+- [ ] Seccomp/AppArmor/SELinux profile review + default-deny baseline
+- [ ] Capability-set audit (drop-all default, opt-in adds only)
+- [ ] User-namespace / uid-gid mapping review for the rootless path
+- [ ] Resource-exhaustion limits enforced (pids, memory, fds) even under daemon scale
+- [ ] No-new-privileges, read-only rootfs option, masked /proc paths
+
+### Process & operational security
+- [ ] Daemon socket authn/authz + permission hardening (no world-writable socket)
+- [ ] Secret-handling review (no secrets in logs, env dumps, or event log)
+- [ ] Dependency audit (`cargo audit`/`cargo deny`) wired into CI as a gate
+- [ ] Fuzz layer extraction, manifest parsing, and reference parsing (cargo-fuzz)
+- [ ] Threat model doc + documented trust boundaries
+- [ ] Run `/security-review` on the branch and resolve findings before tagging
+
 ---
 
 ## Sequencing
@@ -110,6 +143,7 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 4. **E2** — build + agent manifest (differentiation)
 5. **E5** — trust/observability (enterprise readiness)
 6. **E6** — compose-lite only if a gap remains
+7. **E7** — production hardening pass; **gates GA** (don't claim "production" until clean)
 
 ## Principles
 - OCI-compatible at every boundary; original engineering only on agent-native parts.
