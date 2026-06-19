@@ -149,7 +149,10 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 
 ### Process & operational security
 - [ ] Daemon socket authn/authz + permission hardening (no world-writable socket)
-- [ ] Secret-handling review (no secrets in logs, env dumps, or event log)
+- [x] Secret-handling review of exo-image: no secrets logged anywhere; added
+      redacting Debug impls for RegistryAuth/DockerConfigAuth so future `{:?}`
+      logs can't leak credentials. `registry.rs`, 1 test
+- [ ] Extend secret-leak review to daemon/runtime (events, env dumps)
 - [x] Dependency audit (`cargo audit` + `cargo deny`) wired into CI as a gate
       (`.github/workflows/ci.yml` security job, `deny.toml`)
 - [ ] Clean up legacy warnings, then flip CI fmt/clippy from informational to `-D warnings`

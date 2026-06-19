@@ -15,12 +15,22 @@ use tracing::{debug, info, warn};
 use crate::{ImageReference, ImageStore};
 
 /// Registry authentication credentials.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegistryAuth {
     /// Username for authentication.
     pub username: String,
     /// Password or token for authentication.
     pub password: String,
+}
+
+// Redact the password so it can never leak through a `{:?}` log.
+impl std::fmt::Debug for RegistryAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryAuth")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl RegistryAuth {
@@ -48,7 +58,7 @@ impl RegistryAuth {
 }
 
 /// Docker config.json authentication entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DockerConfigAuth {
     /// Authentication string (base64 encoded username:password).
     pub auth: Option<String>,
@@ -58,6 +68,18 @@ pub struct DockerConfigAuth {
     /// Registry token.
     #[serde(rename = "registrytoken")]
     pub registry_token: Option<String>,
+}
+
+// All three fields are credentials; redact any present one in debug output.
+impl std::fmt::Debug for DockerConfigAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |o: &Option<String>| if o.is_some() { "<redacted>" } else { "None" };
+        f.debug_struct("DockerConfigAuth")
+            .field("auth", &redact(&self.auth))
+            .field("identity_token", &redact(&self.identity_token))
+            .field("registry_token", &redact(&self.registry_token))
+            .finish()
+    }
 }
 
 /// Docker config.json structure.
@@ -769,5 +791,27 @@ fn parse_www_authenticate(header: &str) -> HashMap<String, String> {
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_debug_redacts_secrets() {
+        let auth = RegistryAuth::new("alice", "s3cr3t-password");
+        let s = format!("{:?}", auth);
+        assert!(s.contains("alice"));
+        assert!(!s.contains("s3cr3t-password"), "password leaked in Debug: {s}");
+
+        let cfg = DockerConfigAuth {
+            auth: Some("base64creds".into()),
+            identity_token: Some("oauth-token".into()),
+            registry_token: None,
+        };
+        let s = format!("{:?}", cfg);
+        assert!(!s.contains("base64creds") && !s.contains("oauth-token"), "secret leaked: {s}");
+        assert!(s.contains("<redacted>") && s.contains("None"));
     }
 }
