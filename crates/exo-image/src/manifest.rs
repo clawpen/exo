@@ -118,6 +118,79 @@ impl AgentManifest {
         Self::parse(&text)
     }
 
+    /// Parse a Dockerfile subset into an agent manifest, so existing Dockerfiles
+    /// flow through the same build path. Supported: FROM, RUN, COPY/ADD, ENV,
+    /// CMD, WORKDIR. `name` becomes the built image's name (e.g. from `-t`).
+    /// Line continuations (`\`) and `#` comments are handled.
+    pub fn from_dockerfile(text: &str, name: &str) -> Result<Self> {
+        let mut m = AgentManifest::default();
+        m.agent.name = name.to_string();
+
+        // Join continued lines, drop comments/blanks.
+        let mut logical: Vec<String> = Vec::new();
+        let mut acc = String::new();
+        for raw in text.lines() {
+            let line = raw.trim_end();
+            let trimmed = line.trim_start();
+            if !acc.is_empty() {
+                acc.push(' ');
+            }
+            if let Some(stripped) = line.strip_suffix('\\') {
+                acc.push_str(stripped.trim_start());
+                continue;
+            }
+            if acc.is_empty() {
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                logical.push(trimmed.to_string());
+            } else {
+                acc.push_str(trimmed);
+                logical.push(acc.trim().to_string());
+                acc.clear();
+            }
+        }
+        if !acc.is_empty() {
+            logical.push(acc.trim().to_string());
+        }
+
+        for line in logical {
+            let (instr, rest) = match line.split_once(char::is_whitespace) {
+                Some((i, r)) => (i.to_uppercase(), r.trim().to_string()),
+                None => (line.to_uppercase(), String::new()),
+            };
+            match instr.as_str() {
+                "FROM" => {
+                    // Ignore "AS <stage>" aliases; first FROM wins.
+                    if m.agent.from.is_empty() {
+                        m.agent.from = rest.split_whitespace().next().unwrap_or("").to_string();
+                    }
+                }
+                "RUN" => m.build.run.push(rest),
+                "WORKDIR" => m.build.workdir = Some(rest),
+                "ENV" => {
+                    for (k, v) in parse_env(&rest) {
+                        m.build.env.insert(k, v);
+                    }
+                }
+                "COPY" | "ADD" => {
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        // Last token is dest; everything before is sources.
+                        let dst = parts[parts.len() - 1].to_string();
+                        for src in &parts[..parts.len() - 1] {
+                            m.build.copy.push([src.to_string(), dst.clone()]);
+                        }
+                    }
+                }
+                "CMD" | "ENTRYPOINT" => m.build.cmd = parse_argv(&rest),
+                _ => { /* skip unsupported instructions (LABEL, EXPOSE, ...) */ }
+            }
+        }
+        m.validate()?;
+        Ok(m)
+    }
+
     /// The built image's tag (defaults to "latest").
     pub fn tag(&self) -> &str {
         self.agent.tag.as_deref().unwrap_or("latest")
@@ -168,6 +241,31 @@ impl AgentManifest {
             false => out.push_str(&format!("  egress: {}\n", self.egress.allow.join(", "))),
         }
         out
+    }
+}
+
+/// Parse a CMD/ENTRYPOINT value: exec form `["a","b"]` or shell form `a b`.
+fn parse_argv(rest: &str) -> Vec<String> {
+    let t = rest.trim();
+    if t.starts_with('[') {
+        if let Ok(v) = serde_json::from_str::<Vec<String>>(t) {
+            return v;
+        }
+    }
+    t.split_whitespace().map(str::to_string).collect()
+}
+
+/// Parse ENV in both `KEY=VALUE [KEY2=VALUE2 ...]` and legacy `KEY value` forms.
+fn parse_env(rest: &str) -> Vec<(String, String)> {
+    let t = rest.trim();
+    if t.contains('=') {
+        t.split_whitespace()
+            .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect()
+    } else if let Some((k, v)) = t.split_once(char::is_whitespace) {
+        vec![(k.to_string(), v.trim().to_string())]
+    } else {
+        Vec::new()
     }
 }
 
@@ -226,6 +324,37 @@ mod tests {
     fn rejects_missing_required_fields() {
         assert!(AgentManifest::parse("[agent]\nname = \"\"\nfrom = \"x\"\n").is_err());
         assert!(AgentManifest::parse("[agent]\nname = \"a\"\nfrom = \"\"\n").is_err());
+    }
+
+    #[test]
+    fn parses_dockerfile_subset() {
+        let df = r#"
+            # a comment
+            FROM python:3.12-slim AS base
+            WORKDIR /app
+            COPY ./src /app
+            ENV LOG_LEVEL=info APP=demo
+            RUN pip install requests \
+                && pip install flask
+            CMD ["python", "main.py"]
+            EXPOSE 8080
+        "#;
+        let m = AgentManifest::from_dockerfile(df, "demo").unwrap();
+        assert_eq!(m.agent.name, "demo");
+        assert_eq!(m.agent.from, "python:3.12-slim"); // AS base stripped
+        assert_eq!(m.build.workdir.as_deref(), Some("/app"));
+        assert_eq!(m.build.copy[0], ["./src".to_string(), "/app".to_string()]);
+        assert_eq!(m.build.env.get("LOG_LEVEL").unwrap(), "info");
+        assert_eq!(m.build.env.get("APP").unwrap(), "demo");
+        // Line continuation joined into one RUN.
+        assert_eq!(m.build.run.len(), 1);
+        assert!(m.build.run[0].contains("flask"));
+        assert_eq!(m.build.cmd, vec!["python", "main.py"]); // exec form
+    }
+
+    #[test]
+    fn dockerfile_requires_from() {
+        assert!(AgentManifest::from_dockerfile("RUN echo hi\n", "x").is_err());
     }
 
     #[test]

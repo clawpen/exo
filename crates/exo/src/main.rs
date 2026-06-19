@@ -196,11 +196,15 @@ enum Commands {
         all: bool,
     },
 
-    /// Build an image from an agent manifest (exo.toml)
+    /// Build an image from an agent manifest (exo.toml) or a Dockerfile
     Build {
-        /// Path to exo.toml or a directory containing it (default: ./exo.toml)
+        /// Path to exo.toml/Dockerfile or a directory (default: ./exo.toml)
         #[arg(short, long)]
         file: Option<String>,
+
+        /// Image name for Dockerfile builds (e.g. -t my-agent)
+        #[arg(short, long)]
+        tag: Option<String>,
     },
 
     /// Inspect a local image (layers, sizes, shared vs exclusive disk)
@@ -369,8 +373,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
         }
-        Commands::Build { file } => {
-            commands::build::execute(commands::build::BuildArgs { file }).await?
+        Commands::Build { file, tag } => {
+            commands::build::execute(commands::build::BuildArgs { file, tag }).await?
         }
         Commands::Image { cmd } => match cmd {
             ImageCmd::Inspect { image, json } => {

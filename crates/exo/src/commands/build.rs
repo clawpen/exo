@@ -10,12 +10,14 @@ use exo_image::{AgentManifest, ImageReference, ImageStore, LayerStore, RegistryC
 use std::path::{Path, PathBuf};
 
 pub struct BuildArgs {
-    /// Path to the manifest, or a directory containing `exo.toml`.
+    /// Path to the manifest/Dockerfile, or a directory containing `exo.toml`.
     pub file: Option<String>,
+    /// Image name for Dockerfile builds (e.g. `-t my-agent`).
+    pub tag: Option<String>,
 }
 
 pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
-    // Resolve the manifest path: explicit file, dir/exo.toml, or ./exo.toml.
+    // Resolve the input path: explicit file, dir/exo.toml, or ./exo.toml.
     let path = match args.file {
         Some(f) => {
             let p = PathBuf::from(f);
@@ -24,12 +26,23 @@ pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
         None => PathBuf::from("exo.toml"),
     };
     if !path.exists() {
-        anyhow::bail!("no manifest at {:?} (expected exo.toml)", path);
+        anyhow::bail!("no build file at {:?} (expected exo.toml or a Dockerfile)", path);
     }
-    // COPY sources are resolved relative to the manifest's directory.
+    // COPY sources are resolved relative to the build file's directory.
     let ctx_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
 
-    let manifest = AgentManifest::load(&path)?;
+    // exo.toml -> agent manifest; anything else is treated as a Dockerfile.
+    let is_toml = path.extension().map(|e| e == "toml").unwrap_or(false);
+    let manifest = if is_toml {
+        AgentManifest::load(&path)?
+    } else {
+        let name = args.tag.clone().unwrap_or_else(|| {
+            ctx_dir.file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "image".to_string())
+        });
+        let text = std::fs::read_to_string(&path)?;
+        AgentManifest::from_dockerfile(&text, &name)?
+    };
     println!("{}", manifest.plan());
 
     // Pull the base image so the build has something to layer on.

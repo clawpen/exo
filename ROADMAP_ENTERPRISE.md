@@ -80,8 +80,10 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
       built images are `push`able (`crates/exo-image/src/oci_build.rs`, 1 test;
       verified end-to-end: built image yields a valid OCI manifest + config)
 - [ ] Execute RUN steps via the runtime's container-exec path *(needs live machine)*
+- [x] Dockerfile subset (FROM/RUN/COPY/ADD/ENV/CMD/WORKDIR, line continuations,
+      exec+shell forms) as alternate input — `exo build -f Dockerfile -t name`
+      (3 tests; verified end-to-end; inherits default-deny egress)
 - [ ] Build cache keyed on step inputs
-- [ ] Dockerfile subset (FROM/RUN/COPY/ENV/CMD/WORKDIR) as an alternate input
 - [ ] `.exoignore`
 
 ## E3 — Local networking (single-host primitives only)
