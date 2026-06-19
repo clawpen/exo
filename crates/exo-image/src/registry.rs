@@ -428,6 +428,11 @@ impl RegistryClient {
 
         info!("Image has {} layers", manifest.layers().len());
 
+        // Reject absurd manifests (layer count / total size) before fetching.
+        crate::ManifestLimits::from_env()
+            .check(&manifest)
+            .context("manifest failed resource-limit check")?;
+
         // Save manifest
         self.store.save_oci_manifest(reference, &manifest)?;
 
@@ -438,6 +443,12 @@ impl RegistryClient {
             info!("Downloading config {}", config_digest);
             self.download_blob(&api_url, repo, &config_digest, &config_path, &token).await?;
         }
+
+        // Verify the config blob matches the manifest (digest + layer count).
+        let config_bytes = std::fs::read(&config_path)
+            .with_context(|| format!("reading config blob {:?}", config_path))?;
+        crate::verify_config_consistency(&manifest, &config_bytes)
+            .context("manifest/config consistency check failed")?;
 
         // Download layers
         let mut layer_digests = Vec::new();

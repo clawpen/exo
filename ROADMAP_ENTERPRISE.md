@@ -124,8 +124,10 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 - [x] Reject symlink-escape at compose time (parent-traverses-symlink guard +
       higher-layer dir overrides a lower-layer symlink). `cas.rs`, unix test
 - [x] Per-layer uncompressed size cap (decompression-bomb guard, `EXO_MAX_LAYER_BYTES`)
-- [ ] Manifest/config count limits + total-image-size cap (OOM guards)
-- [ ] Verify config digest + manifest↔config consistency on pull
+- [x] Manifest layer-count + total-size caps on pull (`EXO_MAX_LAYERS`,
+      `EXO_MAX_IMAGE_BYTES`) — OOM/DoS guard. `integrity.rs`
+- [x] Verify config digest + manifest↔config (layer/diff_id count) on pull.
+      `integrity.rs`, 3 tests; real pulls still pass
 - [ ] Enforce image signature verification (cosign) as a gate, not just emit (ties to E5)
 
 ### Concurrency & state integrity

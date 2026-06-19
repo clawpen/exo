@@ -16,6 +16,7 @@ mod cas;
 mod manifest;
 mod oci_build;
 mod ignore;
+mod integrity;
 
 pub use reference::ImageReference;
 pub use store::ImageStore;
@@ -26,6 +27,7 @@ pub use manifest::{
 };
 pub use oci_build::build_and_store;
 pub use ignore::ExoIgnore;
+pub use integrity::{verify_config_consistency, ManifestLimits};
 
 #[cfg(feature = "registry")]
 mod registry;
