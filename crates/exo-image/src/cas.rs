@@ -107,19 +107,35 @@ impl StoreReport {
     }
 }
 
+/// Default cap on a single layer's uncompressed size (decompression-bomb guard).
+const DEFAULT_MAX_LAYER_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
+
 /// Content-addressed layer store.
 #[derive(Clone)]
 pub struct LayerStore {
     root: PathBuf,
+    /// Reject a layer whose declared uncompressed size exceeds this.
+    max_layer_bytes: u64,
 }
 
 impl LayerStore {
     /// Open (creating if needed) a layer store rooted under `root`.
     /// Lives alongside the existing `blobs/` and `rootfs/` dirs.
+    /// The per-layer size cap can be overridden via `EXO_MAX_LAYER_BYTES`.
     pub fn new(root: PathBuf) -> Self {
         std::fs::create_dir_all(root.join("layers")).ok();
         std::fs::create_dir_all(root.join("index")).ok();
-        Self { root }
+        let max_layer_bytes = std::env::var("EXO_MAX_LAYER_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_LAYER_BYTES);
+        Self { root, max_layer_bytes }
+    }
+
+    /// Set the per-layer uncompressed size cap (decompression-bomb guard).
+    pub fn with_max_layer_bytes(mut self, max: u64) -> Self {
+        self.max_layer_bytes = max;
+        self
     }
 
     /// Directory holding the extracted content of one layer.
@@ -160,8 +176,9 @@ impl LayerStore {
 
         // Raw extraction that *preserves* `.wh.` whiteout markers — the crate's
         // whiteout-aware extractor drops them, but we need them kept in the layer
-        // dir so cross-layer whiteouts can be applied at compose time.
-        extract_raw(blob_path, &tmp)
+        // dir so cross-layer whiteouts can be applied at compose time. The size
+        // cap rejects decompression bombs before they fill the disk.
+        extract_raw(blob_path, &tmp, self.max_layer_bytes)
             .with_context(|| format!("extracting layer {}", digest))?;
 
         if dest.exists() {
@@ -224,7 +241,11 @@ impl LayerStore {
         loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
                 Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Any failure is treated as transient and retried until timeout.
+                // Besides AlreadyExists (lock held), Windows can return
+                // PermissionDenied (delete-pending while the holder removes the
+                // lock) or a sharing violation (AV/indexer) — none are fatal.
+                Err(_) => {
                     // Steal a stale lock left by a crashed process.
                     if let Ok(meta) = std::fs::metadata(&lock) {
                         if meta.modified().ok()
@@ -241,7 +262,6 @@ impl LayerStore {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(e) => return Err(e).context("acquiring index lock"),
             }
         }
         let result = f(self);
@@ -522,7 +542,8 @@ fn verify_blob_digest(blob_path: &Path, digest: &str) -> Result<()> {
 
 /// Raw tar extraction (gzip-aware) that keeps every entry, including `.wh.`
 /// whiteout markers, so they survive into the content-addressed layer dir.
-fn extract_raw(layer_tar: &Path, dest: &Path) -> Result<()> {
+/// Aborts if the cumulative declared size exceeds `max_bytes` (bomb guard).
+fn extract_raw(layer_tar: &Path, dest: &Path, max_bytes: u64) -> Result<()> {
     use std::io::Read;
     let mut head = std::fs::File::open(layer_tar)?;
     let mut magic = [0u8; 2];
@@ -537,8 +558,16 @@ fn extract_raw(layer_tar: &Path, dest: &Path) -> Result<()> {
     };
     let mut archive = tar::Archive::new(reader);
     archive.set_overwrite(true);
+    let mut total: u64 = 0;
     for entry in archive.entries()? {
         let mut entry = entry?;
+        total = total.saturating_add(entry.header().size().unwrap_or(0));
+        if total > max_bytes {
+            anyhow::bail!(
+                "layer exceeds max uncompressed size ({} bytes); possible decompression bomb",
+                max_bytes
+            );
+        }
         if let Some(parent) = dest.join(entry.path()?).parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -706,6 +735,18 @@ mod tests {
         // Second extract is a no-op (dedup fast path) and must not error.
         store.extract_layer(&blob, &d).unwrap();
         assert!(store.layer_dir(&d).join("bin/sh").exists());
+    }
+
+    #[test]
+    fn extract_rejects_decompression_bomb() {
+        let tmp = tempdir().unwrap();
+        // Tiny cap: a layer with a 1 KiB file should be rejected.
+        let store = LayerStore::new(tmp.path().to_path_buf()).with_max_layer_bytes(64);
+        let (blob, d) = mklayer(tmp.path(), "big.tgz", &[("f", &[0u8; 1024])]);
+        let err = store.extract_layer(&blob, &d).unwrap_err();
+        assert!(err.to_string().contains("decompression bomb") ||
+                err.root_cause().to_string().contains("max uncompressed"));
+        assert!(!store.has_layer(&d));
     }
 
     #[test]
