@@ -196,6 +196,12 @@ enum Commands {
         all: bool,
     },
 
+    /// Push a locally-stored image to its registry
+    Push {
+        /// Image to push (e.g., ghcr.io/me/agent:latest)
+        image: String,
+    },
+
     /// Remove an image (refcount-aware: prunes only its orphaned layers)
     Rmi {
         /// Image to remove (e.g., python:3.12)
@@ -337,6 +343,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
+        }
+        Commands::Push { image } => {
+            commands::push::execute(commands::push::PushArgs { image }).await?
         }
         Commands::Rmi { image } => {
             commands::rmi::execute(commands::rmi::RmiArgs { image }).await?

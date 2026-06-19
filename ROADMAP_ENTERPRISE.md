@@ -59,8 +59,9 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
       (shared inodes = real dedup, works rootless without overlay). `crates/exo-image/src/cas.rs`
 - [x] `exo system df` — physical vs logical bytes + dedup % (drives the benchmark)
 - [x] `exo system prune` — GC layers no image references
-- [ ] `exo push` to any OCI registry (token auth, `docker login` creds)
-- [ ] `exo rmi` — unregister image + auto-prune its now-orphaned layers
+- [x] `exo push` to any OCI registry — pull,push-scoped token, HEAD-skip
+      existing blobs, monolithic blob upload, manifest PUT by tag
+- [x] `exo rmi` — unregister image + auto-prune its now-orphaned layers
 - [ ] `exo image inspect`
 - [ ] Optional: zstd layer compression + lazy/stargz pull (further space + cold-start win)
 - [ ] Follow-up: switch rootfs composition to overlay lowerdirs where the kernel

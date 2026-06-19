@@ -200,10 +200,21 @@ impl RegistryClient {
         None
     }
 
-    /// Get an authentication token for a repository.
+    /// Get a pull-scoped authentication token for a repository.
     async fn get_auth_token(&mut self, registry: &str, repository: &str) -> Result<String> {
-        // Check cache
-        let cache_key = format!("{}/{}", registry, repository);
+        self.get_auth_token_scoped(registry, repository, "pull").await
+    }
+
+    /// Get an authentication token for a repository.
+    /// `actions` is the scope action list, e.g. "pull" or "pull,push".
+    async fn get_auth_token_scoped(
+        &mut self,
+        registry: &str,
+        repository: &str,
+        actions: &str,
+    ) -> Result<String> {
+        // Check cache (scoped: a pull token won't satisfy a push).
+        let cache_key = format!("{}/{}|{}", registry, repository, actions);
         if let Some((token, expires)) = self.token_cache.get(&cache_key) {
             // Use token if it has more than 30 seconds left
             if expires.duration_since(std::time::Instant::now()).as_secs() > 30 {
@@ -217,8 +228,8 @@ impl RegistryClient {
         // For Docker Hub, use the auth service
         if registry == "docker.io" || registry == "index.docker.io" {
             let url = format!(
-                "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
-                repository
+                "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:{}",
+                repository, actions
             );
 
             let mut request = self.client.get(&url);
@@ -274,7 +285,8 @@ impl RegistryClient {
             }
             url.push_str("&scope=repository:");
             url.push_str(repository);
-            url.push_str(":pull");
+            url.push(':');
+            url.push_str(actions);
 
             let mut request = self.client.get(&url);
 
@@ -531,6 +543,137 @@ impl RegistryClient {
         }
 
         debug!("Saved blob to {:?}", dest);
+        Ok(())
+    }
+
+    /// Push a locally-stored image to its registry.
+    ///
+    /// Uploads the config and every layer blob that the registry doesn't
+    /// already have (HEAD check), then PUTs the manifest under the tag.
+    pub async fn push(&mut self, reference: &ImageReference) -> Result<()> {
+        info!("Pushing image {}", reference);
+
+        let registry = reference.registry.clone();
+        let repo = reference.repository.clone();
+        let api_url = Self::get_api_url(&registry);
+
+        // Load the manifest we saved at pull/build time.
+        let manifest_bytes = self
+            .store
+            .load_manifest(reference)
+            .with_context(|| format!("{} not found locally; nothing to push", reference))?;
+        let manifest: oci_spec::image::ImageManifest = serde_json::from_slice(&manifest_bytes)
+            .context("Failed to parse local manifest")?;
+
+        // Push needs a pull,push-scoped token.
+        let token = self
+            .get_auth_token_scoped(&registry, &repo, "pull,push")
+            .await?;
+
+        // Upload config + all layer blobs (skipping any already present).
+        let config_digest = manifest.config().digest().to_string();
+        self.upload_blob(&api_url, &repo, &config_digest, &token).await?;
+        for layer in manifest.layers() {
+            let digest = layer.digest().to_string();
+            self.upload_blob(&api_url, &repo, &digest, &token).await?;
+        }
+
+        // PUT the manifest under the tag.
+        let media_type = manifest
+            .media_type()
+            .as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "application/vnd.oci.image.manifest.v1+json".to_string());
+        let url = format!("{}/{}/manifests/{}", api_url, repo, reference.tag);
+        let resp = self
+            .client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", media_type)
+            .body(manifest_bytes)
+            .send()
+            .await
+            .context("Failed to PUT manifest")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Manifest push failed: {} - {}", status, body);
+        }
+
+        info!("Successfully pushed {}", reference);
+        Ok(())
+    }
+
+    /// Upload one blob from the local store via the monolithic two-step flow,
+    /// unless the registry already has it.
+    async fn upload_blob(
+        &self,
+        api_url: &str,
+        repo: &str,
+        digest: &str,
+        token: &str,
+    ) -> Result<()> {
+        // HEAD: skip if the registry already has this content-addressed blob.
+        let head = self
+            .client
+            .head(format!("{}/{}/blobs/{}", api_url, repo, digest))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .context("Failed to HEAD blob")?;
+        if head.status().is_success() {
+            debug!("blob {} already on registry — skip", digest);
+            return Ok(());
+        }
+
+        let data = std::fs::read(self.store.blob_path(digest))
+            .with_context(|| format!("missing local blob {}", digest))?;
+
+        // Step 1: start an upload session, get the upload URL.
+        let start = self
+            .client
+            .post(format!("{}/{}/blobs/uploads/", api_url, repo))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Length", "0")
+            .send()
+            .await
+            .context("Failed to start blob upload")?;
+        if !start.status().is_success() {
+            anyhow::bail!("Upload init failed for {}: {}", digest, start.status());
+        }
+        let location = start
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("registry returned no upload Location"))?;
+
+        // The Location may be relative to the registry host.
+        let put_base = if location.starts_with("http") {
+            location
+        } else {
+            let host = api_url.trim_end_matches("/v2");
+            format!("{}{}", host, location)
+        };
+        let sep = if put_base.contains('?') { '&' } else { '?' };
+        let put_url = format!("{}{}digest={}", put_base, sep, digest);
+
+        // Step 2: monolithic PUT of the whole blob with its digest.
+        let resp = self
+            .client
+            .put(&put_url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .context("Failed to PUT blob")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Blob push failed for {}: {} - {}", digest, status, body);
+        }
+        debug!("uploaded blob {}", digest);
         Ok(())
     }
 

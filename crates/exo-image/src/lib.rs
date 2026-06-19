@@ -277,6 +277,14 @@ impl ImageManager {
         Ok(pulled.config_digest)
     }
     
+    /// Push a locally-stored image to its registry.
+    #[cfg(feature = "registry")]
+    pub async fn push(&self, image: &str) -> Result<()> {
+        let reference = ImageReference::parse(image)?;
+        let mut client = RegistryClient::new(self.store.clone())?;
+        client.push(&reference).await
+    }
+
     /// List locally stored images.
     pub fn list_images(&self) -> Result<Vec<LocalImage>> {
         let images = self.store.list_images()?;
