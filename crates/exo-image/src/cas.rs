@@ -194,6 +194,43 @@ impl LayerStore {
         self.root.join("index").join("images.json")
     }
 
+    /// Run `f` while holding an exclusive lock on the index, so concurrent
+    /// `pull`/`build`/`rmi`/`prune` from multiple processes can't lose updates
+    /// (each does load -> mutate -> save, which races without this). The lock is
+    /// a `create_new` lockfile; a lock older than 30s is treated as stale (from a
+    /// crashed process) and stolen, so a crash can't wedge the store forever.
+    fn with_lock<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let lock = self.root.join("index").join(".lock");
+        std::fs::create_dir_all(self.root.join("index")).ok();
+        let start = std::time::Instant::now();
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Steal a stale lock left by a crashed process.
+                    if let Ok(meta) = std::fs::metadata(&lock) {
+                        if meta.modified().ok()
+                            .and_then(|m| m.elapsed().ok())
+                            .map(|d| d.as_secs() >= 30)
+                            .unwrap_or(false)
+                        {
+                            std::fs::remove_file(&lock).ok();
+                            continue;
+                        }
+                    }
+                    if start.elapsed().as_secs() >= 30 {
+                        anyhow::bail!("timed out waiting for image index lock");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e).context("acquiring index lock"),
+            }
+        }
+        let result = f(self);
+        std::fs::remove_file(&lock).ok();
+        result
+    }
+
     /// Load the image index (empty if none yet).
     pub fn load_index(&self) -> Result<ImageIndex> {
         let path = self.index_path();
@@ -221,25 +258,26 @@ impl LayerStore {
         layers: Vec<String>,
         config_digest: String,
     ) -> Result<()> {
-        let mut index = self.load_index()?;
-        index.images.insert(
-            reference.to_string(),
-            ImageRecord {
-                layers,
-                config_digest,
-            },
-        );
-        self.save_index(&index)
+        self.with_lock(|s| {
+            let mut index = s.load_index()?;
+            index.images.insert(
+                reference.to_string(),
+                ImageRecord { layers, config_digest },
+            );
+            s.save_index(&index)
+        })
     }
 
     /// Remove an image from the index. Does not delete layers (use `prune`).
     pub fn unregister_image(&self, reference: &str) -> Result<bool> {
-        let mut index = self.load_index()?;
-        let removed = index.images.remove(reference).is_some();
-        if removed {
-            self.save_index(&index)?;
-        }
-        Ok(removed)
+        self.with_lock(|s| {
+            let mut index = s.load_index()?;
+            let removed = index.images.remove(reference).is_some();
+            if removed {
+                s.save_index(&index)?;
+            }
+            Ok(removed)
+        })
     }
 
     /// How many registered images reference a given layer.
@@ -253,8 +291,13 @@ impl LayerStore {
     }
 
     /// Delete extracted layers no image references anymore.
-    /// Returns (layers_removed, bytes_reclaimed).
+    /// Returns (layers_removed, bytes_reclaimed). Holds the index lock so it
+    /// can't race a concurrent register into deleting a just-referenced layer.
     pub fn prune(&self) -> Result<(usize, u64)> {
+        self.with_lock(|s| s.prune_locked())
+    }
+
+    fn prune_locked(&self) -> Result<(usize, u64)> {
         let index = self.load_index()?;
         let mut referenced = std::collections::HashSet::new();
         for rec in index.images.values() {
@@ -643,6 +686,26 @@ mod tests {
         // base is shared (refcount 2), a is exclusive (refcount 1).
         assert!(info.exclusive_size < info.total_size);
         assert!(store.inspect("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_register_does_not_lose_updates() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+        // Many threads register distinct images at once; without the index lock
+        // the load->mutate->save race would drop most of them.
+        let n = 16;
+        std::thread::scope(|scope| {
+            for i in 0..n {
+                let s = store.clone();
+                scope.spawn(move || {
+                    s.register_image(&format!("img{i}"), vec![format!("sha256:l{i}")], "c".into())
+                        .unwrap();
+                });
+            }
+        });
+        let index = store.load_index().unwrap();
+        assert_eq!(index.images.len(), n, "lost an update under concurrency");
     }
 
     #[test]

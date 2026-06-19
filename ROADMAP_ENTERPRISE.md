@@ -127,7 +127,8 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 - [ ] Enforce image signature verification (cosign) as a gate, not just emit (ties to E5)
 
 ### Concurrency & state integrity
-- [ ] File-locked, crash-safe index mutations (concurrent `pull`/`rmi`/`prune` races)
+- [x] File-locked, crash-safe index mutations (concurrent `pull`/`rmi`/`prune`
+      no longer lose updates; stale-lock steal after 30s). `cas.rs`, concurrency test
 - [ ] `exo system check` — detect & repair store inconsistencies (orphan blobs, dangling refs)
 - [ ] Fsync + atomic-rename audit across all on-disk writes
 - [ ] Quotas: max store size, per-image disk cap, eviction policy
