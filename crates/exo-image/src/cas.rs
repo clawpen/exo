@@ -108,32 +108,58 @@ impl StoreReport {
 /// Default cap on a single layer's uncompressed size (decompression-bomb guard).
 const DEFAULT_MAX_LAYER_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 
+/// Default cap on total extracted-layer store size.
+const DEFAULT_MAX_STORE_BYTES: u64 = 100 * 1024 * 1024 * 1024; // 100 GiB
+
 /// Content-addressed layer store.
 #[derive(Clone)]
 pub struct LayerStore {
     root: PathBuf,
     /// Reject a layer whose declared uncompressed size exceeds this.
     max_layer_bytes: u64,
+    /// Refuse to extract once the store has grown past this.
+    max_store_bytes: u64,
 }
 
 impl LayerStore {
     /// Open (creating if needed) a layer store rooted under `root`.
     /// Lives alongside the existing `blobs/` and `rootfs/` dirs.
-    /// The per-layer size cap can be overridden via `EXO_MAX_LAYER_BYTES`.
+    /// Size caps can be overridden via `EXO_MAX_LAYER_BYTES` / `EXO_MAX_STORE_BYTES`.
     pub fn new(root: PathBuf) -> Self {
         std::fs::create_dir_all(root.join("layers")).ok();
         std::fs::create_dir_all(root.join("index")).ok();
-        let max_layer_bytes = std::env::var("EXO_MAX_LAYER_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_LAYER_BYTES);
-        Self { root, max_layer_bytes }
+        let env_u64 = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        Self {
+            max_layer_bytes: env_u64("EXO_MAX_LAYER_BYTES", DEFAULT_MAX_LAYER_BYTES),
+            max_store_bytes: env_u64("EXO_MAX_STORE_BYTES", DEFAULT_MAX_STORE_BYTES),
+            root,
+        }
     }
 
     /// Set the per-layer uncompressed size cap (decompression-bomb guard).
     pub fn with_max_layer_bytes(mut self, max: u64) -> Self {
         self.max_layer_bytes = max;
         self
+    }
+
+    /// Set the total store-size cap.
+    pub fn with_max_store_bytes(mut self, max: u64) -> Self {
+        self.max_store_bytes = max;
+        self
+    }
+
+    /// Total bytes of extracted layers currently on disk.
+    pub fn store_physical_bytes(&self) -> u64 {
+        let mut total = 0;
+        if let Ok(entries) = std::fs::read_dir(self.root.join("layers")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with(".tmp-") && entry.path().is_dir() {
+                    total += dir_size(&entry.path());
+                }
+            }
+        }
+        total
     }
 
     /// Directory holding the extracted content of one layer.
@@ -157,6 +183,16 @@ impl LayerStore {
         if self.has_layer(digest) {
             trace!("layer {} already extracted — dedup hit", digest);
             return Ok(());
+        }
+        // Hard store-size quota. We don't auto-evict here: an in-flight pull's
+        // own layers aren't registered yet, so pruning mid-pull could delete
+        // them. Bail with guidance instead.
+        if self.store_physical_bytes() >= self.max_store_bytes {
+            anyhow::bail!(
+                "image store is at its size limit ({} bytes); run `exo system prune` \
+                 or raise EXO_MAX_STORE_BYTES",
+                self.max_store_bytes
+            );
         }
         verify_blob_digest(blob_path, digest)
             .with_context(|| format!("integrity check failed for layer {}", digest))?;
@@ -779,6 +815,25 @@ mod tests {
         assert!(err.to_string().contains("decompression bomb") ||
                 err.root_cause().to_string().contains("max uncompressed"));
         assert!(!store.has_layer(&d));
+    }
+
+    #[test]
+    fn extract_enforces_store_quota() {
+        let tmp = tempdir().unwrap();
+        // First layer lands fine under a generous cap.
+        let store = LayerStore::new(tmp.path().to_path_buf());
+        let (a, da) = mklayer(tmp.path(), "a.tgz", &[("f", &[0u8; 4096])]);
+        store.extract_layer(&a, &da).unwrap();
+        assert!(store.store_physical_bytes() > 0);
+
+        // A second store over the same root with a 1-byte cap refuses new layers.
+        let capped = LayerStore::new(tmp.path().to_path_buf()).with_max_store_bytes(1);
+        let (b, db) = mklayer(tmp.path(), "b.tgz", &[("g", &[0u8; 4096])]);
+        let err = capped.extract_layer(&b, &db).unwrap_err();
+        assert!(err.to_string().contains("size limit"));
+        assert!(!capped.has_layer(&db));
+        // Already-present layers still succeed (dedup fast-path skips the quota).
+        capped.extract_layer(&a, &da).unwrap();
     }
 
     #[test]

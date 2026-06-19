@@ -136,7 +136,9 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 - [x] `exo system check [--repair]` — detect dangling image→layer refs + orphan
       layers, repair by unregistering dangling images and pruning. `cas.rs`, 1 test
 - [ ] Fsync + atomic-rename audit across all on-disk writes
-- [ ] Quotas: max store size, per-image disk cap, eviction policy
+- [x] Store-size quota (`EXO_MAX_STORE_BYTES`, default 100 GiB) — extract bails
+      with guidance rather than auto-evicting mid-pull. `cas.rs`, 1 test
+- [ ] LRU/last-used eviction policy (auto-reclaim instead of hard fail)
 
 ### Runtime isolation hardening
 - [ ] Seccomp/AppArmor/SELinux profile review + default-deny baseline
