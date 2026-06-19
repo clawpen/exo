@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 /// Sanitize a digest (`sha256:abc`) into a filesystem-safe component.
 fn sanitize(digest: &str) -> String {
@@ -521,6 +521,24 @@ impl LayerStore {
     }
 }
 
+/// True if any *intermediate* component of `rel` already exists under `dest` as
+/// a symlink — meaning writing `dest/rel` would follow it outside the rootfs.
+/// The final component itself may legitimately be a symlink (a leaf), so it is
+/// not checked here.
+fn parent_has_symlink(dest: &Path, rel: &Path) -> bool {
+    let comps: Vec<_> = rel.components().collect();
+    let mut cur = dest.to_path_buf();
+    for comp in comps.iter().take(comps.len().saturating_sub(1)) {
+        cur.push(comp);
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+            if meta.file_type().is_symlink() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Verify a blob file's sha256 matches its `sha256:...` digest. Digests without
 /// a recognized `sha256:` prefix are accepted (e.g. synthetic test digests) so
 /// the store stays usable for content that isn't registry-sourced.
@@ -593,6 +611,16 @@ fn link_layer_onto(base: &Path, dir: &Path, dest: &Path) -> Result<()> {
         let rel = path.strip_prefix(base).unwrap();
         let target = dest.join(rel);
 
+        // Symlink-escape guard: if an existing parent component under dest is a
+        // symlink, writing/removing through it would follow the link outside the
+        // rootfs (a lower layer planting `data -> /host` then a higher layer
+        // touching `data/x`). Refuse such entries — including whiteouts, so a
+        // crafted layer can't delete host files either.
+        if parent_has_symlink(dest, rel) {
+            warn!("skipping layer entry {:?}: parent traverses a symlink (escape guard)", rel);
+            continue;
+        }
+
         // OCI whiteouts: `.wh..wh..opq` clears the dir; `.wh.foo` deletes foo.
         if name == ".wh..wh..opq" {
             if let Some(parent) = target.parent() {
@@ -615,6 +643,14 @@ fn link_layer_onto(base: &Path, dir: &Path, dest: &Path) -> Result<()> {
 
         let ft = entry.file_type()?;
         if ft.is_dir() {
+            // If a lower layer left a symlink at this path, a higher real dir
+            // overrides it (OCI semantics) — and removing it means we don't
+            // create/write through the link.
+            if let Ok(m) = std::fs::symlink_metadata(&target) {
+                if m.file_type().is_symlink() {
+                    std::fs::remove_file(&target).ok();
+                }
+            }
             std::fs::create_dir_all(&target)?;
             link_layer_onto(base, &path, dest)?;
         } else {
@@ -884,6 +920,33 @@ mod tests {
         let rootfs = tmp.path().join("rootfs");
         store.compose_rootfs(&rootfs, &[d1]).unwrap();
         assert_eq!(std::fs::read(rootfs.join("app/main.py")).unwrap(), b"print('hi')");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compose_blocks_symlink_escape() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+
+        // A host dir the attacker wants to write into.
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Hand-build two layer dirs in the CAS (bypassing tar extraction):
+        // layer A plants `evil -> /abs/outside`; layer B writes `evil/pwned`.
+        let mark = |d: &str| std::fs::write(store.layer_dir(d).join(".exo-layer-ok"), b"1").unwrap();
+        std::fs::create_dir_all(store.layer_dir("a")).unwrap();
+        std::os::unix::fs::symlink(&outside, store.layer_dir("a").join("evil")).unwrap();
+        mark("a");
+        std::fs::create_dir_all(store.layer_dir("b").join("evil")).unwrap();
+        std::fs::write(store.layer_dir("b").join("evil/pwned"), b"x").unwrap();
+        mark("b");
+
+        let rootfs = tmp.path().join("rootfs");
+        store.compose_rootfs(&rootfs, &["a".into(), "b".into()]).unwrap();
+
+        // The escape write must NOT have landed in the host dir.
+        assert!(!outside.join("pwned").exists(), "symlink escape was not blocked");
     }
 
     #[test]

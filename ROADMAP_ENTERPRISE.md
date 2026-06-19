@@ -121,8 +121,10 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 ### Supply-chain & content integrity
 - [x] Layer blob digest verification before extraction into the CAS (`cas.rs`)
 - [x] Tar extraction confined to target dir (no path-traversal escape via `unpack_in`)
-- [ ] Reject symlink/hardlink entries that escape the rootfs at compose time
-- [ ] Manifest/config/layer size + count limits (decompression-bomb & OOM guards)
+- [x] Reject symlink-escape at compose time (parent-traverses-symlink guard +
+      higher-layer dir overrides a lower-layer symlink). `cas.rs`, unix test
+- [x] Per-layer uncompressed size cap (decompression-bomb guard, `EXO_MAX_LAYER_BYTES`)
+- [ ] Manifest/config count limits + total-image-size cap (OOM guards)
 - [ ] Verify config digest + manifest↔config consistency on pull
 - [ ] Enforce image signature verification (cosign) as a gate, not just emit (ties to E5)
 
