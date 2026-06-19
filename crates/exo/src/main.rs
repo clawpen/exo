@@ -196,6 +196,13 @@ enum Commands {
         all: bool,
     },
 
+    /// Build an image from an agent manifest (exo.toml)
+    Build {
+        /// Path to exo.toml or a directory containing it (default: ./exo.toml)
+        #[arg(short, long)]
+        file: Option<String>,
+    },
+
     /// Inspect a local image (layers, sizes, shared vs exclusive disk)
     Image {
         #[command(subcommand)]
@@ -361,6 +368,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
+        }
+        Commands::Build { file } => {
+            commands::build::execute(commands::build::BuildArgs { file }).await?
         }
         Commands::Image { cmd } => match cmd {
             ImageCmd::Inspect { image, json } => {

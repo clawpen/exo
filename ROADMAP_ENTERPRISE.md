@@ -67,11 +67,15 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 - [ ] Follow-up: switch rootfs composition to overlay lowerdirs where the kernel
       allows it (zero-copy vs hardlink), keeping hardlink as the rootless fallback
 
-## E2 — Build
-- [ ] `exo build -t name .` — Dockerfile subset (FROM/RUN/COPY/ENV/CMD/WORKDIR)
-- [ ] Layer commit + build cache (reuse E1 CAS)
-- [ ] **Agent manifest** (`exo.toml`) as native alternative: declare tools, model
-      endpoints, resource budget, egress policy → our differentiation vs Dockerfile
+## E2 — Build  [IN PROGRESS]
+- [x] **Agent manifest** (`exo.toml`) parser + validation — declares base image,
+      build steps, tools, resource budget, default-deny egress policy
+      (`crates/exo-image/src/manifest.rs`, 4 tests; `examples/exo.toml`)
+- [x] `exo build [-f exo.toml]` — resolves/validates manifest, pulls base, prints plan
+- [ ] Execute RUN steps via the runtime's container-exec path
+- [ ] Commit COPY/ENV/CMD + RUN results into a new layer (reuse E1 CAS) and register image
+- [ ] Build cache keyed on step inputs
+- [ ] Dockerfile subset (FROM/RUN/COPY/ENV/CMD/WORKDIR) as an alternate input
 - [ ] `.exoignore`
 
 ## E3 — Local networking (single-host primitives only)

@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 sha256 = "1.5"
 
 # OCI image spec

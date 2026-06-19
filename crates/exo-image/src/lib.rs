@@ -13,11 +13,15 @@ mod reference;
 mod store;
 mod extractor;
 mod cas;
+mod manifest;
 
 pub use reference::ImageReference;
 pub use store::ImageStore;
 pub use extractor::LayerExtractor;
 pub use cas::{DiskUsage, ImageIndex, ImageInfo, ImageRecord, LayerInfo, LayerStore};
+pub use manifest::{
+    AgentManifest, AgentSection, BuildSection, EgressSection, ResourcesSection, ToolsSection,
+};
 
 #[cfg(feature = "registry")]
 mod registry;

@@ -16,3 +16,4 @@ pub mod system;
 pub mod rmi;
 pub mod push;
 pub mod image;
+pub mod build;

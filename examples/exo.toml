@@ -1,0 +1,26 @@
+# Agent manifest — Exo's agent-native alternative to a Dockerfile.
+# Build with: exo build -f examples/exo.toml
+
+[agent]
+name = "researcher"
+from = "python:3.12-slim"   # base image
+# tag = "v1"                # optional; defaults to "latest"
+
+[build]
+workdir = "/app"
+copy = [["./src", "/app"]]            # host path -> image path
+run  = ["pip install -r requirements.txt"]
+env  = { LOG_LEVEL = "info" }
+cmd  = ["python", "main.py"]          # default argv the agent runs
+
+[tools]
+allow = ["bash", "web"]               # tool-bus capabilities the agent may use
+
+[resources]
+memory = "512M"
+cpu = "1"
+
+[egress]
+# Default-deny: with no entries the agent gets no network egress.
+# List only the hosts it's allowed to reach.
+allow = ["api.anthropic.com"]
