@@ -72,8 +72,12 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
       build steps, tools, resource budget, default-deny egress policy
       (`crates/exo-image/src/manifest.rs`, 4 tests; `examples/exo.toml`)
 - [x] `exo build [-f exo.toml]` — resolves/validates manifest, pulls base, prints plan
+- [x] **Layer-commit primitive** — tar a dir into a content-addressed CAS layer
+      (`LayerStore::commit_layer`, idempotent, 1 test)
+- [x] Execute **COPY** steps → commit a layer → register + compose the built image
+      (built images dedup their base layer automatically; verified end-to-end)
 - [ ] Execute RUN steps via the runtime's container-exec path
-- [ ] Commit COPY/ENV/CMD + RUN results into a new layer (reuse E1 CAS) and register image
+- [ ] Generate OCI config (ENV/CMD/workdir) + manifest so built images can `push`
 - [ ] Build cache keyed on step inputs
 - [ ] Dockerfile subset (FROM/RUN/COPY/ENV/CMD/WORKDIR) as an alternate input
 - [ ] `.exoignore`

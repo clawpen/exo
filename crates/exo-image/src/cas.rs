@@ -156,6 +156,38 @@ impl LayerStore {
         Ok(())
     }
 
+    /// Commit a directory tree as a new layer (E2 build primitive).
+    ///
+    /// Tars + gzips `content_dir`, content-addresses it by the compressed blob's
+    /// sha256, writes the blob into `blobs/`, and extracts it into the CAS so it's
+    /// immediately usable in a composed rootfs. Returns the new layer's digest.
+    /// Idempotent: identical content yields the same digest and is stored once.
+    pub fn commit_layer(&self, content_dir: &Path) -> Result<String> {
+        use sha2::{Digest as _, Sha256};
+
+        // Build the gzipped tar in memory (build layers are small: COPY deltas).
+        let mut blob = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut blob, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            tar.follow_symlinks(false);
+            tar.append_dir_all(".", content_dir)
+                .with_context(|| format!("taring {:?}", content_dir))?;
+            tar.into_inner()?.finish()?;
+        }
+
+        let digest = format!("sha256:{:x}", Sha256::digest(&blob));
+
+        // Persist the blob next to pulled layers, then extract into the CAS.
+        let blob_path = self.root.join("blobs").join(sanitize(&digest));
+        std::fs::create_dir_all(self.root.join("blobs")).ok();
+        std::fs::write(&blob_path, &blob)
+            .with_context(|| format!("writing built layer blob {:?}", blob_path))?;
+        self.extract_layer(&blob_path, &digest)?;
+        debug!("committed built layer {}", digest);
+        Ok(digest)
+    }
+
     // --- index ------------------------------------------------------------
 
     fn index_path(&self) -> PathBuf {
@@ -627,6 +659,28 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(store.has_layer(&db));
         assert!(!store.has_layer(&dorph));
+    }
+
+    #[test]
+    fn commit_layer_is_content_addressed_and_usable() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+
+        // Stage a "COPY" delta: files at their destination paths.
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir_all(stage.join("app")).unwrap();
+        std::fs::write(stage.join("app/main.py"), b"print('hi')").unwrap();
+
+        let d1 = store.commit_layer(&stage).unwrap();
+        assert!(store.has_layer(&d1));
+        // Same content -> same digest, stored once (idempotent).
+        let d2 = store.commit_layer(&stage).unwrap();
+        assert_eq!(d1, d2);
+
+        // The committed layer composes into a rootfs with the staged file.
+        let rootfs = tmp.path().join("rootfs");
+        store.compose_rootfs(&rootfs, &[d1]).unwrap();
+        assert_eq!(std::fs::read(rootfs.join("app/main.py")).unwrap(), b"print('hi')");
     }
 
     #[test]
