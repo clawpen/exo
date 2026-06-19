@@ -76,8 +76,10 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
       (`LayerStore::commit_layer`, idempotent, 1 test)
 - [x] Execute **COPY** steps → commit a layer → register + compose the built image
       (built images dedup their base layer automatically; verified end-to-end)
-- [ ] Execute RUN steps via the runtime's container-exec path
-- [ ] Generate OCI config (ENV/CMD/workdir) + manifest so built images can `push`
+- [x] Generate OCI config (ENV/CMD/workdir + uncompressed diff_ids) + manifest so
+      built images are `push`able (`crates/exo-image/src/oci_build.rs`, 1 test;
+      verified end-to-end: built image yields a valid OCI manifest + config)
+- [ ] Execute RUN steps via the runtime's container-exec path *(needs live machine)*
 - [ ] Build cache keyed on step inputs
 - [ ] Dockerfile subset (FROM/RUN/COPY/ENV/CMD/WORKDIR) as an alternate input
 - [ ] `.exoignore`

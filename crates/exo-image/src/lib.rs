@@ -14,6 +14,7 @@ mod store;
 mod extractor;
 mod cas;
 mod manifest;
+mod oci_build;
 
 pub use reference::ImageReference;
 pub use store::ImageStore;
@@ -22,6 +23,7 @@ pub use cas::{DiskUsage, ImageIndex, ImageInfo, ImageRecord, LayerInfo, LayerSto
 pub use manifest::{
     AgentManifest, AgentSection, BuildSection, EgressSection, ResourcesSection, ToolsSection,
 };
+pub use oci_build::build_and_store;
 
 #[cfg(feature = "registry")]
 mod registry;

@@ -81,7 +81,19 @@ pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
     // pulls do, so `exo image inspect <name>` resolves to the same index key.
     let built = ImageReference::parse(&manifest.image_reference())?;
     let built_ref = built.to_string();
-    cas.register_image(&built_ref, layers.clone(), String::new())?;
+
+    // Generate an OCI config + manifest (ENV/CMD/workdir + layers) so the built
+    // image is pushable to any registry, then register it in the layer index.
+    let store = ImageStore::default();
+    let config_digest = exo_image::build_and_store(
+        &store,
+        &built,
+        &layers,
+        &manifest.build.env,
+        &manifest.build.cmd,
+        manifest.build.workdir.as_deref(),
+    )?;
+    cas.register_image(&built_ref, layers.clone(), config_digest)?;
     let rootfs = PathBuf::from(DEFAULT_IMAGE_ROOT)
         .join("rootfs")
         .join(built_ref.replace([':', '/'], "_"));
