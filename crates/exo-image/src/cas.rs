@@ -59,11 +59,9 @@ impl DiskUsage {
 
     /// Dedup ratio as a percentage of logical size (0 if nothing stored).
     pub fn savings_pct(&self) -> u32 {
-        if self.logical_bytes == 0 {
-            0
-        } else {
-            ((self.reclaimable_via_dedup() * 100) / self.logical_bytes) as u32
-        }
+        (self.reclaimable_via_dedup() * 100)
+            .checked_div(self.logical_bytes)
+            .unwrap_or(0) as u32
     }
 }
 
@@ -661,12 +659,10 @@ fn link_layer_onto(base: &Path, dir: &Path, dest: &Path) -> Result<()> {
             if target.exists() {
                 std::fs::remove_file(&target).ok();
             }
-            // Hardlink = shared inode = the dedup win. Fall back to copy when
-            // the destination is on a different filesystem (EXDEV) or for
-            // symlinks, which can't be hardlinked portably.
-            if ft.is_symlink() {
-                copy_any(&path, &target)?;
-            } else if std::fs::hard_link(&path, &target).is_err() {
+            // Hardlink = shared inode = the dedup win. Fall back to copy for
+            // symlinks (not portably hardlinkable) or when the link fails
+            // (e.g. EXDEV across filesystems).
+            if ft.is_symlink() || std::fs::hard_link(&path, &target).is_err() {
                 copy_any(&path, &target)?;
             }
         }

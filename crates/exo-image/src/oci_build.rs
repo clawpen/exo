@@ -174,7 +174,7 @@ mod tests {
         let cfg_digest = build_and_store(
             &store,
             &reference,
-            &[digest.clone()],
+            std::slice::from_ref(&digest),
             &env,
             &["python".to_string(), "main.py".to_string()],
             Some("/app"),

@@ -160,12 +160,11 @@ impl AgentManifest {
                 None => (line.to_uppercase(), String::new()),
             };
             match instr.as_str() {
-                "FROM" => {
+                "FROM"
                     // Ignore "AS <stage>" aliases; first FROM wins.
-                    if m.agent.from.is_empty() {
+                    if m.agent.from.is_empty() => {
                         m.agent.from = rest.split_whitespace().next().unwrap_or("").to_string();
                     }
-                }
                 "RUN" => m.build.run.push(rest),
                 "WORKDIR" => m.build.workdir = Some(rest),
                 "ENV" => {

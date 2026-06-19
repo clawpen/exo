@@ -73,11 +73,25 @@ pub struct DockerConfig {
 /// Token response from Docker auth server.
 #[derive(Debug, Clone, Deserialize)]
 struct TokenResponse {
+    #[serde(default)]
     token: String,
+    /// Some registries (e.g. GHCR) return the bearer under `access_token`
+    /// instead of `token`; use it as a fallback.
     #[serde(default)]
     access_token: Option<String>,
     #[serde(default)]
     expires_in: Option<i64>,
+}
+
+impl TokenResponse {
+    /// The usable bearer token: `token`, falling back to `access_token`.
+    fn bearer(self) -> String {
+        if !self.token.is_empty() {
+            self.token
+        } else {
+            self.access_token.unwrap_or_default()
+        }
+    }
 }
 
 /// OCI Registry client.
@@ -255,8 +269,8 @@ impl RegistryClient {
                 .await
                 .context("Failed to parse token response")?;
 
-            let token = token_resp.token;
             let expires_in = token_resp.expires_in.unwrap_or(300);
+            let token = token_resp.bearer();
 
             // Cache the token
             let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(expires_in as u64);
@@ -317,7 +331,7 @@ impl RegistryClient {
                     .await
                     .context("Failed to parse token response")?;
 
-                return Ok(token_resp.token);
+                return Ok(token_resp.bearer());
             }
 
             let token_resp: TokenResponse = resp
@@ -325,7 +339,7 @@ impl RegistryClient {
                 .await
                 .context("Failed to parse token response")?;
 
-            return Ok(token_resp.token);
+            return Ok(token_resp.bearer());
         }
 
         // No auth required
@@ -364,8 +378,7 @@ impl RegistryClient {
         let token = self.get_auth_token(registry, repo).await?;
 
         // Get manifest
-        let reference_str = reference.digest.as_ref()
-            .map(|d| d.clone())
+        let reference_str = reference.digest.clone()
             .unwrap_or_else(|| reference.tag.clone());
 
         let manifest_bytes = self.get_manifest(&api_url, repo, &reference_str, &token).await?;
@@ -404,7 +417,7 @@ impl RegistryClient {
                 info!("Selected manifest: {}", manifest_digest);
                 
                 // Fetch the actual manifest
-                let manifest_bytes = self.get_manifest(&api_url, repo, &manifest_digest.to_string(), &token).await?;
+                let manifest_bytes = self.get_manifest(&api_url, repo, manifest_digest.as_ref(), &token).await?;
                 serde_json::from_slice(&manifest_bytes)
                     .context("Failed to parse image manifest")?
             } else {
@@ -449,7 +462,7 @@ impl RegistryClient {
 
         Ok(PulledImage {
             reference: reference.clone(),
-            manifest: manifest,
+            manifest,
             config_digest,
             layer_digests,
         })
