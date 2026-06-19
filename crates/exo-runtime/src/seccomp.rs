@@ -23,7 +23,6 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
 
 #[cfg(target_os = "linux")]
 use {

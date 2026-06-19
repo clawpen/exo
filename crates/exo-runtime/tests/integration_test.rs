@@ -16,19 +16,16 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::thread;
 use std::time::Duration;
-use anyhow::Result;
 
 #[cfg(target_os = "linux")]
 use exo_runtime::{
-    Container, ContainerConfig, ContainerStatus, ResourceConfig,
-    NetworkConfig, UidMap, GidMap, Capability,
-    CgroupManager, drop_capabilities, apply_seccomp, default_profile, SeccompAction,
+    CgroupManager, default_profile, SeccompAction,
 };
 
 use exo_runtime::{
     storage::OverlayfsDriver,
     image::ImageManager,
-    channel::{ToolRequest, ToolResponse, AgentMessage, MessageType},
+    channel::{ToolRequest, ToolResponse},
 };
 
 // Test configuration
@@ -75,10 +72,10 @@ fn test_minimal_rootfs_creation() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cgroup_manager_creation() {
-    let env = common::TestEnv::new().expect("Failed to create test env");
+    let _env = common::TestEnv::new().expect("Failed to create test env");
     let test_id = format!("test_cgroup_{}", std::process::id());
 
-    let manager = CgroupManager::new(&test_id)
+    let _manager = CgroupManager::new(&test_id)
         .expect("Failed to create cgroup manager");
 
     // Verify cgroup directory exists
@@ -92,7 +89,7 @@ fn test_cgroup_manager_creation() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cgroup_memory_limit() {
-    let env = common::TestEnv::new().expect("Failed to create test env");
+    let _env = common::TestEnv::new().expect("Failed to create test env");
     let test_id = format!("test_mem_{}", std::process::id());
 
     let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
@@ -115,7 +112,7 @@ fn test_cgroup_memory_limit() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cgroup_cpu_limit() {
-    let env = common::TestEnv::new().expect("Failed to create test env");
+    let _env = common::TestEnv::new().expect("Failed to create test env");
     let test_id = format!("test_cpu_{}", std::process::id());
 
     let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
@@ -143,7 +140,7 @@ fn test_cgroup_cpu_limit() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cgroup_pids_limit() {
-    let env = common::TestEnv::new().expect("Failed to create test env");
+    let _env = common::TestEnv::new().expect("Failed to create test env");
     let test_id = format!("test_pids_{}", std::process::id());
 
     let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
@@ -224,7 +221,7 @@ fn test_seccomp_profile_deny_mode() {
 
 #[test]
 fn test_overlay_driver_creation() {
-    let driver = OverlayfsDriver::new()
+    let _driver = OverlayfsDriver::new()
         .expect("Failed to create overlay driver");
 
     // Just verify it can be created
@@ -284,7 +281,7 @@ fn test_container_overlay_creation() {
 
 #[test]
 fn test_image_manager_creation() {
-    let manager = ImageManager::new()
+    let _manager = ImageManager::new()
         .expect("Failed to create image manager");
 
     // Just verify it can be created
@@ -293,7 +290,7 @@ fn test_image_manager_creation() {
 
 #[test]
 fn test_parse_image_reference() {
-    use exo_runtime::image::DEFAULT_LIBRARY;
+    
 
     let manager = ImageManager::new().unwrap();
 
@@ -494,7 +491,7 @@ fn test_process_isolation() {
 
 #[test]
 fn test_invalid_cgroup_path() {
-    let env = common::TestEnv::new().expect("Failed to create test env");
+    let _env = common::TestEnv::new().expect("Failed to create test env");
 
     // Try to create cgroup in invalid location
     let test_id = "/invalid/path/cgroup";

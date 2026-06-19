@@ -6,7 +6,6 @@
 
 use anyhow::{Context, Result};
 use std::process::{Child, Command, Stdio};
-use std::fs;
 
 /// Port forwarder using socat or similar tools.
 pub struct PortForwarder {

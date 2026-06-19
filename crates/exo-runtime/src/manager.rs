@@ -316,7 +316,7 @@ impl ContainerManager {
         let mut removed = Vec::new();
         let cutoff = Utc::now() - chrono::Duration::hours(max_age_hours as i64);
         
-        for mut container in containers {
+        for container in containers {
             if !container.is_running() {
                 if let Some(stopped_at) = container.stopped_at {
                     if stopped_at < cutoff {
@@ -395,7 +395,7 @@ mod tests {
         let (manager, _temp) = test_manager();
         
         let config = test_config();
-        let mut metadata = ContainerMetadata::new("test-container".to_string(), config);
+        let metadata = ContainerMetadata::new("test-container".to_string(), config);
         
         assert!(manager.save(&metadata).is_ok());
         assert!(manager.exists("test-container"));

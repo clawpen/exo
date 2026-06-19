@@ -4,11 +4,11 @@
 //! and parsing OCI/Docker image manifests.
 
 use crate::storage::OverlayfsDriver;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 /// Docker registry default host.

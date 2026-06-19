@@ -191,7 +191,7 @@ pub fn is_cgroup_v2_available() -> bool {
 #[cfg(target_os = "linux")]
 pub fn is_userns_available() -> bool {
     // Try to create a simple user namespace
-    use nix::sched::CloneFlags;
+    
     use nix::unistd::getuid;
 
     if getuid().is_root() {
@@ -210,7 +210,7 @@ pub fn is_userns_available() -> bool {
 
 /// Assert memory limit is enforced
 #[cfg(target_os = "linux")]
-pub fn assert_memory_limit(pid: u32, expected_bytes: u64) -> Result<()> {
+pub fn assert_memory_limit(_pid: u32, expected_bytes: u64) -> Result<()> {
     thread::sleep(Duration::from_millis(500)); // Give cgroup time to apply
 
     let cgroup_memory_max = format!(
@@ -229,7 +229,7 @@ pub fn assert_memory_limit(pid: u32, expected_bytes: u64) -> Result<()> {
 
 /// Assert CPU limit is configured
 #[cfg(target_os = "linux")]
-pub fn assert_cpu_limit(pid: u32, expected_quota: i64, expected_period: u64) -> Result<()> {
+pub fn assert_cpu_limit(_pid: u32, expected_quota: i64, expected_period: u64) -> Result<()> {
     thread::sleep(Duration::from_millis(500));
 
     let cgroup_path = format!("/sys/fs/cgroup/openclaw_test_{}", std::process::id());

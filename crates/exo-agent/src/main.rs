@@ -5,8 +5,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
 
 mod config;
 mod llm;

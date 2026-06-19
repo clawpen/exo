@@ -392,7 +392,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
     }
 
     // Ensure rootfs is ready (this downloads/extracts if needed)
-    let rootfs = match image_manager.ensure_rootfs(&image_ref).await {
+    let _rootfs = match image_manager.ensure_rootfs(&image_ref).await {
         Ok(path) => {
             tracing::info!("Image rootfs ready at: {:?}", path);
             // Create a symlink so the runtime can find it (Linux only)

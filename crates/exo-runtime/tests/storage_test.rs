@@ -9,13 +9,11 @@
 mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
 
 use exo_runtime::{
-    storage::{OverlayfsDriver, ContainerOverlay},
-    image::{ImageManager, ParsedImageReference, TagOrDigest},
+    storage::OverlayfsDriver,
+    image::{ImageManager, TagOrDigest},
 };
 
 ///////////////////////////////////////////////////////////////////////////////

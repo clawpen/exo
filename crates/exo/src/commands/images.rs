@@ -6,7 +6,7 @@ pub struct ImagesArgs {
     pub all: bool,
 }
 
-pub async fn execute(args: ImagesArgs) -> anyhow::Result<()> {
+pub async fn execute(_args: ImagesArgs) -> anyhow::Result<()> {
     let image_manager = ImageManager::new()?;
 
     let images = image_manager.list_images()?;

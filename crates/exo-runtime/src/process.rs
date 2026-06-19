@@ -6,23 +6,21 @@
 
 use crate::cgroup::{self, CgroupManager};
 use crate::config::ContainerConfig;
-use crate::rootfs::{self, pivot_rootfs, prepare_rootfs, setup_mounts};
-use crate::seccomp::{self, apply_seccomp, default_profile};
+use crate::rootfs::{self, prepare_rootfs, setup_mounts};
+use crate::seccomp::{apply_seccomp, default_profile};
 use crate::security::{self, drop_capabilities, get_default_caps};
-use crate::userns::{self, setup_user_namespace, GidMap, UidMap};
-use crate::namespace::{Namespace, NamespaceFlags, unshare_namespaces};
+use crate::userns::{self, GidMap, UidMap};
 use crate::binfmt::{self, Architecture};
-use crate::agent::{self, AgentConfigExt, get_agent_profile, AgentProfile};
+use crate::agent::{AgentConfigExt, get_agent_profile};
 use anyhow::{Context, Result};
 
 #[cfg(target_os = "linux")]
 use {
     nix::sys::wait::{waitpid, WaitStatus},
-    nix::sys::signal::{self, Signal},
-    nix::unistd::{self, Pid, Uid, Gid},
-    nix::sched::{clone, unshare, CloneFlags},
+    nix::sys::signal::Signal,
+    nix::unistd::{self, Pid},
+    nix::sched::{unshare, CloneFlags},
     nix::mount::{mount, MsFlags},
-    std::ffi::CString,
     std::os::unix::io::{AsRawFd, RawFd, OwnedFd},
     std::fs::File,
 };
@@ -384,7 +382,7 @@ pub fn spawn_container_fork(
     rootfs_path: &std::path::Path,
     options: &SpawnOptions,
 ) -> Result<(Pid, RawFd)> {
-    use std::io::{Read, Write};
+    use std::io::Read;
     
     // Check if we need PID namespace (requires double-fork)
     let use_pid_namespace = config.namespaces.pid;
@@ -470,7 +468,7 @@ pub fn spawn_container_fork(
                 parent_to_child_read,
                 use_pid_namespace,
             ) {
-                for cause in e.chain() {
+                for _cause in e.chain() {
                 }
                 std::process::exit(1);
             }
@@ -741,10 +739,10 @@ fn container_child_init(
 fn setup_loopback_network() -> Result<()> {
     // Bring up loopback interface
     use std::net::UdpSocket;
-    use std::os::unix::io::AsRawFd;
+    
 
     // Create a socket for ioctl
-    let socket = UdpSocket::bind("0.0.0.0:0")
+    let _socket = UdpSocket::bind("0.0.0.0:0")
         .or_else(|_| UdpSocket::bind("[::]:0"))?;
 
     // Use ioctl to bring up lo
@@ -975,7 +973,7 @@ mod tests {
     fn test_process_state() {
         let running = ProcessState::Running;
         let exited = ProcessState::Exited(0);
-        let failed = ProcessState::Failed(1);
+        let _failed = ProcessState::Failed(1);
 
         assert!(running == ProcessState::Running);
         assert_eq!(exited, ProcessState::Exited(0));

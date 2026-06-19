@@ -451,17 +451,19 @@ impl ContainerConfig {
     pub fn target_arch(&self) -> String {
         self.detect_architecture()
             .unwrap_or_else(|| {
-                #[cfg(target_arch = "x86_64")]
-                return "x86_64";
-                #[cfg(target_arch = "aarch64")]
-                return "aarch64";
-                #[cfg(target_arch = "arm")]
-                return "arm";
-                #[cfg(target_arch = "riscv64")]
-                return "riscv64";
-                #[cfg(target_arch = "powerpc64")]
-                return "ppc64le";
-                "x86_64"
+                // cfg!() if/else avoids the unreachable_code warning that
+                // cfg-attributed `return`s produce on the matching arch.
+                if cfg!(target_arch = "aarch64") {
+                    "aarch64"
+                } else if cfg!(target_arch = "arm") {
+                    "arm"
+                } else if cfg!(target_arch = "riscv64") {
+                    "riscv64"
+                } else if cfg!(target_arch = "powerpc64") {
+                    "ppc64le"
+                } else {
+                    "x86_64"
+                }
             })
             .to_string()
     }

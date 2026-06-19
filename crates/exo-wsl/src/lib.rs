@@ -133,7 +133,7 @@ pub fn get_wsl_version() -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     #[test]
     #[cfg(windows)]

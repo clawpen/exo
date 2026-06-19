@@ -1,10 +1,8 @@
 //! Agent memory backed by SQLite.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqlitePool, Row, FromRow};
-use std::path::Path;
 use tracing::{debug, instrument};
 use uuid::Uuid;
 

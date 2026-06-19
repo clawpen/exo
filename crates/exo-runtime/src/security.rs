@@ -196,7 +196,6 @@ impl Capability {
             Capability::CAP_SYSLOG => CapsCapability::CAP_SYSLOG,
             Capability::CAP_SYS_ADMIN => CapsCapability::CAP_SYS_ADMIN,
             Capability::CAP_SYS_BOOT => CapsCapability::CAP_SYS_BOOT,
-            Capability::CAP_CHOWN => CapsCapability::CAP_CHOWN,
             Capability::CAP_SYS_CHROOT => CapsCapability::CAP_SYS_CHROOT,
             Capability::CAP_SYS_MODULE => CapsCapability::CAP_SYS_MODULE,
             Capability::CAP_SYS_NICE => CapsCapability::CAP_SYS_NICE,

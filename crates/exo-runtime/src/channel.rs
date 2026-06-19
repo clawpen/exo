@@ -28,11 +28,11 @@
 //! └─────┘                                 └─────┘
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::io::{BufRead, Write, Read};
+use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use uuid::Uuid;
@@ -561,9 +561,9 @@ fn wait_with_timeout(child: &mut std::process::Child, duration: std::time::Durat
 /// Create a channel from a spawned container process.
 #[cfg(target_os = "linux")]
 pub fn create_channel_for_process(
-    container_id: &str,
-    process: &std::process::Child,
-    tool_executor: Box<dyn ToolExecutor>,
+    _container_id: &str,
+    _process: &std::process::Child,
+    _tool_executor: Box<dyn ToolExecutor>,
 ) -> Result<AgentChannel> {
     // TODO: Extract file descriptors from the process
     Err(anyhow::anyhow!("Not yet implemented"))

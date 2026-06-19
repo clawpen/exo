@@ -50,7 +50,6 @@ use {
     nix::unistd::pivot_root,
     nix::sys::stat::{mknod, SFlag, Mode, makedev},
     std::fs::File,
-    std::os::unix::io::AsRawFd,
 };
 
 /// Default container root directory.

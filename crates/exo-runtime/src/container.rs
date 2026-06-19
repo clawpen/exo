@@ -189,7 +189,7 @@ impl Container {
 
     /// Apply resource limits from config to cgroup.
     fn apply_resource_limits(&self, cgroup: &CgroupManager) -> Result<()> {
-        use crate::cgroup::{self, CgroupManager};
+        use crate::cgroup::{self};
         use crate::config;
 
         // Memory limit

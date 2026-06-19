@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tracing::{debug, error, info, warn};
+use tracing::debug;
 
 /// Message from orchestrator
 #[derive(Debug, Clone, Serialize, Deserialize)]

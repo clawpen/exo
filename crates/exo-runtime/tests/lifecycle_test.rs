@@ -15,8 +15,8 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use exo_runtime::{
-    Container, ContainerConfig, ContainerStatus, ResourceConfig, NetworkConfig,
-    CgroupManager, Capability, drop_capabilities, get_default_caps,
+    ContainerConfig, ContainerStatus,
+    CgroupManager, Capability, get_default_caps,
 };
 
 ///////////////////////////////////////////////////////////////////////////////

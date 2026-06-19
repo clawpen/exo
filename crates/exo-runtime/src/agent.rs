@@ -377,7 +377,7 @@ impl AgentProfile {
     /// Prevents setuid/setgid binaries from gaining privileges.
     #[cfg(target_os = "linux")]
     fn set_no_new_privs(&self) -> Result<()> {
-        use nix::unistd::Uid;
+        
         const PR_SET_NO_NEW_PRIVS: i32 = 38;
 
         // Use prctl to set no_new_privs

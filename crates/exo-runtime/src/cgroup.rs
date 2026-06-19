@@ -33,7 +33,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

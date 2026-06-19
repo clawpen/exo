@@ -1,7 +1,7 @@
 //! Main agent implementation with autonomous tool calling.
 
 use crate::config::AgentConfig;
-use crate::llm::{LlmClient, Message, ChatCompletion, ToolCall};
+use crate::llm::{LlmClient, ToolCall};
 use crate::memory::AgentMemory;
 use crate::tools::ToolRegistry;
 use crate::channel::{StdioChannel, InputMessage, OutputMessage};
