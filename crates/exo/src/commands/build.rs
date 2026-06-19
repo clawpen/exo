@@ -5,7 +5,7 @@
 //! built image, and compose its rootfs. RUN-step execution needs the runtime's
 //! container-exec path and is the next E2 slice (tracked in ROADMAP_ENTERPRISE.md).
 
-use exo_image::{AgentManifest, ImageReference, ImageStore, LayerStore, RegistryClient,
+use exo_image::{AgentManifest, ExoIgnore, ImageReference, ImageStore, LayerStore, RegistryClient,
     DEFAULT_IMAGE_ROOT};
 use std::path::{Path, PathBuf};
 
@@ -66,6 +66,12 @@ pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
         .map(|r| r.layers.clone())
         .ok_or_else(|| anyhow::anyhow!("base {} not in layer index after pull", base))?;
 
+    // Load .exoignore from the build context (exclude node_modules, .git, secrets).
+    let ignore = match std::fs::read_to_string(ctx_dir.join(".exoignore")) {
+        Ok(text) => ExoIgnore::parse(&text),
+        Err(_) => ExoIgnore::default(),
+    };
+
     // Execute COPY steps: stage files at their destination paths, then commit
     // the staging tree as a single new layer (the COPY diff).
     if !manifest.build.copy.is_empty() {
@@ -80,7 +86,7 @@ pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
             // Destination path inside the rootfs (strip leading '/').
             let rel = dst.trim_start_matches('/');
             let to = stage.join(rel);
-            copy_path(&from, &to)
+            copy_path_filtered(&from, &to, &ctx_dir, &ignore)
                 .map_err(|e| anyhow::anyhow!("COPY {} -> {}: {}", src, dst, e))?;
             println!("  copied {} -> {}", src, dst);
         }
@@ -123,14 +129,24 @@ pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Recursively copy a file or directory tree from `from` to `to`.
-fn copy_path(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Recursively copy a file/dir tree, skipping anything matched by `.exoignore`
+/// (matched on the path relative to the build context root).
+fn copy_path_filtered(from: &Path, to: &Path, ctx_root: &Path, ignore: &ExoIgnore)
+    -> std::io::Result<()>
+{
+    if !ignore.is_empty() {
+        if let Ok(rel) = from.strip_prefix(ctx_root) {
+            if ignore.is_ignored(&rel.to_string_lossy()) {
+                return Ok(());
+            }
+        }
+    }
     let meta = std::fs::symlink_metadata(from)?;
     if meta.is_dir() {
         std::fs::create_dir_all(to)?;
         for entry in std::fs::read_dir(from)? {
             let entry = entry?;
-            copy_path(&entry.path(), &to.join(entry.file_name()))?;
+            copy_path_filtered(&entry.path(), &to.join(entry.file_name()), ctx_root, ignore)?;
         }
     } else {
         if let Some(parent) = to.parent() {

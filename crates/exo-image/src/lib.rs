@@ -15,6 +15,7 @@ mod extractor;
 mod cas;
 mod manifest;
 mod oci_build;
+mod ignore;
 
 pub use reference::ImageReference;
 pub use store::ImageStore;
@@ -24,6 +25,7 @@ pub use manifest::{
     AgentManifest, AgentSection, BuildSection, EgressSection, ResourcesSection, ToolsSection,
 };
 pub use oci_build::build_and_store;
+pub use ignore::ExoIgnore;
 
 #[cfg(feature = "registry")]
 mod registry;

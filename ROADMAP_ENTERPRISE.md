@@ -83,8 +83,10 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 - [x] Dockerfile subset (FROM/RUN/COPY/ADD/ENV/CMD/WORKDIR, line continuations,
       exec+shell forms) as alternate input — `exo build -f Dockerfile -t name`
       (3 tests; verified end-to-end; inherits default-deny egress)
+- [x] `.exoignore` — gitignore-lite matcher excludes node_modules/.git/secrets
+      from COPY (size + secret-leak hygiene). `crates/exo-image/src/ignore.rs`,
+      3 tests; verified end-to-end
 - [ ] Build cache keyed on step inputs
-- [ ] `.exoignore`
 
 ## E3 — Local networking (single-host primitives only)
 > Mesh/discovery stays in Claw Pen. Exo provides the local plumbing it can't.
