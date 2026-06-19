@@ -152,7 +152,8 @@ external pentest and a fuzzing run come back clean and the checklist below is me
       (`.github/workflows/ci.yml` security job, `deny.toml`)
 - [ ] Clean up legacy warnings, then flip CI fmt/clippy from informational to `-D warnings`
 - [ ] Fuzz layer extraction, manifest parsing, and reference parsing (cargo-fuzz)
-- [ ] Threat model doc + documented trust boundaries
+- [x] Threat model doc + documented trust boundaries (`docs/threat-model.md`,
+      "Saboteur" adversary; maps each attack class to its control)
 - [ ] Run `/security-review` on the branch and resolve findings before tagging
 
 ---
