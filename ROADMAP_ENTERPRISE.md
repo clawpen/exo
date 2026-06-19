@@ -151,7 +151,10 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 - [x] Dependency audit (`cargo audit` + `cargo deny`) wired into CI as a gate
       (`.github/workflows/ci.yml` security job, `deny.toml`)
 - [ ] Clean up legacy warnings, then flip CI fmt/clippy from informational to `-D warnings`
-- [ ] Fuzz layer extraction, manifest parsing, and reference parsing (cargo-fuzz)
+- [x] Deterministic robustness tests: adversarial input to reference / exo.toml /
+      Dockerfile / .exoignore parsers — assert no panic (`reference.rs`, `manifest.rs`,
+      `ignore.rs`)
+- [ ] Continuous fuzzing harness (cargo-fuzz) over the same entry points
 - [x] Threat model doc + documented trust boundaries (`docs/threat-model.md`,
       "Saboteur" adversary; maps each attack class to its control)
 - [ ] Run `/security-review` on the branch and resolve findings before tagging

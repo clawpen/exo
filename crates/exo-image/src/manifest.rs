@@ -357,6 +357,25 @@ mod tests {
     }
 
     #[test]
+    fn parsers_never_panic_on_adversarial_input() {
+        // exo.toml and Dockerfiles come from users; parsing may error but must
+        // never panic.
+        let blobs = [
+            "", "\\", "[", "[agent]", "[agent]\nname=", "FROM", "FROM \\",
+            "COPY", "COPY a", "CMD [", "CMD [\"unterminated", "ENV", "ENV =",
+            "RUN \\\n\\\n\\", "\n\n\n", "# only comment", "FROM \\\n",
+            "ENV a=b=c=d", "COPY        ", "\t\tFROM\t\t",
+        ];
+        for b in blobs {
+            let _ = AgentManifest::parse(b);
+            let _ = AgentManifest::from_dockerfile(b, "x");
+        }
+        // Deeply continued line shouldn't blow the stack or panic.
+        let cont = "FROM alpine\nRUN ".to_string() + &"a \\\n".repeat(2000) + "b";
+        let _ = AgentManifest::from_dockerfile(&cont, "x");
+    }
+
+    #[test]
     fn plan_mentions_default_deny_egress() {
         let m = AgentManifest::parse("[agent]\nname=\"a\"\nfrom=\"alpine:3.20\"\n").unwrap();
         assert!(m.plan().contains("default-deny"));

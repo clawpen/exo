@@ -97,6 +97,20 @@ mod tests {
     }
 
     #[test]
+    fn never_panics_on_adversarial_patterns() {
+        // Patterns and paths come from user files; matching must not panic.
+        let patterns = ["", "*", "**", "***", "?", "*?*", "a***b", "/", "//",
+            &"*".repeat(1000), &"a".repeat(1000)];
+        let paths = ["", "/", "a", "a/b/c", &"x/".repeat(500), "🦀/y", "\\\\"];
+        for p in patterns {
+            let ig = ExoIgnore::parse(p);
+            for path in paths {
+                let _ = ig.is_ignored(path);
+            }
+        }
+    }
+
+    #[test]
     fn wildcard_edge_cases() {
         assert!(wildcard_match("*", ""));
         assert!(wildcard_match("a*c", "abbbc"));

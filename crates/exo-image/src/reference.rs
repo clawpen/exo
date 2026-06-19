@@ -106,6 +106,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_never_panics_on_adversarial_input() {
+        // Reference parsing runs on untrusted CLI/registry input; it may return
+        // an error but must never panic (indexing, slicing, unwrap).
+        let inputs = [
+            "", ":", "@", "/", "::", "@@", "//", ":/@", "a:", ":b", "a@", "@b",
+            "a:b:c", "a/b/c/d", "a@sha256:", "@sha256:abc", "registry.io/",
+            "/leading", "trailing/", "host:port/", ":tag", "a:b@c:d",
+            "🦀:latest", "a b c", "\t\n", "localhost:5000/",
+        ];
+        for s in inputs {
+            let _ = ImageReference::parse(s); // must not panic
+        }
+        let _ = ImageReference::parse(&"x".repeat(5000));
+    }
+
+    #[test]
     fn test_parse_simple() {
         let r = ImageReference::parse("alpine").unwrap();
         assert_eq!(r.registry, "docker.io");
