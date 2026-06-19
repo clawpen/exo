@@ -29,6 +29,20 @@ exo ps
 exo stop <container-id>
 ```
 
+## Images, build & distribution
+
+Pull, build (from `exo.toml` or a Dockerfile), dedup, inspect, and push agent
+images — with content-addressed layer storage that stores each layer once:
+
+```bash
+exo build -f exo.toml          # or: exo build -f Dockerfile -t my-agent
+exo system df                  # show dedup savings vs a naive store
+exo push ghcr.io/me/agent:latest
+```
+
+See **[docs/images-and-build.md](docs/images-and-build.md)** for the full workflow
+and **[docs/threat-model.md](docs/threat-model.md)** for the security model.
+
 ## Architecture
 
 ```
