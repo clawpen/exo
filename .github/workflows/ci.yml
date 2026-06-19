@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, exo-enterprise]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build, lint & test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # fmt/clippy are informational until the legacy warnings are cleaned up
+      # (tracked in ROADMAP_ENTERPRISE.md E7); build/test/security are hard gates.
+      - name: Format check (informational)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (informational)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build (gate)
+        run: cargo build --workspace
+
+      - name: Test (gate — image crate unit suite incl. security guards)
+        run: cargo test -p exo-image --lib
+
+  security:
+    name: Supply-chain audit (gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Known-vulnerability scan of the dependency tree (RUSTSEC advisories).
+      - name: cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # License / banned-crate / duplicate / source policy (see deny.toml).
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

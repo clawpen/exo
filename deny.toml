@@ -1,0 +1,34 @@
+# cargo-deny configuration — supply-chain gate for Exo.
+# Run locally with: cargo deny check
+
+[advisories]
+# Fail on any RUSTSEC advisory in the dependency tree.
+yanked = "deny"
+# Add specific advisory IDs here only with a justification if ever needed.
+ignore = []
+
+[licenses]
+# Allowlist of licenses acceptable for a permissively-licensed product.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Flag multiple versions of the same crate (bloat / dedup hygiene) as a warning.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only crates.io is trusted by default.
+unknown-registry = "deny"
+unknown-git = "deny"

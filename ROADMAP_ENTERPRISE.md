@@ -146,7 +146,9 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 ### Process & operational security
 - [ ] Daemon socket authn/authz + permission hardening (no world-writable socket)
 - [ ] Secret-handling review (no secrets in logs, env dumps, or event log)
-- [ ] Dependency audit (`cargo audit`/`cargo deny`) wired into CI as a gate
+- [x] Dependency audit (`cargo audit` + `cargo deny`) wired into CI as a gate
+      (`.github/workflows/ci.yml` security job, `deny.toml`)
+- [ ] Clean up legacy warnings, then flip CI fmt/clippy from informational to `-D warnings`
 - [ ] Fuzz layer extraction, manifest parsing, and reference parsing (cargo-fuzz)
 - [ ] Threat model doc + documented trust boundaries
 - [ ] Run `/security-review` on the branch and resolve findings before tagging
