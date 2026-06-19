@@ -13,3 +13,4 @@ pub mod import;
 pub mod daemon;
 pub mod events;
 pub mod system;
+pub mod rmi;

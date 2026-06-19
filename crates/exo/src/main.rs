@@ -196,6 +196,12 @@ enum Commands {
         all: bool,
     },
 
+    /// Remove an image (refcount-aware: prunes only its orphaned layers)
+    Rmi {
+        /// Image to remove (e.g., python:3.12)
+        image: String,
+    },
+
     /// Import image from tarball
     Import {
         /// Path to image tarball
@@ -331,6 +337,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
+        }
+        Commands::Rmi { image } => {
+            commands::rmi::execute(commands::rmi::RmiArgs { image }).await?
         }
         Commands::Import { tarball, name } => {
             commands::import::execute(commands::import::ImportArgs {
