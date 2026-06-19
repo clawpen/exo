@@ -1,6 +1,0 @@
-{
-  "stamp": "20260619-130210", "runs": 3, "images": 4,
-  "disk_bytes":   { "exo": 1795034873,   "docker": 0 },
-  "spawn_ms":     { "exo": 24,  "docker": 0 },
-  "idle_rss_kb":  { "exo": 0,    "docker": 0 }
-}
