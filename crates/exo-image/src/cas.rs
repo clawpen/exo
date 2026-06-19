@@ -89,6 +89,24 @@ pub struct ImageInfo {
     pub exclusive_size: u64,
 }
 
+/// Result of a store integrity scan (`exo system check`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StoreReport {
+    /// Registered images.
+    pub images: usize,
+    /// Images referencing one or more missing layers (ref -> missing digests).
+    pub dangling_images: Vec<(String, Vec<String>)>,
+    /// Extracted layers no image references (reclaimable).
+    pub orphan_layers: Vec<String>,
+}
+
+impl StoreReport {
+    /// Whether the store is fully consistent.
+    pub fn is_healthy(&self) -> bool {
+        self.dangling_images.is_empty() && self.orphan_layers.is_empty()
+    }
+}
+
 /// Content-addressed layer store.
 #[derive(Clone)]
 pub struct LayerStore {
@@ -420,6 +438,63 @@ impl LayerStore {
         }))
     }
 
+    /// Scan the store for inconsistencies: images whose layers are missing from
+    /// the CAS, and extracted layers no image references.
+    pub fn check(&self) -> Result<StoreReport> {
+        let index = self.load_index()?;
+
+        let mut dangling_images = Vec::new();
+        let mut referenced = std::collections::HashSet::new();
+        for (reference, rec) in &index.images {
+            let mut missing = Vec::new();
+            for l in &rec.layers {
+                referenced.insert(sanitize(l));
+                if !self.has_layer(l) {
+                    missing.push(l.clone());
+                }
+            }
+            if !missing.is_empty() {
+                dangling_images.push((reference.clone(), missing));
+            }
+        }
+
+        let mut orphan_layers = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(self.root.join("layers")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(".tmp-") || !entry.path().is_dir() {
+                    continue;
+                }
+                if !referenced.contains(&name) {
+                    orphan_layers.push(name);
+                }
+            }
+        }
+
+        dangling_images.sort();
+        orphan_layers.sort();
+        Ok(StoreReport {
+            images: index.images.len(),
+            dangling_images,
+            orphan_layers,
+        })
+    }
+
+    /// Repair the store: unregister images with missing layers (they can't be
+    /// composed/run anyway) and prune orphaned layers. Returns
+    /// (images_removed, layers_pruned).
+    pub fn repair(&self) -> Result<(usize, usize)> {
+        let report = self.check()?;
+        let mut images_removed = 0;
+        for (reference, _) in &report.dangling_images {
+            if self.unregister_image(reference)? {
+                images_removed += 1;
+            }
+        }
+        let (layers_pruned, _) = self.prune()?;
+        Ok((images_removed, layers_pruned))
+    }
+
     /// Root path of the store.
     pub fn root(&self) -> &Path {
         &self.root
@@ -686,6 +761,30 @@ mod tests {
         // base is shared (refcount 2), a is exclusive (refcount 1).
         assert!(info.exclusive_size < info.total_size);
         assert!(store.inspect("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn check_and_repair_fix_dangling_refs() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+        let (base, db) = mklayer(tmp.path(), "base.tgz", &[("f", b"x")]);
+        store.extract_layer(&base, &db).unwrap();
+
+        // Healthy image, plus one referencing a layer that was never extracted.
+        store.register_image("good", vec![db.clone()], "c".into()).unwrap();
+        store.register_image("bad", vec![db.clone(), "sha256:missing".into()], "c".into()).unwrap();
+
+        let report = store.check().unwrap();
+        assert!(!report.is_healthy());
+        assert_eq!(report.dangling_images.len(), 1);
+        assert_eq!(report.dangling_images[0].0, "bad");
+
+        let (imgs, _) = store.repair().unwrap();
+        assert_eq!(imgs, 1);
+        assert!(store.check().unwrap().is_healthy());
+        // The good image (and its layer) survive repair.
+        assert!(store.has_layer(&db));
+        assert!(store.inspect("good").unwrap().is_some());
     }
 
     #[test]

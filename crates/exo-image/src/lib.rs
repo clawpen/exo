@@ -20,7 +20,7 @@ mod ignore;
 pub use reference::ImageReference;
 pub use store::ImageStore;
 pub use extractor::LayerExtractor;
-pub use cas::{DiskUsage, ImageIndex, ImageInfo, ImageRecord, LayerInfo, LayerStore};
+pub use cas::{DiskUsage, ImageIndex, ImageInfo, ImageRecord, LayerInfo, LayerStore, StoreReport};
 pub use manifest::{
     AgentManifest, AgentSection, BuildSection, EgressSection, ResourcesSection, ToolsSection,
 };

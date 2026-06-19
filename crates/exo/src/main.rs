@@ -294,6 +294,15 @@ enum SystemCmd {
     },
     /// Remove extracted layers no image references anymore
     Prune,
+    /// Scan the image store for inconsistencies (optionally repair)
+    Check {
+        /// Remove dangling images and prune orphaned layers
+        #[arg(long)]
+        repair: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -401,6 +410,9 @@ async fn main() -> anyhow::Result<()> {
                 commands::system::df(commands::system::DfArgs { json }).await?
             }
             SystemCmd::Prune => commands::system::prune().await?,
+            SystemCmd::Check { repair, json } => {
+                commands::system::check(commands::system::CheckArgs { repair, json }).await?
+            }
         }
         Commands::Daemon { foreground, stop, status, socket, timeout, json } => {
             if stop {

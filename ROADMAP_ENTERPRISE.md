@@ -129,7 +129,8 @@ external pentest and a fuzzing run come back clean and the checklist below is me
 ### Concurrency & state integrity
 - [x] File-locked, crash-safe index mutations (concurrent `pull`/`rmi`/`prune`
       no longer lose updates; stale-lock steal after 30s). `cas.rs`, concurrency test
-- [ ] `exo system check` — detect & repair store inconsistencies (orphan blobs, dangling refs)
+- [x] `exo system check [--repair]` — detect dangling image→layer refs + orphan
+      layers, repair by unregistering dangling images and pruning. `cas.rs`, 1 test
 - [ ] Fsync + atomic-rename audit across all on-disk writes
 - [ ] Quotas: max store size, per-image disk cap, eviction policy
 
