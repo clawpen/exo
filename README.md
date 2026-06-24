@@ -147,7 +147,11 @@ One container runtime, many agents.
 
 ## License
 
-MIT OR Apache-2.0
+This project is dual-licensed:
+
+**Open Source:** [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE) or later
+
+**Commercial:** A commercial license is available for organizations that wish to use Exo in proprietary products without AGPL obligations. For commercial licensing inquiries, contact: **license@clawpen.ca**
 
 ---
 
