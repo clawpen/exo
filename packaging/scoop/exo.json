@@ -1,0 +1,28 @@
+{
+    "version": "0.1.0",
+    "description": "Container runtime for AI agents",
+    "homepage": "https://github.com/clawpen/exo",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/clawpen/exo/releases/download/v0.1.0/exo-0.1.0-x86_64-pc-windows-msvc.exe",
+            "hash": "PLACEHOLDER_SHA256"
+        }
+    },
+    "bin": [
+        [
+            "exo-0.1.0-x86_64-pc-windows-msvc.exe",
+            "exo"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/clawpen/exo"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/clawpen/exo/releases/download/v$version/exo-$version-x86_64-pc-windows-msvc.exe"
+            }
+        }
+    }
+}

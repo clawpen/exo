@@ -1,0 +1,33 @@
+# Keep Docker build contexts small and avoid shipping local secrets/scratch.
+
+.git/
+.github/
+.claude/
+.codex/
+
+# Rust build outputs. Keep the release agent binary available for
+# images/exo-agent/Containerfile.prebuilt.
+target/*
+!target/release/
+target/release/*
+!target/release/exo-agent
+containment-runtime/target/
+
+# Local scratch/test outputs.
+results/
+test-volumes/
+*.log
+*.tmp
+*.temp
+
+# Secrets and machine-local environment.
+.env
+.env.*
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~

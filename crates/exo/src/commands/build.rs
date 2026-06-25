@@ -14,6 +14,10 @@ pub struct BuildArgs {
     pub file: Option<String>,
     /// Image name for Dockerfile builds (e.g. `-t my-agent`).
     pub tag: Option<String>,
+    /// Skip vulnerability scan after build.
+    pub skip_scan: bool,
+    /// Generate and save an SBOM after build.
+    pub sbom: bool,
 }
 
 pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
@@ -125,8 +129,106 @@ pub async fn execute(args: BuildArgs) -> anyhow::Result<()> {
             manifest.build.run.len()
         );
     }
+    // Vulnerability scan hook on the built image rootfs.
+    if !args.skip_scan && !is_scan_disabled_by_env() {
+        let rootfs = PathBuf::from(DEFAULT_IMAGE_ROOT)
+            .join("rootfs")
+            .join(built_ref.replace([':', '/'], "_"));
+        if rootfs.exists() {
+            match exo_runtime::scan_image_rootfs(&built_ref, &rootfs) {
+                Ok(report) => {
+                    save_scan_report(&built_ref, &report)?;
+                    print_scan_summary(&report);
+                    if should_fail_on_scan() && (report.critical_count() + report.high_count()) > 0 {
+                        anyhow::bail!(
+                            "Build blocked by vulnerability scan policy: {} critical, {} high",
+                            report.critical_count(),
+                            report.high_count()
+                        );
+                    }
+                }
+                Err(e) => {
+                    if should_fail_on_scan() {
+                        anyhow::bail!("Vulnerability scan failed: {}", e);
+                    } else {
+                        tracing::warn!("Vulnerability scan failed (non-fatal): {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    // SBOM generation hook on the built image rootfs.
+    if args.sbom || should_generate_sbom_by_env() {
+        let rootfs = PathBuf::from(DEFAULT_IMAGE_ROOT)
+            .join("rootfs")
+            .join(built_ref.replace([':', '/'], "_"));
+        if rootfs.exists() {
+            let format = exo_runtime::SbomFormat::default();
+            match exo_runtime::generate_sbom(&built_ref, &rootfs, format) {
+                Ok(sbom_json) => {
+                    match exo_runtime::save_sbom(Path::new(DEFAULT_IMAGE_ROOT), &built_ref, format, &sbom_json) {
+                        Ok(path) => println!("  SBOM saved to {}", path.display()),
+                        Err(e) => tracing::warn!("Failed to save SBOM: {}", e),
+                    }
+                }
+                Err(e) => tracing::warn!("SBOM generation failed (non-fatal): {}", e),
+            }
+        }
+    }
+
     println!("\nBuilt {} ({} layers) ✓", built_ref, layers.len());
     Ok(())
+}
+
+fn is_scan_disabled_by_env() -> bool {
+    std::env::var("EXO_SKIP_SCAN").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn should_generate_sbom_by_env() -> bool {
+    std::env::var("EXO_SBOM").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn should_fail_on_scan() -> bool {
+    std::env::var("EXO_SCAN_FATAL").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn save_scan_report(
+    image_ref: &str,
+    report: &exo_runtime::VulnerabilityReport,
+) -> anyhow::Result<()> {
+    let scan_dir = PathBuf::from(DEFAULT_IMAGE_ROOT).join("scans");
+    std::fs::create_dir_all(&scan_dir)?;
+    let filename = format!("{}.json", image_ref.replace([':', '/'], "_"));
+    let path = scan_dir.join(filename);
+    let json = serde_json::to_string_pretty(report)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+fn print_scan_summary(report: &exo_runtime::VulnerabilityReport) {
+    if report.vulnerabilities.is_empty() {
+        println!("  Scan: no vulnerabilities detected ({})", report.scanner);
+        return;
+    }
+    println!(
+        "  Scan: {} vulnerabilities found ({} critical, {} high, {} medium, {} low) via {}",
+        report.vulnerabilities.len(),
+        report.critical_count(),
+        report.high_count(),
+        report.medium_count(),
+        report.low_count(),
+        report.scanner
+    );
+    for vuln in report.vulnerabilities.iter().take(5) {
+        println!(
+            "    - {} ({}) in {} {}",
+            vuln.id, vuln.severity, vuln.package, vuln.version
+        );
+    }
+    if report.vulnerabilities.len() > 5 {
+        println!("    ... and {} more", report.vulnerabilities.len() - 5);
+    }
 }
 
 /// Recursively copy a file/dir tree, skipping anything matched by `.exoignore`

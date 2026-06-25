@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::config::ContainerConfig;
+use crate::network::NetworkState;
 
 /// Default container state directory (system-wide)
 pub const CONTAINER_STATE_DIR: &str = "/var/lib/exo/containers";
@@ -65,6 +66,14 @@ pub struct ContainerMetadata {
     /// Custom labels/tags
     #[serde(default)]
     pub labels: HashMap<String, String>,
+
+    /// Health status (starting/healthy/unhealthy).
+    #[serde(default)]
+    pub health_status: Option<String>,
+
+    /// Persisted network attachment details for teardown.
+    #[serde(default)]
+    pub network_state: NetworkState,
 }
 
 impl ContainerMetadata {
@@ -85,6 +94,8 @@ impl ContainerMetadata {
             config,
             ports: vec![],
             labels: HashMap::new(),
+            health_status: None,
+            network_state: NetworkState::default(),
         }
     }
 
@@ -94,6 +105,9 @@ impl ContainerMetadata {
         self.pid = Some(pid);
         self.started_at = Some(Utc::now());
         self.exit_code = None;
+        if self.health_status.is_some() {
+            self.health_status = Some("starting".to_string());
+        }
     }
 
     /// Mark container as stopped.
@@ -392,6 +406,8 @@ pub struct ContainerJson {
     pub pid: Option<u32>,
     pub created: DateTime<Utc>,
     pub ports: Vec<String>,
+    pub health_status: Option<String>,
+    pub network_state: NetworkState,
 }
 
 impl From<ContainerMetadata> for ContainerJson {
@@ -404,6 +420,8 @@ impl From<ContainerMetadata> for ContainerJson {
             pid: meta.pid,
             created: meta.created_at,
             ports: meta.ports,
+            health_status: meta.health_status,
+            network_state: meta.network_state,
         }
     }
 }

@@ -5,7 +5,7 @@
 | Image | Size | Features |
 |-------|------|----------|
 | `exo-agent:latest` | ~25MB | Full agent with SQLite memory + tools |
-| `exo-agent:slim` | ~8MB | LLM client only, no persistence |
+| `exo-agent:slim` | smaller Alpine runtime | LLM-only, stateless, no local tools/SQLite |
 | `openclaw-agent:latest` | ~500MB | Full OpenClaw instance |
 
 ## Build
@@ -14,33 +14,43 @@
 # Standard (recommended)
 ./images/exo-agent/build.sh
 
-# Ultra-slim
+# Slim
 ./images/exo-agent/build.sh slim
 
 # Both
 ./images/exo-agent/build.sh all
+
+# Force a specific engine
+CONTAINER_TOOL=docker ./images/exo-agent/build.sh
 ```
 
 ## Run
 
 ```bash
 # Interactive chat
-podman run -it --rm \
+docker run -it --rm \
     -e ZAI_API_KEY=xxx \
     exo-agent:latest
 
 # With workspace mount
-podman run -it --rm \
+docker run -it --rm \
     -e ZAI_API_KEY=xxx \
     -v ./workspace:/workspace \
     exo-agent:latest
 
 # Custom config
-podman run -it --rm \
+docker run -it --rm \
     -e ZAI_API_KEY=xxx \
     -v ./my-config.toml:/app/config.toml \
     exo-agent:latest
+
+# Smoke test without an API key (prints CLI help)
+docker run --rm exo-agent:latest --help
 ```
+
+## Feature profiles
+
+The standard image enables persistent SQLite-backed memory and local tools. The `slim` image is built with `--no-default-features`, so it keeps the stdio + LLM client path but drops SQLite persistence and local tool execution.
 
 ## Configuration
 

@@ -1,6 +1,7 @@
 //! Containment - Container runtime for AI agents
 
 mod commands;
+mod metrics;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -82,6 +83,26 @@ enum Commands {
         /// Port mappings (host:container)
         #[arg(short, long, value_name = "HOST:CONT")]
         publish: Vec<String>,
+
+        /// Healthcheck command (e.g., "curl -f http://localhost/")
+        #[arg(long, value_name = "CMD")]
+        health_cmd: Option<String>,
+
+        /// Healthcheck interval in seconds
+        #[arg(long, value_name = "SECS", default_value = "30")]
+        health_interval: u64,
+
+        /// Healthcheck timeout in seconds
+        #[arg(long, value_name = "SECS", default_value = "30")]
+        health_timeout: u64,
+
+        /// Consecutive healthcheck failures before marking unhealthy
+        #[arg(long, value_name = "N", default_value = "3")]
+        health_retries: u32,
+
+        /// Grace period in seconds before failed healthchecks count
+        #[arg(long, value_name = "SECS", default_value = "0")]
+        health_start_period: u64,
 
         /// Remove container on exit
         #[arg(long)]
@@ -191,6 +212,22 @@ enum Commands {
     Pull {
         /// Image to pull
         image: String,
+
+        /// Skip vulnerability scan after pull
+        #[arg(long)]
+        skip_scan: bool,
+
+        /// Verify image signature with cosign before pull
+        #[arg(long)]
+        verify: bool,
+
+        /// Path to cosign public key for verification
+        #[arg(long, value_name = "KEY")]
+        cosign_key: Option<String>,
+
+        /// Generate and save an SBOM after pull
+        #[arg(long)]
+        sbom: bool,
     },
 
     /// List images
@@ -209,6 +246,14 @@ enum Commands {
         /// Image name for Dockerfile builds (e.g. -t my-agent)
         #[arg(short, long)]
         tag: Option<String>,
+
+        /// Skip vulnerability scan after build
+        #[arg(long)]
+        skip_scan: bool,
+
+        /// Generate and save an SBOM after build
+        #[arg(long)]
+        sbom: bool,
     },
 
     /// Inspect a local image (layers, sizes, shared vs exclusive disk)
@@ -221,6 +266,14 @@ enum Commands {
     Push {
         /// Image to push (e.g., ghcr.io/me/agent:latest)
         image: String,
+
+        /// Sign the image with cosign after push
+        #[arg(long)]
+        sign: bool,
+
+        /// Path to cosign private key for signing
+        #[arg(long, value_name = "KEY")]
+        cosign_key: Option<String>,
     },
 
     /// Remove an image (refcount-aware: prunes only its orphaned layers)
@@ -249,6 +302,25 @@ enum Commands {
         json: bool,
     },
 
+    /// Show detailed information about a container
+    Inspect {
+        /// Container ID or name
+        container: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Copy files between host and a container rootfs
+    Cp {
+        /// Source path (host path or container:path)
+        source: String,
+
+        /// Destination path (host path or container:path)
+        dest: String,
+    },
+
     /// Show the daemon's lifecycle event log
     Events {
         /// Filter to one container (by id or name)
@@ -262,6 +334,10 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Export events to a JSONL file instead of printing
+        #[arg(long, value_name = "PATH")]
+        export: Option<String>,
     },
 
     /// Show layer-store disk usage and dedup savings
@@ -351,7 +427,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the appropriate command
     match cli.command {
-        Commands::Run { image, command, name, config, workdir, volume, env, gpu, gpu_type, memory, cpu, network, restart, publish, rm, interactive, tty, detach } => {
+        Commands::Run { image, command, name, config, workdir, volume, env, gpu, gpu_type, memory, cpu, network, restart, publish, health_cmd, health_interval, health_timeout, health_retries, health_start_period, rm, interactive, tty, detach } => {
             commands::run::execute(commands::run::RunArgs {
                 image,
                 command,
@@ -367,6 +443,11 @@ async fn main() -> anyhow::Result<()> {
                 network,
                 restart,
                 publish,
+                health_cmd,
+                health_interval,
+                health_timeout,
+                health_retries,
+                health_start_period,
                 rm,
                 interactive,
                 tty,
@@ -391,22 +472,22 @@ async fn main() -> anyhow::Result<()> {
         Commands::Exec { container, command, interactive, tty, user } => {
             commands::exec::execute(commands::exec::ExecArgs { container, command, interactive, tty, user }).await?
         }
-        Commands::Pull { image } => {
-            commands::pull::execute(commands::pull::PullArgs { image }).await?
+        Commands::Pull { image, skip_scan, verify, cosign_key, sbom } => {
+            commands::pull::execute(commands::pull::PullArgs { image, skip_scan, verify, cosign_key, sbom }).await?
         }
         Commands::Images { all } => {
             commands::images::execute(commands::images::ImagesArgs { all }).await?
         }
-        Commands::Build { file, tag } => {
-            commands::build::execute(commands::build::BuildArgs { file, tag }).await?
+        Commands::Build { file, tag, skip_scan, sbom } => {
+            commands::build::execute(commands::build::BuildArgs { file, tag, skip_scan, sbom }).await?
         }
         Commands::Image { cmd } => match cmd {
             ImageCmd::Inspect { image, json } => {
                 commands::image::inspect(commands::image::InspectArgs { image, json }).await?
             }
         }
-        Commands::Push { image } => {
-            commands::push::execute(commands::push::PushArgs { image }).await?
+        Commands::Push { image, sign, cosign_key } => {
+            commands::push::execute(commands::push::PushArgs { image, sign, cosign_key }).await?
         }
         Commands::Rmi { image } => {
             commands::rmi::execute(commands::rmi::RmiArgs { image }).await?
@@ -420,8 +501,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stats { container, json } => {
             commands::stats::execute(commands::stats::StatsArgs { container, json }).await?
         }
-        Commands::Events { container, limit, json } => {
-            commands::events::execute(commands::events::EventsArgs { container, limit, json }).await?
+        Commands::Inspect { container, json } => {
+            commands::inspect::execute(commands::inspect::InspectArgs { container, json }).await?
+        }
+        Commands::Cp { source, dest } => {
+            commands::cp::execute(commands::cp::CpArgs { source, dest }).await?
+        }
+        Commands::Events { container, limit, json, export } => {
+            commands::events::execute(commands::events::EventsArgs { container, limit, json, export }).await?
         }
         Commands::System { cmd } => match cmd {
             SystemCmd::Df { json } => {

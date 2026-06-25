@@ -1102,3 +1102,77 @@ ip netns list
 *Document Version: 1.0*
 *Last Updated: 2024*
 *Author: Exo Development Team*
+
+
+## Docker / Exo benchmark validation
+
+Use real Docker smoke tests as the baseline before comparing Exo behavior:
+
+```powershell
+# Build and smoke-test the standard exo-agent image on Docker Desktop
+powershell -ExecutionPolicy Bypass -File scripts/test-docker.ps1
+
+# Reuse an already-built image
+powershell -ExecutionPolicy Bypass -File scripts/test-docker.ps1 -SkipBuild
+
+# Windows Docker-vs-Exo spawn baseline; writes results/bench-windows-*.json
+powershell -ExecutionPolicy Bypass -File scripts/bench-vs-docker.ps1 -Runs 5
+
+# Expanded Windows benchmark: spawn, volume mount, pull/first-run ensure,
+# Docker agent image startup, and Exo daemon status metadata.
+powershell -ExecutionPolicy Bypass -File scripts/bench-vs-docker.ps1 `
+  -Runs 20 -Image alpine:3.20 `
+  -IncludeVolume -IncludeFirstRun -ColdImage alpine:3.18 `
+  -IncludeAgentImages -IncludeDaemon
+```
+
+On Linux/WSL2, use the existing broader benchmark:
+
+```bash
+RUNS=5 scripts/bench-vs-docker.sh
+```
+
+The minimum gate for Dockerization work is: image build succeeds, `--help` runs,
+and a closed-stdin lifecycle run exits successfully without requiring an API key.
+
+
+Latest expanded Windows benchmark files from the first real run:
+
+- `results/bench-windows-20260623-233017.json` ? `alpine:3.20` full expanded run
+- `results/bench-windows-20260623-233048.json` ? `busybox:latest` spawn + volume
+- `results/bench-windows-20260623-233119.json` ? `debian:bookworm-slim` spawn + volume
+
+
+### Cold pull benchmark + Markdown export
+
+```powershell
+# True cold pull: removes the named -ColdImage from BOTH runtimes first, then
+# times pull + first run. Targeted image removal only (docker rmi / exo rmi);
+# no recursive path deletes. Use a -ColdImage distinct from -Image.
+powershell -ExecutionPolicy Bypass -File scripts/bench-vs-docker.ps1 `
+  -Runs 20 -Image alpine:3.20 `
+  -IncludeFirstRun -ColdImage alpine:3.18 -AllowColdDelete `
+  -EmitMarkdown
+
+# Convert any existing JSON result(s) to a Markdown report.
+# Call directly from a PowerShell session (the -File launcher splits arrays):
+$files = Get-ChildItem results/bench-windows-*.json | Select-Object -Expand FullName
+& ./scripts/bench-to-markdown.ps1 -JsonPath $files -OutFile results/summary.md
+```
+
+The benchmark script now runs a bounded Docker health pre-check (30s). If Docker
+Desktop is unresponsive it aborts immediately instead of hanging on rmi/pull/run.
+
+
+### Docker via WSL fallback
+
+If Windows `docker.exe` / the Docker Desktop named-pipe path is unresponsive but
+`wsl -e docker version --format '{{.Server.Version}}'` works, run benchmarks with
+`-DockerViaWsl`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/bench-vs-docker.ps1 `
+  -Runs 20 -Image alpine:3.20 -DockerViaWsl `
+  -IncludeVolume -IncludeFirstRun -ColdImage alpine:3.20 `
+  -AllowColdDelete -IncludeAgentImages -IncludeDaemon -EmitMarkdown
+```

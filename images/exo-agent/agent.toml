@@ -21,4 +21,9 @@ max_context_tokens = 8192
 [channel]
 mode = "stdio"
 
-[volumes]
+# Volume mounts can be added as array entries, e.g.:
+# [[volumes]]
+# source = "/host/path"
+# target = "/workspace/path"
+# read_only = true
+volumes = []

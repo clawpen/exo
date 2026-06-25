@@ -10,7 +10,7 @@
 //!
 //! - **Agent communication**: Stdio-based protocol instead of HTTP
 //! - **Tool sandboxing**: Per-tool security contexts
-//! - **Fast spawning**: Daemonless architecture for quick agent tasks
+//! - **Fast spawning**: Lightweight daemon for quick agent tasks
 //! - **Rootless operation**: User namespaces for privilege separation
 //!
 //! # Example
@@ -49,10 +49,14 @@ pub mod manager;
 pub mod network;
 pub mod events;
 pub mod reconcile;
+pub mod healthcheck;
+pub mod scan;
+pub mod sbom;
+pub mod sign;
 
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use manager::{ContainerManager, ContainerMetadata, ContainerJson, ContainerListJson, CONTAINER_STATE_DIR};
-pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
+pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig, NetworkMode};
 pub use namespace::Namespace;
 pub use userns::{UidMap, GidMap, setup_user_namespace};
 pub use cgroup::{CgroupManager, parse_size as parse_cgroup_size, cpu_count_to_quota};
@@ -65,6 +69,12 @@ pub use channel::{AgentChannel, AgentMessage, ToolRequest, ToolResponse};
 pub use agent::{AgentProfile, NetworkAccess, get_agent_profile, AgentConfigExt};
 pub use events::{Event, EventLog, EventType};
 pub use config::RestartPolicy;
+pub use config::HealthcheckConfig;
+pub use healthcheck::{HealthStatus, HealthcheckRunner};
+pub use network::NetworkState;
+pub use scan::{VulnerabilityReport, Vulnerability, scan_image_rootfs};
+pub use sbom::{SbomFormat, generate_sbom, save_sbom};
+pub use sign::{verify_image, sign_image, resolve_key_path};
 pub use reconcile::{Reconciler, ReconcileOptions, ReconcileSummary, DEFAULT_CGROUP_ROOT};
 
 use anyhow::Result;

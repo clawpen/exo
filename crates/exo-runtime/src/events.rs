@@ -18,9 +18,19 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::Write;
 
 /// Maximum rows retained. Older rows are trimmed after each insert.
 const RING_BUFFER_SIZE: i64 = 10_000;
+
+/// Maximum archived log files to keep. Older archives are deleted.
+const MAX_ARCHIVE_FILES: usize = 10;
+
+/// Filename prefix for event archive files.
+const ARCHIVE_PREFIX: &str = "events-archive";
+
+/// File extension for event archive files (newline-delimited JSON).
+const ARCHIVE_EXTENSION: &str = "jsonl";
 
 /// Default event log path under the system state dir.
 pub const EVENT_LOG_PATH: &str = "/var/lib/exo/events.db";
@@ -55,6 +65,10 @@ pub enum EventType {
     Gc,
     ReconcileOrphan,
     Restarted,
+    /// Healthcheck transitioned to unhealthy.
+    HealthcheckFailed,
+    /// Healthcheck recovered to healthy.
+    HealthcheckRecovered,
 }
 
 impl EventType {
@@ -69,6 +83,8 @@ impl EventType {
             EventType::Gc => "gc",
             EventType::ReconcileOrphan => "reconcile_orphan",
             EventType::Restarted => "restarted",
+            EventType::HealthcheckFailed => "healthcheck_failed",
+            EventType::HealthcheckRecovered => "healthcheck_recovered",
         }
     }
 
@@ -83,6 +99,8 @@ impl EventType {
             "gc" => EventType::Gc,
             "reconcile_orphan" => EventType::ReconcileOrphan,
             "restarted" => EventType::Restarted,
+            "healthcheck_failed" => EventType::HealthcheckFailed,
+            "healthcheck_recovered" => EventType::HealthcheckRecovered,
             _ => return None,
         })
     }
@@ -96,18 +114,19 @@ pub struct EventLog {
 
 struct EventLogInner {
     conn: Mutex<Connection>,
+    path: PathBuf,
 }
 
 impl EventLog {
     /// Open or create the event log at an explicit path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create event log dir {:?}", parent))?;
         }
 
-        let conn = Connection::open(path)
+        let conn = Connection::open(&path)
             .with_context(|| format!("Failed to open event log at {:?}", path))?;
 
         // WAL gives us concurrent readers + one writer; NORMAL sync is enough
@@ -129,7 +148,7 @@ impl EventLog {
         )?;
 
         Ok(Self {
-            inner: Arc::new(EventLogInner { conn: Mutex::new(conn) }),
+            inner: Arc::new(EventLogInner { conn: Mutex::new(conn), path }),
         })
     }
 
@@ -169,12 +188,166 @@ impl EventLog {
 
         // Trim ring buffer. Bounded by the PK index, so O(deleted_rows).
         // Most inserts find nothing to delete and return immediately.
-        conn.execute(
-            "DELETE FROM events WHERE id <= COALESCE((SELECT MAX(id) FROM events), 0) - ?1",
-            params![RING_BUFFER_SIZE],
-        )?;
+        // Before deleting, archive the rows to a JSONL file so security audits
+        // can retain them without unbounded DB growth.
+        self.rotate(&conn)?;
 
         Ok(())
+    }
+
+    /// Archive and delete rows that have aged out of the ring buffer.
+    fn rotate(&self, conn: &rusqlite::Connection) -> Result<()> {
+        let max_id: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM events",
+            [],
+            |row| row.get(0),
+        )?;
+        let cutoff = max_id - RING_BUFFER_SIZE;
+        if cutoff <= 0 {
+            return Ok(());
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, container_id, container_name, event_type, detail
+             FROM events WHERE id <= ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |row| {
+            Ok(Event {
+                ts_millis: row.get(1)?,
+                container_id: row.get(2)?,
+                container_name: row.get(3)?,
+                event_type: EventType::from_str(row.get::<_, String>(4)?.as_str())
+                    .unwrap_or(EventType::Created),
+                detail: row.get(5)?,
+            })
+        })?;
+
+        let mut archived = 0usize;
+        {
+            let archive_path = self.archive_path()?;
+            if let Some(parent) = archive_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create archive dir {:?}", parent))?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&archive_path)
+                .with_context(|| format!("Failed to open archive {:?}", archive_path))?;
+
+            for event in rows {
+                let event = event?;
+                let line = serde_json::to_string(&event)
+                    .context("Failed to serialize archived event")?;
+                writeln!(file, "{}", line)
+                    .with_context(|| format!("Failed to write archive {:?}", archive_path))?;
+                archived += 1;
+            }
+        }
+
+        if archived > 0 {
+            conn.execute(
+                "DELETE FROM events WHERE id <= ?1",
+                params![cutoff],
+            )?;
+            self.cleanup_old_archives()?;
+            tracing::debug!("Archived {} events", archived);
+        }
+
+        Ok(())
+    }
+
+    /// Path to the current archive file. Uses a timestamp so a long-running
+    /// daemon doesn't append indefinitely to one file.
+    fn archive_path(&self) -> Result<PathBuf> {
+        let dir = self.archive_dir()?;
+        let now = chrono::Utc::now();
+        let filename = format!(
+            "{}-{}.{}",
+            ARCHIVE_PREFIX,
+            now.format("%Y%m%d-%H%M%S"),
+            ARCHIVE_EXTENSION
+        );
+        Ok(dir.join(filename))
+    }
+
+    /// Directory where archive files are stored (next to the active DB).
+    fn archive_dir(&self) -> Result<PathBuf> {
+        let base = self
+            .inner
+            .path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/lib/exo"));
+        Ok(base.join("events-archive"))
+    }
+
+    /// Keep only the most recent `MAX_ARCHIVE_FILES` archive files.
+    fn cleanup_old_archives(&self) -> Result<()> {
+        let dir = self.archive_dir()?;
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with(ARCHIVE_PREFIX))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if entries.len() <= MAX_ARCHIVE_FILES {
+            return Ok(());
+        }
+
+        // Sort by modification time, newest first.
+        entries.sort_by(|a, b| {
+            let mt_a = a.metadata().and_then(|m| m.modified()).ok();
+            let mt_b = b.metadata().and_then(|m| m.modified()).ok();
+            mt_b.cmp(&mt_a)
+        });
+
+        for old in entries.iter().skip(MAX_ARCHIVE_FILES) {
+            let _ = std::fs::remove_file(old);
+            tracing::debug!("Removed old event archive {:?}", old);
+        }
+
+        Ok(())
+    }
+
+    /// Export the most recent `limit` events to a JSONL file at `path`.
+    pub fn export(&self, path: &std::path::Path, limit: usize) -> Result<usize> {
+        let conn = self.inner.conn.lock().expect("event log mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT ts, container_id, container_name, event_type, detail
+             FROM events ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let event_type: String = row.get(3)?;
+            Ok(Event {
+                ts_millis: row.get(0)?,
+                container_id: row.get(1)?,
+                container_name: row.get(2)?,
+                event_type: EventType::from_str(&event_type).unwrap_or(EventType::Created),
+                detail: row.get(4)?,
+            })
+        })?;
+
+        let mut file = std::fs::File::create(path)
+            .with_context(|| format!("Failed to create export file {:?}", path))?;
+        let mut count = 0usize;
+        for event in rows {
+            let event = event?;
+            let line = serde_json::to_string(&event)
+                .context("Failed to serialize exported event")?;
+            writeln!(file, "{}", line)
+                .with_context(|| format!("Failed to write export {:?}", path))?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     /// Most recent N events (newest first).
@@ -305,5 +478,45 @@ mod tests {
         log.record("c", "n", EventType::Created, None).unwrap();
         let visible = log2.recent(10).unwrap();
         assert_eq!(visible.len(), 1);
+    }
+
+    #[test]
+    fn test_rotation_archives_to_jsonl() {
+        let (log, dir) = make_log();
+        let total = (RING_BUFFER_SIZE + 5) as usize;
+        for i in 0..total {
+            log.record("c", "name", EventType::Created, Some(&i.to_string())).unwrap();
+        }
+
+        let count = log.count().unwrap();
+        assert!(count <= RING_BUFFER_SIZE);
+
+        let archive_dir = dir.path().join("events-archive");
+        assert!(archive_dir.exists(), "archive directory should exist");
+        let archives: Vec<_> = std::fs::read_dir(&archive_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(!archives.is_empty(), "at least one archive file should exist");
+
+        let content = std::fs::read_to_string(archives[0].path()).unwrap();
+        assert!(content.contains("\"event_type\":\"created\""));
+    }
+
+    #[test]
+    fn test_export_to_jsonl() {
+        let (log, dir) = make_log();
+        log.record("a", "ca", EventType::Created, None).unwrap();
+        log.record("a", "ca", EventType::Started, Some("pid=1")).unwrap();
+
+        let export_path = dir.path().join("export.jsonl");
+        let count = log.export(&export_path, 10).unwrap();
+        assert_eq!(count, 2);
+
+        let content = std::fs::read_to_string(&export_path).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"started\""));
+        assert!(lines[1].contains("\"created\""));
     }
 }

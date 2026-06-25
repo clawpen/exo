@@ -41,13 +41,13 @@ Windows Host → Docker Desktop (Windows) → Linux Containers
 
 ### 3. **Performance Gap**
 - Docker: ~2-3 second startup time per container
-- Exo promise: Millisecond startup (daemonless)
+- Exo promise: Millisecond startup (lightweight daemon)
 - **But**: WSL2 adds overhead to every call
 
 ### 4. **Feature Gap - What Exo Has That Docker Doesn't**
 - ✅ Agent-native communication (stdio + tool bus vs HTTP)
 - ✅ Tool-level sandboxing (each tool gets its own security context)
-- ✅ Daemonless architecture (no persistent daemon overhead)
+- ✅ Lightweight daemon architecture (small persistent daemon overhead)
 - ✅ Designed for AI agents (not microservices)
 
 ## Recommended Architecture
@@ -74,7 +74,7 @@ Windows Host → Docker Desktop (Windows) → Linux Containers
 │  │  │  - Namespace isolation                         │  │   │
 │  │  │  - Cgroup v2 limits                           │  │   │
 │  │  │  - Seccomp filtering                          │  │   │
-│  │  │  - Daemonless, fast spawning                  │  │   │
+│  │  │  - Lightweight daemon, fast spawning          │  │   │
 │  │  └────────────────────────────────────────────────┘  │   │
 │  │                                                      │   │
 │  │  ┌────────────────────────────────────────────────┐  │   │
@@ -179,9 +179,9 @@ Windows Host → Docker Desktop (Windows) → Linux Containers
 - Docker daemon: ~2GB RSS
 
 **Target Exo Performance**:
-- Container spawn: <500ms (daemonless!)
+- Container spawn: <500ms (lightweight daemon!)
 - Memory overhead: ~10-20MB per container
-- No persistent daemon
+- Small persistent daemon (~10MB RSS)
 
 **Tasks**:
 1. **Persistent Exo Process in WSL2**
@@ -199,7 +199,7 @@ Windows Host → Docker Desktop (Windows) → Linux Containers
    - Batch operations
 
 3. **Fast Spawning**
-   - Exo is daemonless by design
+   - Exo uses a lightweight daemon by design
    - No init system overhead
    - Direct process execution
 

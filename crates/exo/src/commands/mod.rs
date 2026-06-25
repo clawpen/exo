@@ -18,3 +18,5 @@ pub mod push;
 pub mod image;
 pub mod build;
 pub mod stats;
+pub mod inspect;
+pub mod cp;

@@ -102,7 +102,7 @@ Compared to Docker Desktop:
 |--------|----------------|------------|
 | Container startup | 2-3s | <500ms |
 | Memory overhead | ~100MB/container | ~20MB/container |
-| Daemon overhead | ~2GB RSS | 0MB (daemonless) |
+| Daemon overhead | ~2GB RSS | ~10MB (lightweight daemon) |
 
 ## Architecture
 
@@ -122,7 +122,7 @@ Compared to Docker Desktop:
 │  │  │  - Namespace isolation                         │  │   │
 │  │  │  - Cgroup v2 limits                           │  │   │
 │  │  │  - Seccomp filtering                          │  │   │
-│  │  │  - Daemonless, fast spawning                  │  │   │
+│  │  │  - Lightweight daemon, fast spawning          │  │   │
 │  │  └────────────────────────────────────────────────┘  │   │
 │  │                                                      │   │
 │  │  ┌────────────────────────────────────────────────┐  │   │

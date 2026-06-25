@@ -94,11 +94,20 @@ async fn execute_linux(args: ListArgs) -> Result<()> {
     }
 
     // Print header
-    println!(
-        "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
-        "CONTAINER ID", "NAME", "IMAGE", "STATUS", "PID", "CREATED"
-    );
-    println!("{}", "-".repeat(90));
+    let has_health = containers.iter().any(|c| c.health_status.is_some());
+    if has_health {
+        println!(
+            "{:<12} {:<20} {:<16} {:<12} {:<8} {:<10} {:<20}",
+            "CONTAINER ID", "NAME", "IMAGE", "STATUS", "PID", "HEALTH", "CREATED"
+        );
+        println!("{}", "-".repeat(102));
+    } else {
+        println!(
+            "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
+            "CONTAINER ID", "NAME", "IMAGE", "STATUS", "PID", "CREATED"
+        );
+        println!("{}", "-".repeat(90));
+    }
 
     // Print containers
     for container in containers {
@@ -110,11 +119,19 @@ async fn execute_linux(args: ListArgs) -> Result<()> {
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".to_string());
         let created = format_created(container.created_at);
+        let health = container.health_status.as_deref().unwrap_or("-");
 
-        println!(
-            "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
-            id_short, name, image, status, pid, created
-        );
+        if has_health {
+            println!(
+                "{:<12} {:<20} {:<16} {:<12} {:<8} {:<10} {:<20}",
+                id_short, name, image, status, pid, health, created
+            );
+        } else {
+            println!(
+                "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
+                id_short, name, image, status, pid, created
+            );
+        }
     }
 
     Ok(())

@@ -43,9 +43,9 @@ Rather than coarse-grained container security, Exo understands that:
 - File system access should be scoped per-tool, not per-container
 - Network access should be opt-in per operation
 
-### 3. Daemonless Architecture
+### 3. Lightweight Daemon Architecture
 
-Agents should spawn in milliseconds, not seconds. No daemon, no socket activation, no background services. Just:
+Agents should spawn in milliseconds, not seconds. Exo uses a small persistent daemon for lifecycle management and control-plane operations, not a heavyweight engine like dockerd. Direct-state commands (inspect, cp, events, stats) work against on-disk metadata without round-tripping through the daemon. Just:
 
 ```
 exo run --image python:3.12 --tool bash --tool python

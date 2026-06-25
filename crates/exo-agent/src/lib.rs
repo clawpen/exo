@@ -18,15 +18,19 @@
 
 pub mod agent;
 pub mod llm;
+#[cfg(feature = "memory")]
 pub mod memory;
+#[cfg(feature = "tools")]
 pub mod tools;
 pub mod channel;
 pub mod config;
 
 pub use agent::{ExoAgent, AgentState};
 pub use llm::{LlmClient, Message, Role, ChatCompletion, ToolCall, ToolDefinition, FunctionCall};
+#[cfg(feature = "memory")]
 pub use memory::{AgentMemory, Conversation};
-pub use tools::{ToolRegistry, ToolResult, ToolName};
+#[cfg(feature = "tools")]
+pub use tools::{ToolName, ToolRegistry, ToolResult};
 pub use channel::{StdioChannel, InputMessage, OutputMessage, ChannelConfig, ChannelMode};
 pub use config::{AgentConfig, LlmConfig, MemoryConfig, VolumeMount};
 

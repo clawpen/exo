@@ -134,8 +134,13 @@ impl ContainerProcess {
                     // Overlay mount failed - use the actual image rootfs (lower layer)
                     // NOT the empty mount point directory
                     tracing::warn!("Overlay mount failed ({}), using read-only image rootfs", e);
-                    tracing::info!("Falling back to image rootfs at: {:?}", overlay_config.lower);
-                    overlay_config.lower
+                    let fallback = overlay_config
+                        .lower
+                        .first()
+                        .cloned()
+                        .unwrap_or(rootfs_path);
+                    tracing::info!("Falling back to image rootfs at: {:?}", fallback);
+                    fallback
                 }
             }
         } else {
@@ -554,6 +559,10 @@ fn container_child_init(
     // Step 2: Unshare other namespaces (user namespace already created)
     let mut flags = CloneFlags::empty();
 
+    use crate::config::NetworkMode;
+    let network_mode = config.network.mode_enum();
+    let isolate_network = network_mode != NetworkMode::Host;
+
     if config.namespaces.mount {
         flags |= CloneFlags::CLONE_NEWNS;
     }
@@ -563,7 +572,7 @@ fn container_child_init(
     if config.namespaces.ipc {
         flags |= CloneFlags::CLONE_NEWIPC;
     }
-    if config.namespaces.network {
+    if isolate_network {
         flags |= CloneFlags::CLONE_NEWNET;
     }
     if config.namespaces.pid {
@@ -672,8 +681,8 @@ fn container_child_init(
         tracing::debug!("Hostname set successfully");
     }
 
-    // Step 6: Set up network (basic loopback)
-    if config.namespaces.network {
+    // Step 6: Set up network based on mode
+    if isolate_network {
         tracing::debug!("Setting up loopback network");
         setup_loopback_network()?;
         tracing::debug!("Loopback network setup completed");
@@ -886,12 +895,25 @@ pub fn get_process_caps(pid: Pid) -> Result<String> {
 #[cfg(target_os = "linux")]
 fn setup_port_forwarding_for_container(config: &ContainerConfig, pid: Pid) -> Result<()> {
     use std::process::Command;
-    
+    use crate::config::NetworkMode;
+
+    let mode = config.network.mode_enum();
+
+    // Bridge mode uses nftables port forwarding set up by the parent process
+    // after the network namespace is created.
+    if mode == NetworkMode::Bridge {
+        tracing::info!(
+            "Container {} uses bridge network mode - nftables port forwarding is configured separately",
+            config.name
+        );
+        return Ok(());
+    }
+
     // If network namespace is NOT isolated, container shares host network
     // and can bind directly to ports - no forwarding needed
-    if !config.namespaces.network {
+    if mode == NetworkMode::Host {
         tracing::info!(
-            "Container {} shares host network namespace - port forwarding not needed (container can bind directly)",
+            "Container {} uses host network mode - port forwarding not needed (container can bind directly)",
             config.name
         );
         for pm in &config.network.port_mappings {

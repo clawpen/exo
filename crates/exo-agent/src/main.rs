@@ -9,7 +9,9 @@ use tracing::info;
 
 mod config;
 mod llm;
+#[cfg(feature = "memory")]
 mod memory;
+#[cfg(feature = "tools")]
 mod tools;
 mod channel;
 mod agent;

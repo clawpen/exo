@@ -73,6 +73,10 @@ pub struct ContainerConfig {
     #[serde(default)]
     pub restart_policy: RestartPolicy,
 
+    /// Optional healthcheck configuration.
+    #[serde(default)]
+    pub healthcheck: Option<HealthcheckConfig>,
+
     /// Optional list of overlay lowerdir paths. When present and whiteout-free,
     /// the runtime mounts these layer directories directly instead of building a
     /// per-image hardlink-composed rootfs.
@@ -110,6 +114,53 @@ impl RestartPolicy {
     }
 }
 
+/// Healthcheck configuration (Docker-compatible subset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthcheckConfig {
+    /// Command to run to check health (required).
+    pub test: Vec<String>,
+
+    /// Seconds between probes (default 30).
+    #[serde(default = "default_health_interval")]
+    pub interval: u64,
+
+    /// Seconds to wait for a probe to complete (default 30).
+    #[serde(default = "default_health_timeout")]
+    pub timeout: u64,
+
+    /// Consecutive failures required to become unhealthy (default 3).
+    #[serde(default = "default_health_retries")]
+    pub retries: u32,
+
+    /// Seconds to wait before probes count as failures (default 0).
+    #[serde(default)]
+    pub start_period: u64,
+}
+
+fn default_health_interval() -> u64 {
+    30
+}
+
+fn default_health_timeout() -> u64 {
+    30
+}
+
+fn default_health_retries() -> u32 {
+    3
+}
+
+impl Default for HealthcheckConfig {
+    fn default() -> Self {
+        Self {
+            test: vec![],
+            interval: default_health_interval(),
+            timeout: default_health_timeout(),
+            retries: default_health_retries(),
+            start_period: 0,
+        }
+    }
+}
+
 impl Default for ContainerConfig {
     fn default() -> Self {
         Self {
@@ -130,6 +181,7 @@ impl Default for ContainerConfig {
             architecture: None,
             platform: None,
             restart_policy: RestartPolicy::default(),
+            healthcheck: None,
             overlay_lowerdirs: None,
         }
     }
@@ -267,6 +319,51 @@ fn default_network_mode() -> String {
 
 fn default_network_name() -> String {
     "openclaw0".to_string()
+}
+
+/// Network mode for a container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkMode {
+    Bridge,
+    Host,
+    None,
+    Container(String),
+}
+
+impl NetworkMode {
+    /// Parse from the string stored in `NetworkConfig.mode`.
+    pub fn parse(s: &str) -> Self {
+        if let Some(id) = s.strip_prefix("container:") {
+            NetworkMode::Container(id.to_string())
+        } else {
+            match s {
+                "host" => NetworkMode::Host,
+                "none" => NetworkMode::None,
+                _ => NetworkMode::Bridge,
+            }
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NetworkMode::Bridge => "bridge",
+            NetworkMode::Host => "host",
+            NetworkMode::None => "none",
+            NetworkMode::Container(_) => "container",
+        }
+    }
+}
+
+impl Default for NetworkMode {
+    fn default() -> Self {
+        NetworkMode::Bridge
+    }
+}
+
+impl NetworkConfig {
+    pub fn mode_enum(&self) -> NetworkMode {
+        NetworkMode::parse(&self.mode)
+    }
 }
 
 impl Default for NetworkConfig {

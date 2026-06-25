@@ -1,26 +1,38 @@
-# Exo Agent - Ultra-slim variant
-# No SQLite, no tools - just LLM chat
-# Target: <10MB
+# Exo Agent - slim variant
+#
+# This keeps the same exo-agent binary/config contract as the standard image,
+# but uses a smaller Alpine runtime image. It is intentionally Docker-compatible
+# and does not rely on Podman-specific behavior.
 
-FROM rust:1.75-alpine AS builder
+ARG RUST_VERSION=1.92
+FROM rust:${RUST_VERSION}-alpine AS builder
 
 RUN apk add --no-cache musl-dev
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY crates/exo-agent ./crates/exo-agent
+COPY crates ./crates
 
-# Build with minimal features
-RUN cargo build --release -p exo-agent --no-default-features
+RUN cargo build --release -p exo-agent --locked --no-default-features
 
-# ============================================
-# Scratch image - absolute minimum
-# ============================================
-FROM scratch
+FROM alpine:3.19
 
-COPY --from=builder /build/target/release/exo-agent /exo-agent
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 1000 agent && \
+    mkdir -p /app /data /workspace && \
+    chown -R agent:agent /app /data /workspace
 
-# CA certs for HTTPS
-COPY --from=alpine:3.19 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+WORKDIR /workspace
 
-ENTRYPOINT ["/exo-agent"]
+COPY --from=builder --chown=agent:agent /build/target/release/exo-agent /app/exo-agent
+COPY --chown=agent:agent images/exo-agent/agent.toml /app/config.toml
+
+USER agent
+
+ENV RUST_LOG=warn
+ENV EXO_AGENT_CONFIG=/app/config.toml
+
+VOLUME ["/workspace", "/data"]
+
+ENTRYPOINT ["/app/exo-agent"]
+CMD ["--config", "/app/config.toml"]

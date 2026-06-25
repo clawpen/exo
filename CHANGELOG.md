@@ -32,7 +32,7 @@ Exo is ready for experimentation and feedback.
 ### Philosophy
 Exo is a container runtime **for AI agents**, not microservices.
 - Agent-first: stdio + tool bus, not HTTP
-- Daemonless: fast spawning, no background services
+- Lightweight daemon: fast spawning, small background service
 - Rootless: user namespaces by default
 - Tool-level sandboxing: per-tool security contexts
 

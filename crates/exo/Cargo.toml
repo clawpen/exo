@@ -29,6 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 flate2 = "1"
 tar = "0.4"
+prometheus = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 exo-wsl = { path = "../exo-wsl" }

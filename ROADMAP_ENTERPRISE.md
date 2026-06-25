@@ -33,7 +33,7 @@ The differentiator we lead with. Measured by `scripts/bench-vs-docker.sh` →
 `results/bench-*.json`. Four cost-mapped axes:
 
 1. **Disk footprint** — content-addressed layer store with cross-image dedup.
-2. **Cold spawn** — daemonless/light-daemon path vs dockerd round-trip.
+2. **Cold spawn** — lightweight-daemon path vs dockerd round-trip.
 3. **Idle control-plane RSS** — exo daemon vs `dockerd` baseline.
 4. **Density** — concurrent containers per GB RAM.
 
@@ -91,25 +91,25 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 
 ## E3 — Local networking (single-host primitives only)
 > Mesh/discovery stays in Claw Pen. Exo provides the local plumbing it can't.
-- [ ] Bridge (`exo0`) + veth pair + IP allocation per container *(not started; socat/ncat fallback in Linux, WSL stubs fall back to 127.0.0.1)*
-- [~] `-p host:container` publish via nftables *(port maps parsed, but implemented with socat/ncat on Linux, iptables in WSL, netsh on Windows — no nftables)*
-- [~] Container-local DNS + `/etc/hosts` *(WSL writes static hosts to state dir only; native Linux runtime does not inject resolv.conf/hosts into rootfs)*
-- [~] `network mode` already in CLI — wire up `bridge|host|none` backends *(CLI parses `--network`, runtime only uses isolated vs shared boolean; no backend dispatch)*
+- [x] Bridge (`exo0`) + veth pair + IP allocation per container (`crates/exo-runtime/src/network.rs`; `ip` command based, JSON lease file in state dir)
+- [x] `-p host:container` publish via nftables (per-container `ip exo_<id>` table with DNAT/masquerade; `nft` command based)
+- [x] Container-local DNS + `/etc/hosts` (`/etc/resolv.conf` and `/etc/hosts` injected into rootfs for `bridge`/`none` modes; inter-container entries from IPAM leases)
+- [x] `network mode` already in CLI — wire up `bridge|host|none` backends (`NetworkMode` enum, netns isolation dispatch, parent-side bridge/veth setup)
 
 ## E4 — Runtime completeness
-- [~] Full writable overlay via fuse-overlayfs *(kernel overlay attempted first, fuse-overlayfs fallback via `std::process::Command`; read-only fallback on total failure)*
-- [~] `exo stats` — live cgroup metrics *(Container::stats() + CgroupManager read mem/cpu/pids, but no `stats` CLI command exists)*
-- [ ] Healthcheck primitive (`--health-cmd`) + status surfaced in `list`
-- [~] `--restart` policies (no/on-failure/always) in the daemon reconciler *(enum has only `Never`/`OnDaemonRestart`; periodic loop does not restart; no `--restart` CLI flag)*
-- [~] `exo cp`, `exo inspect`, `exo events` *(events done; `image inspect` exists; container `inspect` and `cp` missing)*
+- [x] Full writable overlay via fuse-overlayfs *(kernel overlay attempted first, fuse-overlayfs fallback via `std::process::Command`; read-only fallback uses first lowerdir instead of returning `Err`)*
+- [x] `exo stats` — live cgroup metrics + CLI (`crates/exo/src/commands/stats.rs`; daemon request/response)
+- [x] Healthcheck primitive (`--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`, `--health-start-period`) + status surfaced in `exo list` and events
+- [x] `--restart` policies (`no`/`on-failure`/`always`/`on-daemon-restart`) in CLI + daemon reconciler with exponential backoff
+- [x] `exo cp`, `exo inspect`, `exo events` *(events + `image inspect` already existed; container `inspect` and `cp` added)*
 
 ## E5 — Programmability & trust (enterprise table stakes)
-- [ ] Stable, versioned daemon API + SDK (formalize the existing Unix socket protocol) *(ad-hoc JSON over socket; no version field)*
-- [ ] Image signing/verification (cosign/sigstore) + SBOM emission
-- [ ] Vulnerability scan hook on pull/build
-- [ ] Prometheus `/metrics` endpoint on the daemon
-- [~] Structured audit log + log rotation *(SQLite ring-buffer for lifecycle events in `crates/exo-runtime/src/events.rs`; no file rotation or security audit pipeline)*
-- [~] Single-binary installer + package repos; Docker→Exo migration guide *(WSL dev-only deploy in `crates/exo-wsl/src/deploy.rs`; no packages or migration guide)*
+- [x] Stable, versioned daemon API + SDK (formalize the existing Unix socket protocol; `API_VERSION = "1"`, `DaemonRequestEnvelope`/`DaemonResponseEnvelope` with version validation; clients in `run` and `stats` updated)
+- [x] Image signing/verification (cosign/sigstore) + SBOM emission (`crates/exo-runtime/src/sbom.rs` and `sign.rs`; `syft`/`trivy` SBOM generation, `cosign verify` before pull, `cosign sign` after push; `--verify`, `--cosign-key`, `--sbom`, `--sign` flags; `EXO_VERIFY`/`EXO_SBOM`/`EXO_SIGN` env vars)
+- [x] Vulnerability scan hook on pull/build (`crates/exo-runtime/src/scan.rs`; grype/trivy shell-out on composed rootfs; `--skip-scan` flag; `EXO_SKIP_SCAN`/`EXO_SCAN_FATAL` env vars; JSON reports saved to `<image-root>/scans/`)
+- [x] Prometheus `/metrics` endpoint on the daemon (`crates/exo/src/metrics.rs`; Prometheus text format on `127.0.0.1:9090`, configurable via `EXO_METRICS_ADDR`, sampled every `EXO_METRICS_INTERVAL_MS`)
+- [x] Structured audit log + log rotation *(SQLite ring-buffer in `events.rs`; trimmed rows are archived to timestamped JSONL files in `events-archive/`, capped at `MAX_ARCHIVE_FILES`; added `EventLog::export` and `exo events --export PATH`)*
+- [x] Single-binary installer + package repos; Docker→Exo migration guide (`scripts/install.sh`, `scripts/build-release.sh`, `packaging/homebrew/exo.rb`, `packaging/scoop/exo.json`; `docs/DOCKER_TO_EXO_MIGRATION.md`; install section in `README.md`)
 
 ## E6 — Compose-lite (optional, only if Claw Pen doesn't cover it)
 - [ ] `exo-compose.yml` for multi-container *local* dev stacks (agent + vector DB + tools)

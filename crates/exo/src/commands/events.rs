@@ -9,6 +9,7 @@ pub struct EventsArgs {
     pub container: Option<String>,
     pub limit: usize,
     pub json: bool,
+    pub export: Option<String>,
 }
 
 pub async fn execute(args: EventsArgs) -> Result<()> {
@@ -37,6 +38,13 @@ async fn execute_linux(args: EventsArgs) -> Result<()> {
     use exo_runtime::EventLog;
 
     let log = EventLog::open_default()?;
+
+    if let Some(export_path) = args.export {
+        let path = std::path::PathBuf::from(&export_path);
+        let count = log.export(&path, args.limit)?;
+        println!("Exported {} events to {}", count, path.display());
+        return Ok(());
+    }
 
     let events = match &args.container {
         Some(c) => log.for_container(c, args.limit)?,

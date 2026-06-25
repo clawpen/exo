@@ -46,8 +46,10 @@ if "%1"=="build" (
     exit /b %ERRORLEVEL%
 )
 
-REM Check if exo binary exists, if not try to build it
-wsl -e bash -c "if [ ! -f %EXO_BINARY% ]; then cd %WSL_EXO_PATH% && cargo build --release 2>/dev/null; fi"
+REM NOTE: The previous per-invocation existence check ran a second `wsl -e bash`
+REM process on EVERY command, adding ~240ms median latency and most of the spawn
+REM tail variance on Windows. It is removed for performance. If the binary is
+REM missing, run `exo build` (handled above) or `cargo build --release` in WSL.
 
 REM Forward all arguments to exo in WSL2 as root (cgroup writes require root
 REM until the rootless spawn path is finished). The daemon owns /tmp/exo-daemon.sock

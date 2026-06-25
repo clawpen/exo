@@ -499,7 +499,7 @@ fn test_invalid_cgroup_path() {
     #[cfg(target_os = "linux")]
     let result = CgroupManager::new(test_id);
     #[cfg(not(target_os = "linux"))]
-    let result: Result<()> = Ok(());
+    let result: std::result::Result<(), ()> = Ok(());
 
     // Should fail or be a no-op on non-Linux
     #[cfg(target_os = "linux")]

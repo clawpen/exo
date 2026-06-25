@@ -4,6 +4,7 @@ use crate::config::ContainerConfig;
 use crate::process::ContainerProcess;
 use crate::cgroup::CgroupManager;
 use crate::rootfs;
+use crate::healthcheck::HealthcheckRunner;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use crate::process::enter_container_namespaces;
@@ -183,6 +184,132 @@ impl Container {
         self.process = Some(process);
         self.cgroup_manager = Some(cgroup_mgr);
 
+        // Set up bridge networking for Linux bridge mode.
+        #[cfg(target_os = "linux")]
+        {
+            use crate::config::NetworkMode;
+            let mode = self.handle.config.network.mode_enum();
+            if mode == NetworkMode::Bridge || mode == NetworkMode::None {
+                let state_dir = crate::rootfs::get_container_root();
+                let mut network_state = crate::network::NetworkState::default();
+                network_state.mode = mode.as_str().to_string();
+
+                if mode == NetworkMode::Bridge {
+                    if let Some(pid) = self.handle.pid {
+                        match crate::network::setup_bridge_for_container(
+                            &state_dir,
+                            &self.handle.name,
+                            pid,
+                        ) {
+                            Ok(state) => {
+                                network_state = state;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Bridge setup failed for {}: {}",
+                                    self.handle.name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Inject /etc/resolv.conf and /etc/hosts into the rootfs.
+                let rootfs_path = self.handle.rootfs_path();
+                let container_ip = network_state.container_ip.as_deref();
+                let hosts_entries = crate::network::read_hosts_entries(&state_dir);
+                let dns: Vec<String> = self
+                    .handle
+                    .config
+                    .network
+                    .dns
+                    .clone()
+                    .unwrap_or_default();
+                let dns_refs: Vec<&str> = dns.iter().map(|s| s.as_str()).collect();
+                if let Err(e) = crate::rootfs::inject_network_files(
+                    &self.handle.config.hostname,
+                    container_ip,
+                    &dns_refs,
+                    &hosts_entries,
+                ) {
+                    tracing::warn!(
+                        "Failed to inject network files into {}: {}",
+                        rootfs_path.display(),
+                        e
+                    );
+                }
+
+                // Persist network state for teardown.
+                if let Ok(manager) = ContainerManager::new() {
+                    if let Ok(Some(mut metadata)) = manager.find(&self.handle.name) {
+                        metadata.network_state = network_state.clone();
+                        let _ = manager.save(&metadata);
+                    }
+                }
+
+                // Set up nftables port forwarding for bridge mode.
+                if mode == NetworkMode::Bridge
+                    && !self.handle.config.network.port_mappings.is_empty()
+                {
+                    if let Some(ip) = network_state.container_ip.as_deref() {
+                        let mappings: Vec<(u16, u16)> = self
+                            .handle
+                            .config
+                            .network
+                            .port_mappings
+                            .iter()
+                            .map(|pm| (pm.host_port, pm.container_port))
+                            .collect();
+                        match crate::network::NftablesPortForwarder::new(
+                            &self.handle.name,
+                            ip,
+                            &mappings,
+                        ) {
+                            Ok(fw) => {
+                                if let Ok(manager) = ContainerManager::new() {
+                                    if let Ok(Some(mut metadata)) =
+                                        manager.find(&self.handle.name)
+                                    {
+                                        metadata.network_state.nft_table =
+                                            Some(fw.table_name.clone());
+                                        let _ = manager.save(&metadata);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "nftables port forwarding failed for {}: {}",
+                                    self.handle.name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Spawn a background healthcheck task if configured.
+        if let Some(health) = self.handle.config.healthcheck.clone() {
+            if let Some(pid) = self.handle.pid {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let name = self.handle.name.clone();
+                    let runner = HealthcheckRunner::new(name, pid, health);
+                    handle.spawn(runner.run());
+                    tracing::info!(
+                        "Spawned healthcheck task for container {}",
+                        self.handle.name
+                    );
+                } else {
+                    tracing::debug!(
+                        "No tokio runtime available; skipping background healthcheck for {}",
+                        self.handle.name
+                    );
+                }
+            }
+        }
+
         tracing::info!("Container {} started", self.handle.name);
 
         Ok(())
@@ -251,6 +378,12 @@ impl Container {
 
         self.handle.status = ContainerStatus::Stopped;
 
+        // Clean up bridge networking on Linux.
+        #[cfg(target_os = "linux")]
+        {
+            Self::cleanup_networking(&self.handle.name);
+        }
+
         // Clean up cgroup
         if let Some(cgroup) = self.cgroup_manager.take() {
             let _ = cgroup.destroy();
@@ -277,6 +410,12 @@ impl Container {
         let _ = process.wait();
 
         self.handle.status = ContainerStatus::Stopped;
+
+        // Clean up bridge networking on Linux.
+        #[cfg(target_os = "linux")]
+        {
+            Self::cleanup_networking(&self.handle.name);
+        }
 
         // Clean up cgroup
         if let Some(cgroup) = self.cgroup_manager.take() {
@@ -321,6 +460,39 @@ impl Container {
     /// Check if the container is running.
     pub fn is_running(&self) -> bool {
         matches!(self.handle.status, ContainerStatus::Running)
+    }
+
+    /// Clean up networking artifacts (bridge + nftables) for a container.
+    #[cfg(target_os = "linux")]
+    fn cleanup_networking(name: &str) {
+        let state_dir = crate::rootfs::get_container_root();
+        if let Ok(manager) = ContainerManager::new() {
+            if let Ok(Some(metadata)) = manager.find(name) {
+                if !metadata.network_state.is_empty() {
+                    let _ = crate::network::teardown_bridge_network(
+                        &state_dir,
+                        name,
+                        &metadata.network_state,
+                    );
+                }
+                if let Some(table) = metadata.network_state.nft_table.as_deref() {
+                    let ruleset = format!("delete table ip {}\n", table);
+                    let _ = std::process::Command::new("nft")
+                        .args(["-f", "-"])
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .and_then(|mut child| {
+                            use std::io::Write;
+                            if let Some(mut stdin) = child.stdin.take() {
+                                let _ = stdin.write_all(ruleset.as_bytes());
+                            }
+                            child.wait()
+                        });
+                }
+            }
+        }
     }
 
     /// Get current resource usage statistics.
@@ -505,6 +677,7 @@ mod tests {
             architecture: None,
             platform: None,
             restart_policy: Default::default(),
+            healthcheck: None,
             overlay_lowerdirs: None,
         }
     }

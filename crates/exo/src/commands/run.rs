@@ -23,6 +23,11 @@ pub struct RunArgs {
     pub network: Option<String>,
     pub restart: Option<String>,
     pub publish: Vec<String>,
+    pub health_cmd: Option<String>,
+    pub health_interval: u64,
+    pub health_timeout: u64,
+    pub health_retries: u32,
+    pub health_start_period: u64,
     pub rm: bool,
     pub interactive: bool,
     pub tty: bool,
@@ -576,7 +581,7 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
 }
 
 fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
-    use exo_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig};
+    use exo_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig, HealthcheckConfig};
 
     let name = args.name.unwrap_or_else(|| {
         // Generate a name if not provided
@@ -654,6 +659,17 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         .and_then(exo_runtime::config::RestartPolicy::parse)
         .unwrap_or_default();
 
+    let healthcheck = args.health_cmd.map(|cmd| {
+        // Split by shell-like whitespace. Simple parser; does not handle quotes.
+        HealthcheckConfig {
+            test: cmd.split_whitespace().map(String::from).collect(),
+            interval: args.health_interval.max(1),
+            timeout: args.health_timeout.max(1),
+            retries: args.health_retries.max(1),
+            start_period: args.health_start_period,
+        }
+    });
+
     Ok(ContainerConfig {
         name,
         image: args.image.clone(),
@@ -666,6 +682,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         mounts,
         gpu,
         restart_policy,
+        healthcheck,
         ..Default::default()
     })
 }
@@ -680,6 +697,7 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
+    use crate::commands::daemon::{ContainerSpec, DaemonRequest, DaemonRequestEnvelope, DaemonResponse, DaemonResponseEnvelope};
 
     let env_strs: Vec<String> = config
         .env
@@ -704,25 +722,24 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
         .map(|dirs| dirs.iter().map(|p| serde_json::Value::String(p.display().to_string())).collect())
         .unwrap_or_default();
 
-    let req = serde_json::json!({
-        "type": "run",
-        "content": {
-            "spec": {
-                "name": config.name,
-                "image": config.image,
-                "workdir": config.workdir.to_string_lossy(),
-                "env": env_strs,
-                "command": config.command,
-                "mounts": mounts_json,
-                "overlay_lowerdirs": lowerdirs_json,
-            }
-        }
-    });
+    let spec = ContainerSpec {
+        name: config.name.clone(),
+        image: config.image.clone(),
+        workdir: config.workdir.to_string_lossy().to_string(),
+        env: env_strs,
+        command: config.command.clone(),
+        mounts: serde_json::from_value(serde_json::Value::Array(mounts_json))
+            .unwrap_or_default(),
+        overlay_lowerdirs: Some(lowerdirs_json.into_iter().map(|v| v.as_str().unwrap_or("").to_string()).collect()),
+    };
+
+    let envelope = DaemonRequestEnvelope::new(DaemonRequest::Run { spec });
 
     let mut stream = UnixStream::connect("/tmp/exo-daemon.sock")
         .map_err(|e| anyhow::anyhow!("connect daemon socket: {}", e))?;
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
-    stream.write_all(req.to_string().as_bytes())?;
+    let req_json = serde_json::to_string(&envelope)?;
+    stream.write_all(req_json.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
 
@@ -730,18 +747,11 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
-    let resp: serde_json::Value = serde_json::from_str(line.trim())?;
-    let resp_type = resp.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    match resp_type {
-        "ok" => Ok(config.name.clone()),
-        "error" => {
-            let msg = resp
-                .get("content")
-                .and_then(|c| c.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("daemon returned error");
-            anyhow::bail!("{}", msg)
-        }
-        other => anyhow::bail!("unexpected daemon response type: {}", other),
+    let envelope: DaemonResponseEnvelope = serde_json::from_str(line.trim())
+        .map_err(|e| anyhow::anyhow!("invalid daemon response: {}", e))?;
+    match envelope.response {
+        DaemonResponse::Ok { .. } => Ok(config.name.clone()),
+        DaemonResponse::Error { message } => anyhow::bail!("{}", message),
+        other => anyhow::bail!("unexpected daemon response type: {:?}", other),
     }
 }

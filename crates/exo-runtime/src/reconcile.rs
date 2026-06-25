@@ -415,6 +415,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_healthy_when_pid_alive() {
         let (rec, _state, _cg) = make_reconciler();
         // Use our own pid — guaranteed alive.

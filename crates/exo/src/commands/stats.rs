@@ -30,17 +30,16 @@ async fn execute_linux(args: StatsArgs) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
+    use crate::commands::daemon::{DaemonRequest, DaemonRequestEnvelope, DaemonResponse, DaemonResponseEnvelope};
 
-    let req = serde_json::json!({
-        "type": "stats",
-        "content": {
-            "container_id": args.container
-        }
+    let envelope = DaemonRequestEnvelope::new(DaemonRequest::Stats {
+        container_id: args.container.clone(),
     });
 
     let mut stream = UnixStream::connect("/tmp/exo-daemon.sock")?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.write_all(req.to_string().as_bytes())?;
+    let req_json = serde_json::to_string(&envelope)?;
+    stream.write_all(req_json.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
 
@@ -48,28 +47,15 @@ async fn execute_linux(args: StatsArgs) -> Result<()> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
-    let resp: serde_json::Value = serde_json::from_str(line.trim())?;
-    let resp_type = resp.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let envelope: DaemonResponseEnvelope = serde_json::from_str(line.trim())
+        .map_err(|e| anyhow::anyhow!("invalid daemon response: {}", e))?;
 
-    if resp_type == "error" {
-        let msg = resp
-            .get("content")
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("daemon returned error");
-        anyhow::bail!("{}", msg);
-    }
-
-    if resp_type != "stats" {
-        anyhow::bail!("unexpected daemon response type: {}", resp_type);
-    }
-
-    let stats_json = resp
-        .get("content")
-        .and_then(|c| c.get("stats"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("{}");
-    let payload: serde_json::Value = serde_json::from_str(stats_json)?;
+    let stats = match envelope.response {
+        DaemonResponse::Error { message } => anyhow::bail!("{}", message),
+        DaemonResponse::Stats { stats } => stats,
+        other => anyhow::bail!("unexpected daemon response type: {:?}", other),
+    };
+    let payload: serde_json::Value = serde_json::from_str(&stats)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&payload)?);

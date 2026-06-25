@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::{DaemonMetrics, spawn_server, spawn_sampler, DEFAULT_METRICS_ADDR};
+
 /// Tokio runtime handle captured at daemon startup so worker threads (which
 /// run outside the tokio context) can `block_on` async work like image pulls.
 #[cfg(unix)]
@@ -317,6 +319,20 @@ fn run_daemon(config: DaemonConfig) -> Result<()> {
 
     // Build the reconciler.
     let manager = Arc::new(ContainerManager::new()?);
+
+    // Set up Prometheus metrics.
+    let metrics = Arc::new(DaemonMetrics::new()?);
+    let metrics_addr = std::env::var("EXO_METRICS_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| DEFAULT_METRICS_ADDR.parse().expect("default metrics address is valid"));
+    let metrics_interval_ms: u64 = std::env::var("EXO_METRICS_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5_000);
+    spawn_server(metrics_addr, metrics.clone());
+    spawn_sampler(manager.clone(), metrics.clone(), Duration::from_millis(metrics_interval_ms));
+
     let reconcile_interval_ms: u64 = std::env::var("EXO_RECONCILE_INTERVAL_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -488,22 +504,29 @@ fn handle_client(
         return Ok(());
     }
 
-    let request: DaemonRequest = match serde_json::from_str(&line) {
-        Ok(r) => r,
+    let envelope: DaemonRequestEnvelope = match serde_json::from_str(&line) {
+        Ok(e) => e,
         Err(e) => {
-            let error_response = DaemonResponse::Error {
-                message: format!("Invalid request: {}", e),
-            };
-            let response_json = serde_json::to_string(&error_response)?;
-            stream.write_all(response_json.as_bytes())?;
-            stream.write_all(b"\n")?;
+            write_error(&mut stream, &format!("Invalid request: {}", e));
             stream.flush()?;
             return Ok(());
         }
     };
 
+    if !is_supported_version(&envelope.version) {
+        write_error(
+            &mut stream,
+            &format!(
+                "Unsupported API version {}. Supported: {}",
+                envelope.version, API_VERSION
+            ),
+        );
+        stream.flush()?;
+        return Ok(());
+    }
+
     // Process request
-    let response: DaemonResponse = match request {
+    let response: DaemonResponse = match envelope.request {
         DaemonRequest::Run { spec } => {
             execute_run(&spec, events, start_sem)
         }
@@ -528,7 +551,7 @@ fn handle_client(
     };
 
     // Send response
-    let response_json = serde_json::to_string(&response)?;
+    let response_json = encode_response(response)?;
     stream.write_all(response_json.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -967,7 +990,7 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
 /// Daemon request types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
-enum DaemonRequest {
+pub enum DaemonRequest {
     #[serde(rename = "run")]
     Run { spec: ContainerSpec },
 
@@ -993,7 +1016,7 @@ enum DaemonRequest {
 /// Daemon response types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
-enum DaemonResponse {
+pub enum DaemonResponse {
     #[serde(rename = "ok")]
     Ok { message: String },
 
@@ -1011,4 +1034,75 @@ enum DaemonResponse {
 
     #[serde(rename = "pong")]
     Pong,
+}
+
+/// Current daemon API version. Bumping the major component is a breaking
+/// change; clients sending an unsupported major version are rejected.
+pub const API_VERSION: &str = "1";
+
+/// Request envelope for the versioned daemon protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonRequestEnvelope {
+    #[serde(default = "default_version")]
+    pub version: String,
+    #[serde(flatten)]
+    pub request: DaemonRequest,
+}
+
+impl DaemonRequestEnvelope {
+    pub fn new(request: DaemonRequest) -> Self {
+        Self {
+            version: API_VERSION.to_string(),
+            request,
+        }
+    }
+}
+
+fn default_version() -> String {
+    API_VERSION.to_string()
+}
+
+/// Response envelope for the versioned daemon protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonResponseEnvelope {
+    pub version: String,
+    #[serde(flatten)]
+    pub response: DaemonResponse,
+}
+
+impl DaemonResponseEnvelope {
+    pub fn new(response: DaemonResponse) -> Self {
+        Self {
+            version: API_VERSION.to_string(),
+            response,
+        }
+    }
+}
+
+/// Parse a major version string (e.g. "1.2" -> 1). Returns `None` if invalid.
+fn parse_major_version(version: &str) -> Option<u32> {
+    version.split('.').next()?.parse().ok()
+}
+
+/// Check whether the daemon supports the requested API version.
+fn is_supported_version(version: &str) -> bool {
+    parse_major_version(version) == Some(parse_major_version(API_VERSION).unwrap_or(1))
+}
+
+/// Wrap a response in the current version envelope and serialize it.
+fn encode_response(response: DaemonResponse) -> anyhow::Result<String> {
+    let envelope = DaemonResponseEnvelope::new(response);
+    serde_json::to_string(&envelope).map_err(|e| e.into())
+}
+
+/// Send a serialized error response to the stream.
+#[cfg(unix)]
+fn write_error(stream: &mut UnixStream, message: &str) {
+    let resp = DaemonResponseEnvelope::new(DaemonResponse::Error {
+        message: message.to_string(),
+    });
+    if let Ok(json) = serde_json::to_string(&resp) {
+        let _ = stream.write_all(json.as_bytes());
+        let _ = stream.write_all(b"\n");
+    }
 }

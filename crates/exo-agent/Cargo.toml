@@ -11,25 +11,21 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client for LLM APIs
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Database for memory
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
+sqlx = { version = "0.7", default-features = false, features = ["sqlite", "runtime-tokio", "tls-rustls", "macros"], optional = true }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Async utilities
-futures = "0.3"
 
 # Configuration
 toml = "0.8"
@@ -38,16 +34,17 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 
 # UUID for session IDs
-uuid = { version = "1", features = ["v4", "serde"] }
-
-# Time handling
-chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
 
 # Markdown rendering (optional, for formatting)
 pulldown-cmark = { version = "0.10", optional = true }
 
 [features]
-default = []
+default = ["memory", "tools"]
+# SQLite-backed persistent conversation history. Disable for slim, stateless images.
+memory = ["dep:sqlx", "dep:uuid"]
+# Local filesystem/process/web-fetch tools for autonomous tool-calling agents.
+tools = []
 markdown = ["pulldown-cmark"]
 
 [[bin]]

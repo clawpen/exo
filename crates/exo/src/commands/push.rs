@@ -4,6 +4,8 @@ use exo_image::{ImageReference, ImageStore, RegistryClient};
 
 pub struct PushArgs {
     pub image: String,
+    pub sign: bool,
+    pub cosign_key: Option<String>,
 }
 
 pub async fn execute(args: PushArgs) -> anyhow::Result<()> {
@@ -19,5 +21,23 @@ pub async fn execute(args: PushArgs) -> anyhow::Result<()> {
     client.push(&image_ref).await?;
 
     println!("Successfully pushed {}", args.image);
+
+    // Optional cosign signing after push.
+    if args.sign || should_sign_by_env() {
+        let key_path = exo_runtime::resolve_key_path(args.cosign_key.as_deref());
+        match exo_runtime::sign_image(&args.image,
+            key_path.as_deref(),
+        ) {
+            Ok(()) => println!("  Signed {} with cosign", args.image),
+            Err(e) => {
+                anyhow::bail!("Failed to sign image: {}", e);
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn should_sign_by_env() -> bool {
+    std::env::var("EXO_SIGN").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }

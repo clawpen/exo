@@ -10,7 +10,7 @@ General-purpose container runtimes (Docker, containerd) were designed for micros
 
 - **Agent-first communication** — Stdio + tool bus, not HTTP
 - **Tool-level sandboxing** — Each tool gets its own security context
-- **Fast spawning** — Daemonless, spin up in milliseconds
+- **Fast spawning** — Lightweight daemon, spin up in milliseconds
 - **Rootless by default** — User namespaces, no system privileges required
 
 ## Quick Start
@@ -29,6 +29,44 @@ exo ps
 exo stop <container-id>
 ```
 
+## Installation
+
+### macOS / Linux
+
+```bash
+curl -sSL https://get.exo.dev | bash
+```
+
+Or install from source with Rust:
+
+```bash
+git clone https://github.com/clawpen/exo.git
+cd exo
+cargo install --path crates/exo
+```
+
+### Windows
+
+```powershell
+# Scoop (recommended)
+scoop install https://raw.githubusercontent.com/clawpen/exo/main/packaging/scoop/exo.json
+
+# Or download the .exe from GitHub Releases
+```
+
+### Homebrew
+
+```bash
+brew tap clawpen/exo
+brew install exo
+```
+
+### Build a release binary
+
+```bash
+./scripts/build-release.sh 0.1.0
+```
+
 ## Images, build & distribution
 
 Pull, build (from `exo.toml` or a Dockerfile), dedup, inspect, and push agent
@@ -42,6 +80,8 @@ exo push ghcr.io/me/agent:latest
 
 See **[docs/images-and-build.md](docs/images-and-build.md)** for the full workflow
 and **[docs/threat-model.md](docs/threat-model.md)** for the security model.
+
+See **[docs/benchmarks.md](docs/benchmarks.md)** for Docker-vs-Exo benchmark results.
 
 ## Architecture
 
