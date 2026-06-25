@@ -11,9 +11,9 @@
 //! - [`Reconciler::run_recovery_pass`] — called once at daemon startup,
 //!   *before* accepting connections. Honors `RestartPolicy::OnDaemonRestart`.
 //!
-//! - [`Reconciler::run_loop`] — periodic background task. Does *not* honor
-//!   restart policy: a container dying on its own merits should not be
-//!   automatically restarted (only daemon-crash recovery should restart).
+//! - [`Reconciler::run_loop`] — periodic background task. Honors `Always` and
+//!   `OnFailure` restart policies with exponential backoff. A container dying on
+//!   its own is restarted only when the policy says so.
 //!
 //! Each per-container reconcile is independent + idempotent, so a daemon
 //! crash mid-cycle still converges on the next pass.
@@ -163,13 +163,14 @@ impl Reconciler {
             tokio::select! {
                 _ = ticker.tick() => {
                     let me = self.clone();
-                    let summary = tokio::task::spawn_blocking(move || me.run_once(false))
+                    // Periodic loop may restart containers with Always/OnFailure.
+                    let summary = tokio::task::spawn_blocking(move || me.run_once(true))
                         .await
                         .unwrap_or_default();
                     if summary.exited + summary.orphaned + summary.stale + summary.errors > 0 {
                         tracing::debug!(
-                            "reconciler tick: healthy={}, exited={}, orphaned={}, stale={}, errors={}",
-                            summary.healthy, summary.exited, summary.orphaned, summary.stale, summary.errors
+                            "reconciler tick: healthy={}, exited={}, restarted={}, orphaned={}, stale={}, errors={}",
+                            summary.healthy, summary.exited, summary.restarted, summary.orphaned, summary.stale, summary.errors
                         );
                     }
                 }
@@ -234,7 +235,9 @@ impl Reconciler {
         let id = metadata.id.clone();
         let policy = metadata.config.restart_policy;
 
-        metadata.set_stopped(None);
+        // Unknown exit code from the reconciler path: treat as failure for
+        // OnFailure policy purposes.
+        metadata.set_stopped(Some(1));
         if let Err(e) = self.manager.save(&metadata) {
             tracing::warn!("reconciler: failed to mark {} exited: {}", name, e);
             summary.errors += 1;
@@ -244,10 +247,18 @@ impl Reconciler {
         self.emit(&id, &name, EventType::Exited, Some("reconciler-detected"));
         summary.exited += 1;
 
-        // Restart if recovery pass + policy allows.
-        if allow_restart && policy == RestartPolicy::OnDaemonRestart {
+        // Decide whether to restart based on policy and backoff.
+        let should_restart = match policy {
+            RestartPolicy::No => false,
+            RestartPolicy::OnDaemonRestart => allow_restart,
+            RestartPolicy::Always => true,
+            RestartPolicy::OnFailure => metadata.exit_code != Some(0),
+        };
+
+        if should_restart && metadata.restart_backoff_elapsed(1, 60) {
             match self.restart(&mut metadata) {
                 Ok(()) => {
+                    metadata.reset_restart_backoff();
                     if let Err(e) = self.manager.save(&metadata) {
                         tracing::warn!("reconciler: restart of {} succeeded but save failed: {}", name, e);
                         summary.errors += 1;
@@ -257,6 +268,8 @@ impl Reconciler {
                     }
                 }
                 Err(e) => {
+                    metadata.record_restart();
+                    let _ = self.manager.save(&metadata);
                     tracing::warn!("reconciler: restart of {} failed: {}", name, e);
                     summary.errors += 1;
                 }

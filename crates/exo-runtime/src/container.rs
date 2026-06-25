@@ -4,6 +4,7 @@ use crate::config::ContainerConfig;
 use crate::process::ContainerProcess;
 use crate::cgroup::CgroupManager;
 use crate::rootfs;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use crate::process::enter_container_namespaces;
 use anyhow::Result;
@@ -329,12 +330,20 @@ impl Container {
         }
 
         let cgroup = self.cgroup_manager.as_ref().unwrap();
+        let (io_rbytes, io_wbytes) = cgroup.get_io_stats().unwrap_or((0, 0));
+        let (cpu_periods, cpu_throttled, cpu_throttled_usec) =
+            cgroup.get_cpu_throttling().unwrap_or((0, 0, 0));
 
         Ok(ContainerStats {
             memory_usage: Some(cgroup.get_memory_usage()?),
             memory_limit: cgroup.get_memory_limit()?,
             cpu_usage: Some(cgroup.get_cpu_usage()?),
             pids: cgroup.get_processes()?.len() as u64,
+            io_rbytes,
+            io_wbytes,
+            cpu_periods,
+            cpu_throttled,
+            cpu_throttled_usec,
         })
     }
 
@@ -387,7 +396,7 @@ impl Container {
 }
 
 /// Container resource usage statistics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerStats {
     /// Current memory usage in bytes
     pub memory_usage: Option<u64>,
@@ -400,6 +409,18 @@ pub struct ContainerStats {
 
     /// Number of processes
     pub pids: u64,
+
+    /// Cumulative I/O read bytes
+    pub io_rbytes: u64,
+    /// Cumulative I/O write bytes
+    pub io_wbytes: u64,
+
+    /// CPU throttle periods
+    pub cpu_periods: u64,
+    /// Periods in which the cgroup was throttled
+    pub cpu_throttled: u64,
+    /// Time the cgroup was throttled, in microseconds
+    pub cpu_throttled_usec: u64,
 }
 
 impl Default for ContainerStats {
@@ -409,6 +430,11 @@ impl Default for ContainerStats {
             memory_limit: None,
             cpu_usage: None,
             pids: 0,
+            io_rbytes: 0,
+            io_wbytes: 0,
+            cpu_periods: 0,
+            cpu_throttled: 0,
+            cpu_throttled_usec: 0,
         }
     }
 }

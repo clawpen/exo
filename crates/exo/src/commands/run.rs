@@ -21,6 +21,7 @@ pub struct RunArgs {
     pub memory: Option<String>,
     pub cpu: Option<String>,
     pub network: Option<String>,
+    pub restart: Option<String>,
     pub publish: Vec<String>,
     pub rm: bool,
     pub interactive: bool,
@@ -647,6 +648,12 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         ..Default::default()
     };
 
+    let restart_policy = args
+        .restart
+        .as_deref()
+        .and_then(exo_runtime::config::RestartPolicy::parse)
+        .unwrap_or_default();
+
     Ok(ContainerConfig {
         name,
         image: args.image.clone(),
@@ -658,6 +665,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         network,
         mounts,
         gpu,
+        restart_policy,
         ..Default::default()
     })
 }

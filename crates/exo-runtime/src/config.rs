@@ -81,18 +81,33 @@ pub struct ContainerConfig {
 }
 
 /// When the reconciler should re-spawn a container whose process has died.
-///
-/// Intentionally minimal — `Always`, `OnFailure`, backoff and max-retry counts
-/// are deferred to v2 (see `project_v2_restart_policy.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RestartPolicy {
-    /// Record the exit, do not restart.
+    /// Do not restart (Docker-compatible `no`).
     #[default]
-    Never,
+    #[serde(alias = "never")]
+    No,
+    /// Restart only on non-zero exit (Docker-compatible `on-failure`).
+    OnFailure,
+    /// Always restart (Docker-compatible `always`).
+    Always,
     /// Restart only when discovered during the daemon's startup recovery pass
     /// (i.e., the daemon itself died — not the container exiting on its own).
     OnDaemonRestart,
+}
+
+impl RestartPolicy {
+    /// Parse from Docker-style strings (`no`, `on-failure`, `always`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "no" | "never" => Some(RestartPolicy::No),
+            "on-failure" => Some(RestartPolicy::OnFailure),
+            "always" => Some(RestartPolicy::Always),
+            "on-daemon-restart" | "on_daemon_restart" => Some(RestartPolicy::OnDaemonRestart),
+            _ => None,
+        }
+    }
 }
 
 impl Default for ContainerConfig {

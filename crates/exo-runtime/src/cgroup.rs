@@ -491,6 +491,59 @@ impl CgroupManager {
         Ok(pids)
     }
 
+    /// Get cumulative I/O bytes from `io.stat`. Returns `(rbytes, wbytes)`.
+    /// Best-effort: returns (0, 0) if the file is missing or unparseable.
+    pub fn get_io_stats(&self) -> Result<(u64, u64)> {
+        self.ensure_initialized()?;
+
+        let io_stat = self.cgroup_path.join("io.stat");
+        let content = match fs::read_to_string(&io_stat) {
+            Ok(c) => c,
+            Err(_) => return Ok((0, 0)),
+        };
+
+        let mut rbytes = 0u64;
+        let mut wbytes = 0u64;
+        for line in content.lines() {
+            // Lines look like: "8:0 rbytes=1234 wbytes=5678"
+            // or "rbytes=1234 wbytes=5678" for the cgroup aggregate.
+            for token in line.split_whitespace() {
+                if let Some(v) = token.strip_prefix("rbytes=") {
+                    rbytes += v.parse::<u64>().unwrap_or(0);
+                } else if let Some(v) = token.strip_prefix("wbytes=") {
+                    wbytes += v.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        Ok((rbytes, wbytes))
+    }
+
+    /// Get CPU throttling metrics from `cpu.stat`: returns `(nr_periods,
+    /// nr_throttled, throttled_usec)`. Best-effort: returns zeros if unavailable.
+    pub fn get_cpu_throttling(&self) -> Result<(u64, u64, u64)> {
+        self.ensure_initialized()?;
+
+        let cpu_stat = self.cgroup_path.join("cpu.stat");
+        let content = match fs::read_to_string(&cpu_stat) {
+            Ok(c) => c,
+            Err(_) => return Ok((0, 0, 0)),
+        };
+
+        let mut periods = 0u64;
+        let mut throttled = 0u64;
+        let mut throttled_usec = 0u64;
+        for line in content.lines() {
+            if let Some(v) = line.strip_prefix("nr_periods ") {
+                periods = v.parse::<u64>().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("nr_throttled ") {
+                throttled = v.parse::<u64>().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("throttled_usec ") {
+                throttled_usec = v.parse::<u64>().unwrap_or(0);
+            }
+        }
+        Ok((periods, throttled, throttled_usec))
+    }
+
     /// Check if cgroup v2 is available on the system.
     pub fn is_cgroup_v2() -> bool {
         let mountinfo = PathBuf::from("/proc/self/mountinfo");

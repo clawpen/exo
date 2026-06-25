@@ -75,6 +75,10 @@ enum Commands {
         #[arg(long, value_name = "MODE")]
         network: Option<String>,
 
+        /// Restart policy (no, on-failure, always)
+        #[arg(long, value_name = "POLICY")]
+        restart: Option<String>,
+
         /// Port mappings (host:container)
         #[arg(short, long, value_name = "HOST:CONT")]
         publish: Vec<String>,
@@ -235,6 +239,16 @@ enum Commands {
         name: Option<String>,
     },
 
+    /// Show resource usage statistics for a container
+    Stats {
+        /// Container ID or name
+        container: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show the daemon's lifecycle event log
     Events {
         /// Filter to one container (by id or name)
@@ -337,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the appropriate command
     match cli.command {
-        Commands::Run { image, command, name, config, workdir, volume, env, gpu, gpu_type, memory, cpu, network, publish, rm, interactive, tty, detach } => {
+        Commands::Run { image, command, name, config, workdir, volume, env, gpu, gpu_type, memory, cpu, network, restart, publish, rm, interactive, tty, detach } => {
             commands::run::execute(commands::run::RunArgs {
                 image,
                 command,
@@ -351,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
                 memory,
                 cpu,
                 network,
+                restart,
                 publish,
                 rm,
                 interactive,
@@ -401,6 +416,9 @@ async fn main() -> anyhow::Result<()> {
                 tarball: PathBuf::from(tarball),
                 name,
             }).await?
+        }
+        Commands::Stats { container, json } => {
+            commands::stats::execute(commands::stats::StatsArgs { container, json }).await?
         }
         Commands::Events { container, limit, json } => {
             commands::events::execute(commands::events::EventsArgs { container, limit, json }).await?

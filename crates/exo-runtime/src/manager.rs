@@ -48,6 +48,14 @@ pub struct ContainerMetadata {
     /// Exit code (if exited)
     pub exit_code: Option<i32>,
 
+    /// Number of consecutive unexpected restarts (for backoff).
+    #[serde(default)]
+    pub restart_count: u32,
+
+    /// Last time the container was restarted by the reconciler.
+    #[serde(default)]
+    pub last_restart_at: Option<DateTime<Utc>>,
+
     /// Full container configuration (for restart)
     pub config: ContainerConfig,
 
@@ -72,6 +80,8 @@ impl ContainerMetadata {
             started_at: None,
             stopped_at: None,
             exit_code: None,
+            restart_count: 0,
+            last_restart_at: None,
             config,
             ports: vec![],
             labels: HashMap::new(),
@@ -92,6 +102,35 @@ impl ContainerMetadata {
         self.pid = None;
         self.stopped_at = Some(Utc::now());
         self.exit_code = exit_code;
+    }
+
+    /// Record a reconciler-driven restart and return whether the backoff delay
+    /// has elapsed. `base_seconds` is the initial backoff; delay doubles each
+    /// consecutive restart up to `max_seconds`.
+    pub fn restart_backoff_elapsed(
+        &self,
+        base_seconds: u64,
+        max_seconds: u64,
+    ) -> bool {
+        let Some(last) = self.last_restart_at else {
+            return true;
+        };
+        let delay = (2u64.pow(self.restart_count.min(16)) * base_seconds)
+            .min(max_seconds);
+        let elapsed = Utc::now().signed_duration_since(last);
+        elapsed.to_std().map(|d| d.as_secs() >= delay).unwrap_or(true)
+    }
+
+    /// Record that the reconciler just restarted this container.
+    pub fn record_restart(&mut self) {
+        self.restart_count += 1;
+        self.last_restart_at = Some(Utc::now());
+    }
+
+    /// Reset restart backoff after a clean start.
+    pub fn reset_restart_backoff(&mut self) {
+        self.restart_count = 0;
+        self.last_restart_at = None;
     }
 
     /// Check if container is running.

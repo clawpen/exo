@@ -21,8 +21,8 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(unix)]
 use exo_runtime::{
-    Container, ContainerJson, ContainerListJson, ContainerManager, ContainerMetadata,
-    EventLog, EventType, ReconcileOptions, Reconciler,
+    CgroupManager, Container, ContainerJson, ContainerListJson, ContainerManager,
+    ContainerMetadata, EventLog, EventType, ReconcileOptions, Reconciler,
 };
 #[cfg(unix)]
 use tokio::sync::Semaphore;
@@ -516,6 +516,9 @@ fn handle_client(
         DaemonRequest::Status { container_id } => {
             execute_status(&container_id)
         }
+        DaemonRequest::Stats { container_id } => {
+            execute_stats(&container_id)
+        }
         DaemonRequest::Ping => {
             DaemonResponse::Pong
         }
@@ -827,6 +830,60 @@ fn execute_status(container_id: &str) -> DaemonResponse {
     }
 }
 
+#[cfg(unix)]
+fn execute_stats(container_id: &str) -> DaemonResponse {
+    let manager = match ContainerManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            return DaemonResponse::Error {
+                message: format!("Failed to open state dir: {}", e),
+            };
+        }
+    };
+
+    match manager.find(container_id) {
+        Ok(Some(mut m)) => {
+            let _ = manager.refresh_status(&mut m);
+            let stats = if m.is_running() {
+                let cgroup = CgroupManager::new(&m.name).unwrap_or_default();
+                cgroup.get_memory_usage().ok().map(|memory_usage| {
+                    let (io_rbytes, io_wbytes) = cgroup.get_io_stats().unwrap_or((0, 0));
+                    let (cpu_periods, cpu_throttled, cpu_throttled_usec) =
+                        cgroup.get_cpu_throttling().unwrap_or((0, 0, 0));
+                    serde_json::json!({
+                        "memory_usage": memory_usage,
+                        "memory_limit": cgroup.get_memory_limit().unwrap_or(None),
+                        "cpu_usage_ns": cgroup.get_cpu_usage().unwrap_or(0),
+                        "pids": cgroup.get_processes().unwrap_or_default().len() as u64,
+                        "io_rbytes": io_rbytes,
+                        "io_wbytes": io_wbytes,
+                        "cpu_periods": cpu_periods,
+                        "cpu_throttled": cpu_throttled,
+                        "cpu_throttled_usec": cpu_throttled_usec,
+                    })
+                })
+            } else {
+                None
+            };
+
+            let payload = serde_json::json!({
+                "container": m.name,
+                "status": m.status,
+                "stats": stats,
+            });
+            DaemonResponse::Stats {
+                stats: payload.to_string(),
+            }
+        }
+        Ok(None) => DaemonResponse::Error {
+            message: format!("Container not found: {}", container_id),
+        },
+        Err(e) => DaemonResponse::Error {
+            message: format!("Lookup failed: {}", e),
+        },
+    }
+}
+
 /// Prepare the image rootfs for `image` before `Container::new` looks for it.
 ///
 /// 1. Parse the image reference.
@@ -923,6 +980,9 @@ enum DaemonRequest {
     #[serde(rename = "status")]
     Status { container_id: String },
 
+    #[serde(rename = "stats")]
+    Stats { container_id: String },
+
     #[serde(rename = "ping")]
     Ping,
 
@@ -945,6 +1005,9 @@ enum DaemonResponse {
 
     #[serde(rename = "status")]
     Status { container: String, status: String },
+
+    #[serde(rename = "stats")]
+    Stats { stats: String },
 
     #[serde(rename = "pong")]
     Pong,
