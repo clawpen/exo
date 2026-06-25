@@ -2,6 +2,7 @@
 
 > From **agent runtime** → **Docker-replacement product**.
 > Branch: `exo-enterprise`. Created 2026-06-19.
+> Last audited: 2026-06-24. `[~]` = partially implemented; see inline notes.
 
 ## Thesis
 
@@ -40,7 +41,7 @@ The differentiator we lead with. Measured by `scripts/bench-vs-docker.sh` →
 - [x] `scripts/bench-vs-docker.sh` harness (disk / spawn / idle RSS / summary JSON)
 - [ ] Density sub-benchmark: ramp N containers, record RSS/container & failure point
 - [ ] CI job publishing `results/bench-*.json` as artifacts per commit (regression gate)
-- [ ] `docs/benchmarks.md` with reproducible methodology + a results table
+- [x] `docs/benchmarks.md` with reproducible methodology + a results table
 - [ ] One-shot reproducer container so external users can verify our claims
 
 Where the wins come from (validate each with the harness, don't assume):
@@ -79,7 +80,7 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 - [x] Generate OCI config (ENV/CMD/workdir + uncompressed diff_ids) + manifest so
       built images are `push`able (`crates/exo-image/src/oci_build.rs`, 1 test;
       verified end-to-end: built image yields a valid OCI manifest + config)
-- [ ] Execute RUN steps via the runtime's container-exec path *(needs live machine)*
+- [ ] Execute RUN steps via the runtime's container-exec path *(parsed but skipped; needs live machine)*
 - [x] Dockerfile subset (FROM/RUN/COPY/ADD/ENV/CMD/WORKDIR, line continuations,
       exec+shell forms) as alternate input — `exo build -f Dockerfile -t name`
       (3 tests; verified end-to-end; inherits default-deny egress)
@@ -90,25 +91,25 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
 
 ## E3 — Local networking (single-host primitives only)
 > Mesh/discovery stays in Claw Pen. Exo provides the local plumbing it can't.
-- [ ] Bridge (`exo0`) + veth pair + IP allocation per container
-- [ ] `-p host:container` publish via nftables
-- [ ] Container-local DNS + `/etc/hosts`
-- [ ] `network mode` already in CLI — wire up `bridge|host|none` backends
+- [ ] Bridge (`exo0`) + veth pair + IP allocation per container *(not started; socat/ncat fallback in Linux, WSL stubs fall back to 127.0.0.1)*
+- [~] `-p host:container` publish via nftables *(port maps parsed, but implemented with socat/ncat on Linux, iptables in WSL, netsh on Windows — no nftables)*
+- [~] Container-local DNS + `/etc/hosts` *(WSL writes static hosts to state dir only; native Linux runtime does not inject resolv.conf/hosts into rootfs)*
+- [~] `network mode` already in CLI — wire up `bridge|host|none` backends *(CLI parses `--network`, runtime only uses isolated vs shared boolean; no backend dispatch)*
 
 ## E4 — Runtime completeness
-- [ ] Full writable overlay via fuse-overlayfs (finish the rootless gap from old roadmap)
-- [ ] `exo stats` — live cgroup metrics (CPU/mem/io)
+- [~] Full writable overlay via fuse-overlayfs *(kernel overlay attempted first, fuse-overlayfs fallback via `std::process::Command`; read-only fallback on total failure)*
+- [~] `exo stats` — live cgroup metrics *(Container::stats() + CgroupManager read mem/cpu/pids, but no `stats` CLI command exists)*
 - [ ] Healthcheck primitive (`--health-cmd`) + status surfaced in `list`
-- [ ] `--restart` policies (no/on-failure/always) in the daemon reconciler
-- [ ] `exo cp`, `exo inspect`, `exo events` (events partially present)
+- [~] `--restart` policies (no/on-failure/always) in the daemon reconciler *(enum has only `Never`/`OnDaemonRestart`; periodic loop does not restart; no `--restart` CLI flag)*
+- [~] `exo cp`, `exo inspect`, `exo events` *(events done; `image inspect` exists; container `inspect` and `cp` missing)*
 
 ## E5 — Programmability & trust (enterprise table stakes)
-- [ ] Stable, versioned daemon API + SDK (formalize the existing Unix socket protocol)
+- [ ] Stable, versioned daemon API + SDK (formalize the existing Unix socket protocol) *(ad-hoc JSON over socket; no version field)*
 - [ ] Image signing/verification (cosign/sigstore) + SBOM emission
 - [ ] Vulnerability scan hook on pull/build
 - [ ] Prometheus `/metrics` endpoint on the daemon
-- [ ] Structured audit log + log rotation
-- [ ] Single-binary installer + package repos; Docker→Exo migration guide
+- [~] Structured audit log + log rotation *(SQLite ring-buffer for lifecycle events in `crates/exo-runtime/src/events.rs`; no file rotation or security audit pipeline)*
+- [~] Single-binary installer + package repos; Docker→Exo migration guide *(WSL dev-only deploy in `crates/exo-wsl/src/deploy.rs`; no packages or migration guide)*
 
 ## E6 — Compose-lite (optional, only if Claw Pen doesn't cover it)
 - [ ] `exo-compose.yml` for multi-container *local* dev stacks (agent + vector DB + tools)
@@ -135,27 +136,27 @@ external pentest and a fuzzing run come back clean and the checklist below is me
       no longer lose updates; stale-lock steal after 30s). `cas.rs`, concurrency test
 - [x] `exo system check [--repair]` — detect dangling image→layer refs + orphan
       layers, repair by unregistering dangling images and pruning. `cas.rs`, 1 test
-- [ ] Fsync + atomic-rename audit across all on-disk writes
+- [~] Fsync + atomic-rename audit across all on-disk writes *(atomic temp-file + rename for index/layers; no systematic fsync audit)*
 - [x] Store-size quota (`EXO_MAX_STORE_BYTES`, default 100 GiB) — extract bails
       with guidance rather than auto-evicting mid-pull. `cas.rs`, 1 test
 - [ ] LRU/last-used eviction policy (auto-reclaim instead of hard fail)
 
 ### Runtime isolation hardening
-- [ ] Seccomp/AppArmor/SELinux profile review + default-deny baseline
-- [ ] Capability-set audit (drop-all default, opt-in adds only)
-- [ ] User-namespace / uid-gid mapping review for the rootless path
-- [ ] Resource-exhaustion limits enforced (pids, memory, fds) even under daemon scale
-- [ ] No-new-privileges, read-only rootfs option, masked /proc paths
+- [~] Seccomp/AppArmor/SELinux profile review + default-deny baseline *(seccomp whitelist/blacklist exists; no AppArmor/SELinux profiles)*
+- [~] Capability-set audit (drop-all default, opt-in adds only) *(capability enum/drop functions exist; no formal audit doc)*
+- [~] User-namespace / uid-gid mapping review for the rootless path *(UidMap/GidMap + setup code exist; no documented review)*
+- [~] Resource-exhaustion limits enforced (pids, memory, fds) even under daemon scale *(cgroup v2 memory/pids/cpu; no fd/rlimit enforcement)*
+- [~] No-new-privileges, read-only rootfs option, masked /proc paths *(no_new_privs + readonly_rootfs implemented; masked_paths declared in AgentProfile but not enforced in rootfs.rs)*
 
 ### Process & operational security
-- [ ] Daemon socket authn/authz + permission hardening (no world-writable socket)
+- [ ] Daemon socket authn/authz + permission hardening (no world-writable socket) *(socket currently chmod'd to 0o777)*
 - [x] Secret-handling review of exo-image: no secrets logged anywhere; added
       redacting Debug impls for RegistryAuth/DockerConfigAuth so future `{:?}`
       logs can't leak credentials. `registry.rs`, 1 test
-- [ ] Extend secret-leak review to daemon/runtime (events, env dumps)
+- [~] Extend secret-leak review to daemon/runtime (events, env dumps) *(image crate done; daemon/runtime not systematically reviewed)*
 - [x] Dependency audit (`cargo audit` + `cargo deny`) wired into CI as a gate
       (`.github/workflows/ci.yml` security job, `deny.toml`)
-- [ ] Clean up legacy warnings, then flip CI fmt/clippy from informational to `-D warnings`
+- [~] Clean up legacy warnings, then flip CI fmt/clippy from informational to `-D warnings` *(`-D warnings` only for `exo-image`; workspace fmt/clippy still `continue-on-error: true`)*
 - [x] Deterministic robustness tests: adversarial input to reference / exo.toml /
       Dockerfile / .exoignore parsers — assert no panic (`reference.rs`, `manifest.rs`,
       `ignore.rs`)
