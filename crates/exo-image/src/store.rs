@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tracing::debug;
 
-use crate::ImageReference;
+use crate::{ImageReference, LayerStore};
 
 /// Image store - manages local image storage.
 #[derive(Clone)]
@@ -58,6 +58,17 @@ impl ImageStore {
         // digest is like "sha256:abc123..."
         let digest = digest.replace(':', "_");
         self.root_path.join("blobs").join(&digest)
+    }
+
+    /// Return overlay lowerdir paths for an image if all its layers are
+    /// whiteout-free and already extracted. Returns `None` if the image is not
+    /// registered or if any layer has whiteouts (in which case the caller should
+    /// fall back to `LayerStore::compose_rootfs`).
+    pub fn overlay_lowerdirs(&self,
+        reference: &ImageReference,
+    ) -> Option<Vec<PathBuf>> {
+        let cas = LayerStore::new(self.root_path.clone());
+        cas.try_overlay_lowerdirs(&reference.to_string())
     }
     
     /// Check if a blob exists.

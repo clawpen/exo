@@ -105,38 +105,52 @@ pub fn get_container_root() -> PathBuf {
 /// Path to the prepared root filesystem (overlay merged view)
 pub fn prepare_rootfs(config: &ContainerConfig) -> Result<PathBuf> {
     let container_id = &config.name;
-    
+    let container_root = get_container_root().join(container_id);
+
+    // Prefer zero-copy overlay lowerdirs when the image store provided them.
+    if let Some(lowerdirs) = config.overlay_lowerdirs.as_ref() {
+        if !lowerdirs.is_empty() {
+            tracing::info!(
+                "Using overlay lowerdir composition with {} layer(s)",
+                lowerdirs.len()
+            );
+            let overlay_paths = OverlayPaths {
+                rootfs: container_root.join(ROOTFS_DIR),
+                upper: container_root.join(UPPER_DIR),
+                work: container_root.join(WORK_DIR),
+                lower: lowerdirs.clone(),
+            };
+            create_overlay_dirs(&overlay_paths)?;
+            store_overlay_config(container_id, &overlay_paths)?;
+            return Ok(overlay_paths.rootfs);
+        }
+    }
+
     // Check if an extracted image rootfs exists
     let image_rootfs = PathBuf::from(IMAGE_ROOTFS_DIR)
         .join(config.image.replace(['/', ':'], "_"));
-    
+
     if image_rootfs.exists() && image_rootfs.join("bin").exists() {
         tracing::info!("Using extracted image rootfs: {:?}", image_rootfs);
-        
-        // Set up overlayfs for writable layer
-        let container_root = get_container_root()
-            .join(container_id);
-        
+
         let overlay_paths = OverlayPaths {
             rootfs: container_root.join(ROOTFS_DIR),
             upper: container_root.join(UPPER_DIR),
             work: container_root.join(WORK_DIR),
-            lower: image_rootfs,
+            lower: vec![image_rootfs],
         };
-        
+
         // Create overlay directories (mount happens in setup_overlay_rootfs)
         create_overlay_dirs(&overlay_paths)?;
-        
+
         // Store overlay info for later mounting
         store_overlay_config(container_id, &overlay_paths)?;
-        
+
         // Return the merged rootfs path (will be mounted later)
         return Ok(overlay_paths.rootfs);
     }
-    
+
     // Fall back to creating a minimal rootfs with bind mounts
-    let container_root = get_container_root()
-        .join(container_id);
     let rootfs_dir = container_root.join(ROOTFS_DIR);
 
     // Create the rootfs directory if it doesn't exist
@@ -162,8 +176,8 @@ pub struct OverlayPaths {
     pub upper: PathBuf,
     /// Overlay work directory
     pub work: PathBuf,
-    /// Lower (read-only) layer - the image rootfs
-    pub lower: PathBuf,
+    /// Lower (read-only) layer directories, ordered highest-first for overlayfs.
+    pub lower: Vec<PathBuf>,
 }
 
 /// Create overlay directories.
@@ -182,18 +196,24 @@ fn store_overlay_config(container_id: &str, paths: &OverlayPaths) -> Result<()> 
     let container_root = get_container_root().join(container_id);
     let config_dir = container_root.join("config");
     create_dir_all(&config_dir)?;
-    
+
+    let lowerdirs: Vec<String> = paths
+        .lower
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+
     let overlay_config = serde_json::json!({
         "rootfs": paths.rootfs,
         "upper": paths.upper,
         "work": paths.work,
-        "lower": paths.lower,
+        "lower": lowerdirs,
     });
-    
+
     let config_path = config_dir.join("overlay.json");
     std::fs::write(&config_path, serde_json::to_string_pretty(&overlay_config)?)
         .with_context(|| format!("Failed to write overlay config: {:?}", config_path))?;
-    
+
     Ok(())
 }
 
@@ -203,22 +223,38 @@ pub fn load_overlay_config(container_id: &str) -> Result<Option<OverlayPaths>> {
         .join(container_id)
         .join("config")
         .join("overlay.json");
-    
+
     if !config_path.exists() {
         return Ok(None);
     }
-    
+
     let content = std::fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read overlay config: {:?}", config_path))?;
-    
+
     let config: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| "Failed to parse overlay config")?;
-    
+
+    let lower = match config["lower"].as_array() {
+        Some(arr) => arr
+            .iter()
+            .map(|v| PathBuf::from(v.as_str().unwrap_or("")))
+            .collect(),
+        None => {
+            // Backwards compatibility: older overlay.json wrote a single string.
+            let single = config["lower"].as_str().unwrap_or("");
+            if single.is_empty() {
+                Vec::new()
+            } else {
+                vec![PathBuf::from(single)]
+            }
+        }
+    };
+
     Ok(Some(OverlayPaths {
         rootfs: PathBuf::from(config["rootfs"].as_str().unwrap_or("")),
         upper: PathBuf::from(config["upper"].as_str().unwrap_or("")),
         work: PathBuf::from(config["work"].as_str().unwrap_or("")),
-        lower: PathBuf::from(config["lower"].as_str().unwrap_or("")),
+        lower,
     }))
 }
 
@@ -241,25 +277,35 @@ pub fn load_overlay_config(container_id: &str) -> Result<Option<OverlayPaths>> {
 pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
     let paths = load_overlay_config(container_id)?
         .ok_or_else(|| anyhow::anyhow!("No overlay config found for container {}", container_id))?;
-    
+
     // Ensure directories exist
     create_overlay_dirs(&paths)?;
-    
-    // Build overlay mount options
-    // Format: lowerdir=<lower>,upperdir=<upper>,workdir=<work>
+
+    if paths.lower.is_empty() {
+        anyhow::bail!("No lowerdir paths configured for container {}", container_id);
+    }
+
+    // Build overlay mount options.
+    // lowerdir=top:middle:base (leftmost is highest, overlayfs semantics).
+    let lowerdir = paths
+        .lower
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
     let options = format!(
         "lowerdir={},upperdir={},workdir={}",
-        paths.lower.display(),
+        lowerdir,
         paths.upper.display(),
         paths.work.display()
     );
-    
+
     tracing::info!("Mounting overlayfs with options: {}", options);
-    
+
     // Try kernel mount first
     let options_cstr = std::ffi::CString::new(options.as_str())
         .context("Invalid mount options")?;
-    
+
     match mount(
         Some("overlay"),
         paths.rootfs.as_path(),
@@ -275,7 +321,7 @@ pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
             tracing::warn!("Kernel overlay mount failed: {}, trying fuse-overlayfs", e);
         }
     }
-    
+
     // Fallback to fuse-overlayfs
     let status = std::process::Command::new("fuse-overlayfs")
         .arg("-o")
@@ -283,12 +329,12 @@ pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
         .arg(&paths.rootfs)
         .status()
         .context("Failed to run fuse-overlayfs")?;
-    
+
     if status.success() {
         tracing::info!("fuse-overlayfs mounted successfully");
         return Ok(paths.rootfs);
     }
-    
+
     // Both failed - return error with read-only fallback hint
     Err(anyhow::anyhow!(
         "Both kernel overlay and fuse-overlayfs failed. Falling back to read-only rootfs."

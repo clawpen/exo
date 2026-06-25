@@ -172,14 +172,22 @@ impl LayerStore {
         self.layer_dir(digest).join(".exo-layer-ok").exists()
     }
 
-    /// Extract a layer tarball (gzip-aware) into the store, exactly once.
+    /// Extract a layer tarball (gzip- or zstd-aware) into the store, exactly once.
     /// No-op if the layer is already present (the dedup fast path).
+    ///
+    /// `media_type` is used as a hint when the blob magic is ambiguous; it is not
+    /// fully trusted because registries can mislabel blobs.
     ///
     /// Hardening: the blob's sha256 is verified against `digest` before any
     /// extraction, so a corrupted or tampered layer can never reach the store
     /// (supply-chain integrity). Tar entries are also confined to the layer dir
     /// (no path-traversal escape) by `unpack_in`.
-    pub fn extract_layer(&self, blob_path: &Path, digest: &str) -> Result<()> {
+    pub fn extract_layer(
+        &self,
+        blob_path: &Path,
+        digest: &str,
+        media_type: Option<&str>,
+    ) -> Result<()> {
         if self.has_layer(digest) {
             trace!("layer {} already extracted — dedup hit", digest);
             return Ok(());
@@ -221,7 +229,7 @@ impl LayerStore {
         std::fs::rename(&tmp, &dest)
             .with_context(|| format!("committing layer {} to store", digest))?;
         std::fs::write(dest.join(".exo-layer-ok"), b"1")?;
-        debug!("extracted layer {} into CAS", digest);
+        debug!("extracted layer {} into CAS (media_type={:?})", digest, media_type);
         Ok(())
     }
 
@@ -252,7 +260,8 @@ impl LayerStore {
         std::fs::create_dir_all(self.root.join("blobs")).ok();
         std::fs::write(&blob_path, &blob)
             .with_context(|| format!("writing built layer blob {:?}", blob_path))?;
-        self.extract_layer(&blob_path, &digest)?;
+        self.extract_layer(&blob_path, &digest, None)
+            .with_context(|| format!("extracting committed layer {}", digest))?;
         debug!("committed built layer {}", digest);
         Ok(digest)
     }
@@ -454,6 +463,51 @@ impl LayerStore {
         Ok(())
     }
 
+    /// Check whether an extracted layer contains any OCI whiteout markers.
+    /// Layers with whiteouts cannot be used directly as overlay lowerdirs because
+    /// overlayfs only interprets whiteouts in the upperdir, not in lower layers.
+    pub fn layer_has_whiteouts(&self, digest: &str) -> bool {
+        self.layer_dir(digest)
+            .join(".wh..wh..opq")
+            .exists()
+            || self.dir_has_wh_entries(&self.layer_dir(digest))
+    }
+
+    fn dir_has_wh_entries(&self, dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else { return false; };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(".wh.") {
+                return true;
+            }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && self.dir_has_wh_entries(&entry.path())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return the layer directories for `image_ref` as an ordered list suitable
+    /// for use as overlay `lowerdir`s (highest layer first), but only if every
+    /// layer is whiteout-free. If any layer contains whiteout markers we fall
+    /// back to `compose_rootfs` so the markers are applied correctly.
+    pub fn try_overlay_lowerdirs(&self,
+        image_ref: &str,
+    ) -> Option<Vec<PathBuf>> {
+        let index = self.load_index().ok()?;
+        let record = index.images.get(image_ref)?;
+        let mut lowerdirs = Vec::with_capacity(record.layers.len());
+        for digest in record.layers.iter().rev() {
+            if !self.has_layer(digest) || self.layer_has_whiteouts(digest) {
+                return None;
+            }
+            lowerdirs.push(self.layer_dir(digest));
+        }
+        Some(lowerdirs)
+    }
+
     /// Inspect a registered image: its layers, their sizes, and how much disk
     /// is shared with other images vs. exclusive to this one.
     pub fn inspect(&self, reference: &str) -> Result<Option<ImageInfo>> {
@@ -592,19 +646,22 @@ fn verify_blob_digest(blob_path: &Path, digest: &str) -> Result<()> {
     Ok(())
 }
 
-/// Raw tar extraction (gzip-aware) that keeps every entry, including `.wh.`
-/// whiteout markers, so they survive into the content-addressed layer dir.
+/// Raw tar extraction (gzip- and zstd-aware) that keeps every entry, including
+/// `.wh.` whiteout markers, so they survive into the content-addressed layer dir.
 /// Aborts if the cumulative declared size exceeds `max_bytes` (bomb guard).
 fn extract_raw(layer_tar: &Path, dest: &Path, max_bytes: u64) -> Result<()> {
     use std::io::Read;
     let mut head = std::fs::File::open(layer_tar)?;
-    let mut magic = [0u8; 2];
+    let mut magic = [0u8; 4];
     let n = head.read(&mut magic)?;
     let gz = n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b;
+    let zst = n >= 4 && magic == [0x28, 0xb5, 0x2f, 0xfd];
 
     let file = std::fs::File::open(layer_tar)?;
     let reader: Box<dyn std::io::Read> = if gz {
         Box::new(flate2::read::GzDecoder::new(file))
+    } else if zst {
+        Box::new(zstd::stream::read::Decoder::new(file)?)
     } else {
         Box::new(file)
     };
@@ -779,6 +836,28 @@ mod tests {
         buf
     }
 
+    /// Build a zstd-compressed tar with the given (path, contents) files.
+    fn make_layer_zstd(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut enc = zstd::stream::write::Encoder::new(&mut buf,
+                zstd::DEFAULT_COMPRESSION_LEVEL,
+            )
+            .unwrap();
+            let mut tar = tar::Builder::new(&mut enc);
+            for (name, data) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append_data(&mut header, name, *data).unwrap();
+            }
+            tar.into_inner().unwrap();
+            enc.finish().unwrap();
+        }
+        buf
+    }
+
     /// Write a layer blob and return (path, its real `sha256:` digest), so the
     /// store's integrity check accepts it just as it would a registry blob.
     fn mklayer(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> (PathBuf, String) {
@@ -798,11 +877,40 @@ mod tests {
         let (blob, d) = mklayer(tmp.path(), "l1.tar.gz", &[("bin/sh", b"shell")]);
 
         assert!(!store.has_layer(&d));
-        store.extract_layer(&blob, &d).unwrap();
+        store.extract_layer(&blob, &d, None).unwrap();
         assert!(store.has_layer(&d));
         // Second extract is a no-op (dedup fast path) and must not error.
-        store.extract_layer(&blob, &d).unwrap();
+        store.extract_layer(&blob, &d, None).unwrap();
         assert!(store.layer_dir(&d).join("bin/sh").exists());
+    }
+
+    #[test]
+    fn extract_handles_zstd_layers() {
+        use sha2::{Digest as _, Sha256};
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+        let bytes = make_layer_zstd(&[("bin/zstd-sh", b"zstd shell"), ("etc/motd", b"hello")]
+        );
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let blob = tmp.path().join("layer.tar.zst");
+        std::fs::write(&blob, &bytes).unwrap();
+
+        store
+            .extract_layer(
+                &blob,
+                &digest,
+                Some("application/vnd.oci.image.layer.v1.tar+zstd"),
+            )
+            .unwrap();
+
+        assert!(store.has_layer(&digest));
+        let layer_dir = store.layer_dir(&digest);
+        assert!(layer_dir.join("bin/zstd-sh").exists());
+        assert_eq!(
+            std::fs::read_to_string(layer_dir.join("bin/zstd-sh")).unwrap(),
+            "zstd shell"
+        );
+        assert!(layer_dir.join("etc/motd").exists());
     }
 
     #[test]
@@ -811,7 +919,7 @@ mod tests {
         // Tiny cap: a layer with a 1 KiB file should be rejected.
         let store = LayerStore::new(tmp.path().to_path_buf()).with_max_layer_bytes(64);
         let (blob, d) = mklayer(tmp.path(), "big.tgz", &[("f", &[0u8; 1024])]);
-        let err = store.extract_layer(&blob, &d).unwrap_err();
+        let err = store.extract_layer(&blob, &d, None).unwrap_err();
         assert!(err.to_string().contains("decompression bomb") ||
                 err.root_cause().to_string().contains("max uncompressed"));
         assert!(!store.has_layer(&d));
@@ -823,17 +931,17 @@ mod tests {
         // First layer lands fine under a generous cap.
         let store = LayerStore::new(tmp.path().to_path_buf());
         let (a, da) = mklayer(tmp.path(), "a.tgz", &[("f", &[0u8; 4096])]);
-        store.extract_layer(&a, &da).unwrap();
+        store.extract_layer(&a, &da, None).unwrap();
         assert!(store.store_physical_bytes() > 0);
 
         // A second store over the same root with a 1-byte cap refuses new layers.
         let capped = LayerStore::new(tmp.path().to_path_buf()).with_max_store_bytes(1);
         let (b, db) = mklayer(tmp.path(), "b.tgz", &[("g", &[0u8; 4096])]);
-        let err = capped.extract_layer(&b, &db).unwrap_err();
+        let err = capped.extract_layer(&b, &db, None).unwrap_err();
         assert!(err.to_string().contains("size limit"));
         assert!(!capped.has_layer(&db));
         // Already-present layers still succeed (dedup fast-path skips the quota).
-        capped.extract_layer(&a, &da).unwrap();
+        capped.extract_layer(&a, &da, None).unwrap();
     }
 
     #[test]
@@ -843,7 +951,7 @@ mod tests {
         let (blob, _real) = mklayer(tmp.path(), "l.tgz", &[("f", b"x")]);
         // Claim a digest that doesn't match the bytes -> integrity check fails.
         let wrong = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-        let err = store.extract_layer(&blob, wrong).unwrap_err();
+        let err = store.extract_layer(&blob, wrong, None).unwrap_err();
         assert!(err.to_string().contains("integrity check failed"));
         assert!(!store.has_layer(wrong));
     }
@@ -857,9 +965,9 @@ mod tests {
         let (base, db) = mklayer(tmp.path(), "base.tgz", &[("lib/libc", &[7u8; 4096])]);
         let (topa, da) = mklayer(tmp.path(), "a.tgz", &[("app/a", &[1u8; 1024])]);
         let (topb, dbb) = mklayer(tmp.path(), "b.tgz", &[("app/b", &[2u8; 1024])]);
-        store.extract_layer(&base, &db).unwrap();
-        store.extract_layer(&topa, &da).unwrap();
-        store.extract_layer(&topb, &dbb).unwrap();
+        store.extract_layer(&base, &db, None).unwrap();
+        store.extract_layer(&topa, &da, None).unwrap();
+        store.extract_layer(&topb, &dbb, None).unwrap();
 
         store.register_image("imgA", vec![db.clone(), da], "c1".into()).unwrap();
         store.register_image("imgB", vec![db.clone(), dbb], "c2".into()).unwrap();
@@ -879,8 +987,8 @@ mod tests {
         let store = LayerStore::new(tmp.path().to_path_buf());
         let (base, db) = mklayer(tmp.path(), "base.tgz", &[("lib", &[7u8; 2048])]);
         let (topa, da) = mklayer(tmp.path(), "a.tgz", &[("a", &[1u8; 1024])]);
-        store.extract_layer(&base, &db).unwrap();
-        store.extract_layer(&topa, &da).unwrap();
+        store.extract_layer(&base, &db, None).unwrap();
+        store.extract_layer(&topa, &da, None).unwrap();
         store.register_image("imgA", vec![db.clone(), da], "c1".into()).unwrap();
         store.register_image("imgB", vec![db], "c2".into()).unwrap();
 
@@ -896,7 +1004,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let store = LayerStore::new(tmp.path().to_path_buf());
         let (base, db) = mklayer(tmp.path(), "base.tgz", &[("f", b"x")]);
-        store.extract_layer(&base, &db).unwrap();
+        store.extract_layer(&base, &db, None).unwrap();
 
         // Healthy image, plus one referencing a layer that was never extracted.
         store.register_image("good", vec![db.clone()], "c".into()).unwrap();
@@ -941,8 +1049,8 @@ mod tests {
         let store = LayerStore::new(tmp.path().to_path_buf());
         let (base, db) = mklayer(tmp.path(), "base.tgz", &[("f", b"x")]);
         let (orphan, dorph) = mklayer(tmp.path(), "o.tgz", &[("g", b"y")]);
-        store.extract_layer(&base, &db).unwrap();
-        store.extract_layer(&orphan, &dorph).unwrap();
+        store.extract_layer(&base, &db, None).unwrap();
+        store.extract_layer(&orphan, &dorph, None).unwrap();
         store.register_image("img", vec![db.clone()], "c".into()).unwrap();
 
         let (removed, _) = store.prune().unwrap();
@@ -1007,13 +1115,44 @@ mod tests {
         let (base, db) = mklayer(tmp.path(), "base.tgz", &[("etc/keep", b"k"), ("etc/gone", b"g")]);
         // Top layer overrides `keep` and whiteouts `gone`.
         let (top, dt) = mklayer(tmp.path(), "top.tgz", &[("etc/keep", b"k2"), ("etc/.wh.gone", b"")]);
-        store.extract_layer(&base, &db).unwrap();
-        store.extract_layer(&top, &dt).unwrap();
+        store.extract_layer(&base, &db, None).unwrap();
+        store.extract_layer(&top, &dt, None).unwrap();
 
         let rootfs = tmp.path().join("rootfs-img");
         store.compose_rootfs(&rootfs, &[db, dt]).unwrap();
 
         assert_eq!(std::fs::read(rootfs.join("etc/keep")).unwrap(), b"k2");
         assert!(!rootfs.join("etc/gone").exists());
+    }
+
+    #[test]
+    fn try_overlay_lowerdirs_skips_whiteouts() {
+        let tmp = tempdir().unwrap();
+        let store = LayerStore::new(tmp.path().to_path_buf());
+
+        // Base layer is clean.
+        let (base, db) = mklayer(tmp.path(), "base.tgz", &[("etc/keep", b"k")]);
+        // Top layer whiteouts a file — not safe for direct lowerdir use.
+        let (top, dt) = mklayer(
+            tmp.path(),
+            "top.tgz",
+            &[("etc/keep", b"k2"), ("etc/.wh.gone", b"")],
+        );
+        store.extract_layer(&base, &db, None).unwrap();
+        store.extract_layer(&top, &dt, None).unwrap();
+
+        // Image with a whiteout must not be exposed as overlay lowerdirs.
+        store
+            .register_image("img-whiteouts", vec![db.clone(), dt.clone()], "c1".into())
+            .unwrap();
+        assert!(store.try_overlay_lowerdirs("img-whiteouts").is_none());
+
+        // Clean image can be exposed as overlay lowerdirs (highest first).
+        store
+            .register_image("img-clean", vec![db.clone()], "c2".into())
+            .unwrap();
+        let lowerdirs = store.try_overlay_lowerdirs("img-clean").unwrap();
+        assert_eq!(lowerdirs.len(), 1);
+        assert!(lowerdirs[0].ends_with(sanitize(&db)));
     }
 }

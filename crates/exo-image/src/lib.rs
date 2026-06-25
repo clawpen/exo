@@ -69,20 +69,24 @@ pub fn extract_layer(layer_tar: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(layer_tar)
         .with_context(|| format!("Failed to open layer: {:?}", layer_tar))?;
     
-    // OCI/Docker layers are typically gzipped, but may not have .gz extension
-    // Try to detect gzip magic bytes
+    // OCI/Docker layers are typically gzipped, but may be zstd or uncompressed.
+    // Detect compression magic bytes.
     let mut reader = std::io::BufReader::new(file);
-    let mut magic = [0u8; 2];
+    let mut magic = [0u8; 4];
     let bytes_read = reader.read(&mut magic)?;
-    
+
     // Reset reader position by reopening the file
     let file = std::fs::File::open(layer_tar)?;
-    
+
     let is_gzipped = bytes_read >= 2 && magic[0] == 0x1f && magic[1] == 0x8b;
-    
+    let is_zstd = bytes_read >= 4 && magic == [0x28, 0xb5, 0x2f, 0xfd];
+
     let reader: Box<dyn std::io::Read> = if is_gzipped {
         debug!("Detected gzip compression for layer");
         Box::new(flate2::read::GzDecoder::new(file))
+    } else if is_zstd {
+        debug!("Detected zstd compression for layer");
+        Box::new(zstd::stream::read::Decoder::new(file)?)
     } else {
         Box::new(file)
     };

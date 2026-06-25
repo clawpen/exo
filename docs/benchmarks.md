@@ -112,6 +112,19 @@ Measured under Docker, using the fixed image variants:
 
 The slim image is roughly 26%-27% smaller than standard by Docker inspect size.
 
+## Storage efficiency
+
+Exo stores images in a content-addressed layer store (`~/.exo/layers/`). Each
+layer is extracted once and shared across images via hardlinks. On hosts where
+the kernel allows overlay mounts, Exo can mount the shared layer directories
+directly as overlay `lowerdir`s, eliminating the per-image `rootfs/` copy
+entirely. The disk-savings number therefore comes from two effects:
+
+1. Cross-image layer deduplication (shared inodes).
+2. Zero-copy overlay composition when layers are whiteout-free.
+
+Run `exo system df` to see physical vs logical bytes and the dedup ratio.
+
 ## Density (containers per GB RAM)
 
 The density benchmark ramps detached containers in batches and records

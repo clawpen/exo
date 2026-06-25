@@ -479,6 +479,7 @@ mod tests {
             architecture: None,
             platform: None,
             restart_policy: Default::default(),
+            overlay_lowerdirs: None,
         }
     }
 

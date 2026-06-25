@@ -337,7 +337,7 @@ async fn execute_with_daemon(
 }
 
 #[cfg(not(windows))]
-async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
+async fn execute_linux(mut config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
     use exo_runtime::{Container, ContainerStatus};
     use exo_gpu::{GpuConfig, GpuType};
 
@@ -395,14 +395,28 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
     let _rootfs = match image_manager.ensure_rootfs(&image_ref).await {
         Ok(path) => {
             tracing::info!("Image rootfs ready at: {:?}", path);
-            // Create a symlink so the runtime can find it (Linux only)
-            #[cfg(unix)]
-            {
-                let link_path = std::path::PathBuf::from("/tmp/exo-images/rootfs")
-                    .join(config.image.replace(['/', ':'], "_"));
-                if !link_path.exists() {
-                    let _ = std::fs::create_dir_all(link_path.parent().unwrap());
-                    let _ = std::os::unix::fs::symlink(&path, &link_path);
+
+            // Try zero-copy overlay lowerdir composition first.
+            match image_manager.storage().overlay_lowerdirs(&image_ref) {
+                Some(lowerdirs) if !lowerdirs.is_empty() => {
+                    tracing::info!(
+                        "Using {} overlay lowerdir(s) for {}",
+                        lowerdirs.len(),
+                        config.image
+                    );
+                    config.overlay_lowerdirs = Some(lowerdirs);
+                }
+                _ => {
+                    // Fall back to the pre-composed rootfs path the runtime expects.
+                    #[cfg(unix)]
+                    {
+                        let link_path = std::path::PathBuf::from("/tmp/exo-images/rootfs")
+                            .join(config.image.replace(['/', ':'], "_"));
+                        if !link_path.exists() {
+                            let _ = std::fs::create_dir_all(link_path.parent().unwrap());
+                            let _ = std::os::unix::fs::symlink(&path, &link_path);
+                        }
+                    }
                 }
             }
             path
@@ -676,6 +690,12 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
         })
         .collect();
 
+    let lowerdirs_json: Vec<serde_json::Value> = config
+        .overlay_lowerdirs
+        .as_ref()
+        .map(|dirs| dirs.iter().map(|p| serde_json::Value::String(p.display().to_string())).collect())
+        .unwrap_or_default();
+
     let req = serde_json::json!({
         "type": "run",
         "content": {
@@ -686,6 +706,7 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
                 "env": env_strs,
                 "command": config.command,
                 "mounts": mounts_json,
+                "overlay_lowerdirs": lowerdirs_json,
             }
         }
     });

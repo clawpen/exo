@@ -740,7 +740,7 @@ impl RegistryClient {
         for layer in manifest.layers() {
             let digest = layer.digest().to_string();
             let blob_path = self.store.blob_path(&digest);
-            cas.extract_layer(&blob_path, &digest)?;
+            cas.extract_layer(&blob_path, &digest, Some(layer.media_type().as_ref()))?;
             layer_digests.push(digest);
         }
 

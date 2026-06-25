@@ -23,6 +23,7 @@ oci-spec = "0.7"
 # Archive handling
 tar = "0.4"
 flate2 = "1.0"
+zstd = "0.13"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zstd"], optional = true }
 
 # HTTP client for pulling images

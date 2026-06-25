@@ -79,6 +79,10 @@ pub struct ContainerSpec {
     pub env: Vec<String>,
     pub command: Vec<String>,
     pub mounts: Vec<MountSpec>,
+    /// Optional overlay lowerdir paths (highest-first). When present, the daemon
+    /// mounts these layer directories directly instead of relying on a
+    /// pre-composed rootfs symlink.
+    pub overlay_lowerdirs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -584,6 +588,9 @@ fn execute_run(
         network: Default::default(),
         mounts: mounts_vec,
         gpu: None,
+        overlay_lowerdirs: spec.overlay_lowerdirs.as_ref().map(|dirs| {
+            dirs.iter().map(PathBuf::from).collect()
+        }),
         ..Default::default()
     };
 

@@ -72,6 +72,12 @@ pub struct ContainerConfig {
     /// Defaults to Never (record exit, no restart).
     #[serde(default)]
     pub restart_policy: RestartPolicy,
+
+    /// Optional list of overlay lowerdir paths. When present and whiteout-free,
+    /// the runtime mounts these layer directories directly instead of building a
+    /// per-image hardlink-composed rootfs.
+    #[serde(default)]
+    pub overlay_lowerdirs: Option<Vec<PathBuf>>,
 }
 
 /// When the reconciler should re-spawn a container whose process has died.
@@ -109,6 +115,7 @@ impl Default for ContainerConfig {
             architecture: None,
             platform: None,
             restart_policy: RestartPolicy::default(),
+            overlay_lowerdirs: None,
         }
     }
 }

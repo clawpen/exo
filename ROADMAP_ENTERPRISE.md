@@ -64,8 +64,8 @@ OCI-compatible at the boundary so we inherit the whole ecosystem.
       existing blobs, monolithic blob upload, manifest PUT by tag
 - [x] `exo rmi` — unregister image + auto-prune its now-orphaned layers
 - [x] `exo image inspect` — per-layer size, refcount, shared-vs-exclusive disk
-- [ ] Optional: zstd layer compression + lazy/stargz pull (further space + cold-start win)
-- [ ] Follow-up: switch rootfs composition to overlay lowerdirs where the kernel
+- [~] Optional: zstd layer compression + lazy/stargz pull (further space + cold-start win) *(zstd decompression on pull implemented; lazy/stargz pull deferred — requires FUSE daemon + HTTP Range client)*
+- [x] Follow-up: switch rootfs composition to overlay lowerdirs where the kernel
       allows it (zero-copy vs hardlink), keeping hardlink as the rootless fallback
 
 ## E2 — Build  [IN PROGRESS]
