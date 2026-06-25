@@ -60,3 +60,34 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  benchmark:
+    name: Benchmark vs Docker (non-gating)
+    runs-on: ubuntu-latest
+    # Informational until the benchmark suite is proven stable on CI runners.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p exo
+
+      - name: Run head-to-head benchmark
+        run: ./scripts/bench-vs-docker.sh
+        env:
+          EXO_BIN: ${{ github.workspace }}/target/release/exo
+
+      - name: Run density benchmark
+        run: ./scripts/bench-density.sh
+        env:
+          EXO_BIN: ${{ github.workspace }}/target/release/exo
+          MAX: 200
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: results/bench-*.json
+          if-no-files-found: ignore

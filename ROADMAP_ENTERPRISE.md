@@ -39,10 +39,10 @@ The differentiator we lead with. Measured by `scripts/bench-vs-docker.sh` →
 
 ### E0 — Prove it (do this first; it's the sales story)
 - [x] `scripts/bench-vs-docker.sh` harness (disk / spawn / idle RSS / summary JSON)
-- [ ] Density sub-benchmark: ramp N containers, record RSS/container & failure point
-- [ ] CI job publishing `results/bench-*.json` as artifacts per commit (regression gate)
+- [x] Density sub-benchmark: ramp N containers, record RSS/container & failure point
+- [x] CI job publishing `results/bench-*.json` as artifacts per commit (regression gate)
 - [x] `docs/benchmarks.md` with reproducible methodology + a results table
-- [ ] One-shot reproducer container so external users can verify our claims
+- [x] One-shot reproducer container so external users can verify our claims
 
 Where the wins come from (validate each with the harness, don't assume):
 - Content-addressed dedup across shared base layers (E1)

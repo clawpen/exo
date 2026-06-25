@@ -315,6 +315,7 @@ impl Reconciler {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     fn kill_cgroup_pids(&self, cgroup_dir: &Path) {
         let procs = cgroup_dir.join("cgroup.procs");
         let Ok(content) = std::fs::read_to_string(&procs) else { return; };
@@ -323,6 +324,11 @@ impl Reconciler {
             // SIGKILL — orphans get no grace period.
             unsafe { libc::kill(pid, libc::SIGKILL); }
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn kill_cgroup_pids(&self, _cgroup_dir: &Path) {
+        // Cgroups are Linux-only; nothing to do on other platforms.
     }
 
     fn cleanup_cgroup(&self, name: &str) {

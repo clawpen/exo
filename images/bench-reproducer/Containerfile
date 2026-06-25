@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+# One-shot reproducer for Exo vs Docker benchmarks.
+#
+# Build from the repo root so the build context includes the source and scripts:
+#
+#   docker build -t exo-bench-reproducer:latest -f images/bench-reproducer/Containerfile .
+#
+# Run with a mounted Docker socket and output directory:
+#
+#   docker run --rm \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v $(pwd)/results:/results \
+#     exo-bench-reproducer:latest
+#
+# The container emits JSON results to /results and prints a Markdown summary.
+
+# -----------------------------------------------------------------------------
+# Stage 1: Build the exo release binary.
+# -----------------------------------------------------------------------------
+FROM rust:1.82-bookworm AS builder
+
+WORKDIR /src
+COPY . /src
+
+RUN cargo build --release -p exo
+
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime image with Docker CLI and the benchmark suite.
+# -----------------------------------------------------------------------------
+FROM docker:27-dind-rootless
+
+USER root
+
+# Install tools needed by the benchmark scripts.
+RUN apk add --no-cache bash jq coreutils procps curl
+
+# Copy benchmark scripts.
+COPY scripts/bench-vs-docker.sh /usr/local/bin/bench-vs-docker.sh
+COPY scripts/bench-density.sh /usr/local/bin/bench-density.sh
+COPY scripts/bench-openclaw.sh /usr/local/bin/bench-openclaw.sh
+COPY scripts/bench-to-markdown.ps1 /usr/local/bin/bench-to-markdown.ps1
+RUN chmod +x /usr/local/bin/bench-vs-docker.sh /usr/local/bin/bench-density.sh /usr/local/bin/bench-openclaw.sh
+
+# Copy the built exo binary.
+COPY --from=builder /src/target/release/exo /usr/local/bin/exo
+RUN chmod +x /usr/local/bin/exo
+
+# Output directory for results.
+ENV OUT_DIR=/results
+ENV EXO_BIN=/usr/local/bin/exo
+ENV DOCKER_BIN=/usr/local/bin/docker
+
+WORKDIR /results
+
+# Entrypoint runs the full benchmark suite and emits Markdown.
+COPY images/bench-reproducer/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
