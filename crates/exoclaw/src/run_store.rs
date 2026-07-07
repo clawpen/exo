@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// How long to wait for a run's append lock before giving up.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+/// A lock file older than this is treated as stale and reclaimed.
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -139,6 +145,14 @@ impl RunStore {
         self.run_dir(run_id).join("mailbox.jsonl")
     }
 
+    pub fn mailbox_seq_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("mailbox.seq")
+    }
+
+    pub fn lock_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join(".append.lock")
+    }
+
     pub fn input_path(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("input.json")
     }
@@ -165,6 +179,25 @@ impl RunStore {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    pub fn list_run_ids(&self) -> Result<Vec<String>> {
+        let mut ids = vec![];
+        if !self.root.exists() {
+            return Ok(ids);
+        }
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            if self.state_path(&id).exists() {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
     pub fn save_input<T: Serialize>(&self, run_id: &str, input: &T) -> Result<()> {
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
@@ -182,6 +215,7 @@ impl RunStore {
     pub fn append_event(&self, run_id: &str, event_type: &str, message: &str) -> Result<()> {
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
+        let _lock = AppendLock::acquire(self.lock_path(run_id))?;
         let event = RunEvent {
             timestamp_ms: now_ms(),
             run_id: run_id.to_string(),
@@ -208,8 +242,9 @@ impl RunStore {
     pub fn append_mailbox_event(&self, mut event: MailboxEvent) -> Result<MailboxEvent> {
         let dir = self.run_dir(&event.run_id);
         std::fs::create_dir_all(&dir)?;
+        let _lock = AppendLock::acquire(self.lock_path(&event.run_id))?;
         let path = self.mailbox_path(&event.run_id);
-        event.sequence = self.next_mailbox_sequence(&event.run_id)?;
+        event.sequence = self.reserve_next_mailbox_sequence(&event.run_id)?;
         event.timestamp_ms = now_ms();
         if event.event_id.is_empty() {
             event.event_id = format!("evt-{}", uuid::Uuid::new_v4());
@@ -242,12 +277,21 @@ impl RunStore {
             .collect())
     }
 
-    fn next_mailbox_sequence(&self, run_id: &str) -> Result<u64> {
-        Ok(self
-            .read_mailbox(run_id)?
-            .last()
-            .map(|event| event.sequence + 1)
-            .unwrap_or(1))
+    fn reserve_next_mailbox_sequence(&self, run_id: &str) -> Result<u64> {
+        let seq_path = self.mailbox_seq_path(run_id);
+        let current = match std::fs::read_to_string(&seq_path) {
+            Ok(text) => text.trim().parse::<u64>().unwrap_or(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self
+                .read_mailbox(run_id)?
+                .last()
+                .map(|event| event.sequence)
+                .unwrap_or(0),
+            Err(e) => return Err(e).with_context(|| format!("read {}", seq_path.display())),
+        };
+        let next = current + 1;
+        std::fs::write(&seq_path, format!("{}\n", next))
+            .with_context(|| format!("write {}", seq_path.display()))?;
+        Ok(next)
     }
 }
 
@@ -275,6 +319,62 @@ fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> 
         items.push(item);
     }
     Ok(items)
+}
+
+struct AppendLock {
+    path: PathBuf,
+}
+
+impl AppendLock {
+    fn acquire(path: PathBuf) -> Result<Self> {
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}:{}", std::process::id(), now_ms())?;
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(&path)? {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    if Instant::now() >= deadline {
+                        anyhow::bail!("timed out waiting for append lock {}", path.display());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("create append lock {}", path.display()))
+                }
+            }
+        }
+    }
+}
+
+impl Drop for AppendLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn lock_is_stale(path: &Path) -> Result<bool> {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("stat lock {}", path.display())),
+    };
+    let Ok(modified) = meta.modified() else {
+        return Ok(false);
+    };
+    Ok(modified
+        .elapsed()
+        .map(|age| age > LOCK_STALE_AFTER)
+        .unwrap_or(false))
 }
 
 #[cfg(test)]
@@ -336,6 +436,13 @@ mod tests {
         assert_eq!(first.sequence, 1);
         assert_eq!(second.sequence, 2);
         assert!(!first.event_id.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(store.mailbox_seq_path("run-1"))
+                .unwrap()
+                .trim(),
+            "2"
+        );
+        assert!(!store.lock_path("run-1").exists());
 
         let all = store.read_mailbox("run-1").unwrap();
         assert_eq!(all.len(), 2);

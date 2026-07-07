@@ -176,9 +176,12 @@ Status: **implemented / needs Orchestre hardening**
       native `exo run`.
 - [x] Stable `orchestrate-run --json-input ... --json` contract documented
       for Orchestre.
+- [x] Run inspection commands (`exoclaw orchestrate-list`,
+      `exoclaw orchestrate-status`).
 - [x] Persist orchestration state to disk (`state.json`, `events.jsonl`, `artifacts/`).
 - [ ] Spawn real `exo-agent` LLM workers as Exo processes.
 - [x] Agent-to-agent durable mailbox/event log (`mailbox.jsonl`, `exoclaw event-log`).
+- [x] Locked mailbox appends with persistent sequence counter (`mailbox.seq`).
 - [x] Mechanical resume after failure/restart (`exoclaw orchestrate-resume`).
 - [ ] Orchestre-owned goal-level resume policy.
 
@@ -204,7 +207,8 @@ cat > "$tmpdir/input.json" <<'JSON'
   "objective": "Confirm stable JSON orchestration API and persistent run state for Orchestre",
   "success_criteria": ["planner completed", "builder completed", "verifier completed"],
   "executor": { "type": "builtin" },
-  "run_id": "orch-smoke-json"
+  "run_id": "orch-smoke-json",
+  "max_rounds": 24
 }
 JSON
 exoclaw orchestrate-run --json-input "$tmpdir/input.json" --state-dir "$tmpdir/state" --json
@@ -212,10 +216,14 @@ test -f "$tmpdir/state/orch-smoke-json/state.json"
 test -f "$tmpdir/state/orch-smoke-json/input.json"
 test -f "$tmpdir/state/orch-smoke-json/events.jsonl"
 test -f "$tmpdir/state/orch-smoke-json/mailbox.jsonl"
+test -f "$tmpdir/state/orch-smoke-json/mailbox.seq"
 exoclaw event-log append --run-id orch-smoke-json --state-dir "$tmpdir/state" \
   --kind sleep --from-agent planner --payload-json '{"last_seen_sequence":3}' \
   "planner sleeping until more work arrives"
 exoclaw event-log list --run-id orch-smoke-json --state-dir "$tmpdir/state" \
   --agent planner --json
+exoclaw orchestrate-list --state-dir "$tmpdir/state" --json
+exoclaw orchestrate-status orch-smoke-json --state-dir "$tmpdir/state" \
+  --include-mailbox --json
 exoclaw orchestrate-resume orch-smoke-json --state-dir "$tmpdir/state" --json
 ```

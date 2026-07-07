@@ -130,6 +130,10 @@ enum Commands {
         /// Explicit run id; generated if omitted
         #[arg(long)]
         run_id: Option<String>,
+
+        /// Maximum coordinator rounds/prompts before blocking
+        #[arg(long)]
+        max_rounds: Option<u32>,
     },
 
     /// Resume a previously persisted orchestration run
@@ -179,6 +183,43 @@ enum Commands {
         sandbox: Option<String>,
 
         /// Output final orchestration state as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum coordinator rounds/prompts before blocking
+        #[arg(long)]
+        max_rounds: Option<u32>,
+    },
+
+    /// List persisted orchestration runs
+    OrchestrateList {
+        /// State directory containing run directories
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+
+        /// Print run summaries as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one persisted orchestration run
+    OrchestrateStatus {
+        /// Run id
+        run_id: String,
+
+        /// State directory containing run directories
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+
+        /// Include mailbox events in JSON output
+        #[arg(long)]
+        include_mailbox: bool,
+
+        /// Include lifecycle events in JSON output
+        #[arg(long)]
+        include_events: bool,
+
+        /// Print status as JSON
         #[arg(long)]
         json: bool,
     },
@@ -264,6 +305,8 @@ struct OrchestrateRunInput {
     #[serde(default)]
     pub executor: ExecutorConfig,
     pub run_id: Option<String>,
+    #[serde(default = "default_orchestrate_run_max_rounds")]
+    pub max_rounds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +352,10 @@ fn default_exo_agent_cmd() -> String {
     "cat".to_string()
 }
 
+fn default_orchestrate_run_max_rounds() -> u32 {
+    24
+}
+
 #[derive(Debug, Serialize)]
 struct OrchestrateRunOutput<'a> {
     pub run_id: &'a str,
@@ -317,6 +364,31 @@ struct OrchestrateRunOutput<'a> {
     pub events_path: String,
     pub mailbox_path: String,
     pub state: &'a exoclaw::OrchestrationState,
+}
+
+#[derive(Debug, Serialize)]
+struct RunSummary {
+    pub run_id: String,
+    pub status: exoclaw::OrchestrationStatus,
+    pub outcome: Option<RunOutcome>,
+    pub objective: String,
+    pub round: u32,
+    pub max_rounds: u32,
+    pub task_count: usize,
+    pub report_count: usize,
+    pub state_path: String,
+    pub events_path: String,
+    pub mailbox_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RunStatusOutput {
+    pub summary: RunSummary,
+    pub record: RunRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<exoclaw::RunEvent>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mailbox: Option<Vec<MailboxEvent>>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -356,6 +428,7 @@ fn main() -> anyhow::Result<()> {
             json_input,
             state_dir,
             run_id,
+            max_rounds,
         } => orchestrate_run(OrchestrateRunArgs {
             objective: directive,
             success_criteria: success,
@@ -373,6 +446,7 @@ fn main() -> anyhow::Result<()> {
             json_input,
             state_dir,
             run_id,
+            max_rounds,
         }),
         Commands::OrchestrateResume {
             run_id,
@@ -387,6 +461,7 @@ fn main() -> anyhow::Result<()> {
             secrets,
             sandbox,
             json,
+            max_rounds,
         } => orchestrate_resume(OrchestrateResumeArgs {
             run_id,
             state_dir,
@@ -400,7 +475,16 @@ fn main() -> anyhow::Result<()> {
             secrets,
             sandbox,
             json,
+            max_rounds,
         }),
+        Commands::OrchestrateList { state_dir, json } => orchestrate_list(state_dir, json),
+        Commands::OrchestrateStatus {
+            run_id,
+            state_dir,
+            include_mailbox,
+            include_events,
+            json,
+        } => orchestrate_status(run_id, state_dir, include_mailbox, include_events, json),
         Commands::EventLog { command } => event_log(command),
     }
 }
@@ -557,6 +641,7 @@ struct OrchestrateRunArgs {
     json_input: Option<std::path::PathBuf>,
     state_dir: Option<std::path::PathBuf>,
     run_id: Option<String>,
+    max_rounds: Option<u32>,
 }
 
 struct OrchestrateResumeArgs {
@@ -572,6 +657,7 @@ struct OrchestrateResumeArgs {
     secrets: Vec<String>,
     sandbox: Option<String>,
     json: bool,
+    max_rounds: Option<u32>,
 }
 
 struct StoreRunObserver {
@@ -691,19 +777,24 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
                 ExecutorConfig::Builtin
             },
             run_id: args.run_id,
+            max_rounds: args
+                .max_rounds
+                .unwrap_or_else(default_orchestrate_run_max_rounds),
         }
     };
 
     let run_id = input.run_id.clone().unwrap_or_else(new_run_id);
+    let max_rounds = args.max_rounds.unwrap_or(input.max_rounds);
     let resolved_input = OrchestrateRunInput {
         run_id: Some(run_id.clone()),
+        max_rounds,
         ..input.clone()
     };
     let directive = PrimeDirective {
         objective: input.objective.clone(),
         success_criteria: input.success_criteria.clone(),
         constraints: input.constraints.clone(),
-        max_rounds: 24,
+        max_rounds,
     };
     let mut orchestrator = Orchestrator::new(directive, default_agent_roles());
     let store = if let Some(dir) = args.state_dir {
@@ -774,7 +865,11 @@ fn orchestrate_resume(args: OrchestrateResumeArgs) -> anyhow::Result<()> {
     let store = open_run_store(args.state_dir.clone())?;
     let record = store.load(&args.run_id)?;
     let previous_status = record.state.status;
-    let mut orchestrator = Orchestrator::from_state(record.state);
+    let mut state = record.state;
+    if let Some(max_rounds) = args.max_rounds {
+        state.directive.max_rounds = max_rounds;
+    }
+    let mut orchestrator = Orchestrator::from_state(state);
     let executor_config = resume_executor_config(&args, &store)?;
 
     store.append_event(&args.run_id, "resumed", "orchestration run resumed")?;
@@ -825,6 +920,95 @@ fn orchestrate_resume(args: OrchestrateResumeArgs) -> anyhow::Result<()> {
     println!("Rounds: {}", outcome.rounds);
     println!("{}", outcome.message);
     Ok(())
+}
+
+fn orchestrate_list(state_dir: Option<std::path::PathBuf>, json: bool) -> anyhow::Result<()> {
+    let store = open_run_store(state_dir)?;
+    let mut summaries = vec![];
+    for run_id in store.list_run_ids()? {
+        match store.load(&run_id) {
+            Ok(record) => summaries.push(run_summary(&store, &record)),
+            Err(e) => eprintln!("warning: failed to load run {}: {}", run_id, e),
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summaries)?);
+    } else {
+        for summary in summaries {
+            println!(
+                "{} [{:?}] round {}/{} tasks={} reports={} - {}",
+                summary.run_id,
+                summary.status,
+                summary.round,
+                summary.max_rounds,
+                summary.task_count,
+                summary.report_count,
+                summary.objective
+            );
+        }
+    }
+    Ok(())
+}
+
+fn orchestrate_status(
+    run_id: String,
+    state_dir: Option<std::path::PathBuf>,
+    include_mailbox: bool,
+    include_events: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let store = open_run_store(state_dir)?;
+    let record = store.load(&run_id)?;
+    let output = RunStatusOutput {
+        summary: run_summary(&store, &record),
+        record,
+        events: if include_events {
+            Some(store.read_events(&run_id)?)
+        } else {
+            None
+        },
+        mailbox: if include_mailbox {
+            Some(store.read_mailbox(&run_id)?)
+        } else {
+            None
+        },
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Run ID: {}", output.summary.run_id);
+        println!("Status: {:?}", output.summary.status);
+        println!("Outcome: {:?}", output.summary.outcome);
+        println!(
+            "Rounds: {}/{}",
+            output.summary.round, output.summary.max_rounds
+        );
+        println!("Tasks: {}", output.summary.task_count);
+        println!("Reports: {}", output.summary.report_count);
+        println!("Objective: {}", output.summary.objective);
+        println!("State: {}", output.summary.state_path);
+        println!("Events: {}", output.summary.events_path);
+        println!("Mailbox: {}", output.summary.mailbox_path);
+    }
+    Ok(())
+}
+
+fn run_summary(store: &RunStore, record: &RunRecord) -> RunSummary {
+    RunSummary {
+        run_id: record.run_id.clone(),
+        status: record.state.status,
+        outcome: record.outcome.clone(),
+        objective: record.state.directive.objective.clone(),
+        round: record.state.round,
+        max_rounds: record.state.directive.max_rounds,
+        task_count: record.state.tasks.len(),
+        report_count: record.state.reports.len(),
+        state_path: store.state_path(&record.run_id).display().to_string(),
+        events_path: store.events_path(&record.run_id).display().to_string(),
+        mailbox_path: store.mailbox_path(&record.run_id).display().to_string(),
+    }
 }
 
 fn resume_executor_config(

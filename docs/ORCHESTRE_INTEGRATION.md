@@ -50,7 +50,8 @@ Minimum request:
   ],
   "constraints": ["keep daemon light"],
   "executor": { "type": "builtin" },
-  "run_id": "orch-demo-001"
+  "run_id": "orch-demo-001",
+  "max_rounds": 24
 }
 ```
 
@@ -63,6 +64,7 @@ Fields:
 | `constraints` | string[] | no | Constraints injected into agent prompts. Defaults to `[]`. |
 | `executor` | object | no | Executor config. Defaults to `{ "type": "builtin" }`. |
 | `run_id` | string/null | no | Durable run id. If omitted, Exo generates `orch-<uuid>`. |
+| `max_rounds` | number | no | Coordinator prompt budget before blocking. Defaults to `24`. |
 
 Success matching is deliberately simple for now: each success criterion is split
 into alphanumeric words, words of length `<= 3` are ignored, and every remaining
@@ -231,6 +233,8 @@ Current durable pieces:
 - `state.json`: latest coordinator state and final/in-progress outcome.
 - `input.json`: resolved original request/executor config used as resume default.
 - `mailbox.jsonl`: ordered inter-agent/coordinator events with sequence numbers.
+- `mailbox.seq`: last reserved mailbox sequence number.
+- `.append.lock`: short-lived append lock used to serialize lifecycle/mailbox writes.
 - `events.jsonl`: coarse lifecycle audit events such as `started`/`finished`.
 - `artifacts/`: files produced by agents or copied in by Orchestre.
 
@@ -252,6 +256,7 @@ For run id `orch-demo-001` and state dir `/path/to/orchestrations`:
     ├── input.json
     ├── events.jsonl
     ├── mailbox.jsonl
+    ├── mailbox.seq
     └── artifacts/
 ```
 
@@ -307,7 +312,9 @@ Current event types:
 
 `mailbox.jsonl` is the append-only inter-agent event log. Every event has a
 monotonic `sequence` so an agent can persist "last seen sequence N", sleep, and
-later read only events where `sequence > N`.
+later read only events where `sequence > N`. Appends are serialized with a
+short-lived lock file and use `mailbox.seq` to avoid re-scanning the full log on
+every write.
 
 Example events:
 
@@ -330,6 +337,26 @@ Built-in runner event kinds today:
 
 External Orchestre/agent event kinds can include `message`, `checkpoint`,
 `sleep`, `wake`, `artifact`, or any other stable string.
+
+### Run inspection CLI
+
+List persisted runs:
+
+```bash
+exoclaw orchestrate-list \
+  --state-dir /path/to/orchestrations \
+  --json
+```
+
+Show one run, optionally including audit and mailbox logs:
+
+```bash
+exoclaw orchestrate-status orch-demo-001 \
+  --state-dir /path/to/orchestrations \
+  --include-events \
+  --include-mailbox \
+  --json
+```
 
 ### Resume CLI
 
@@ -408,7 +435,8 @@ cat > "$tmpdir/input.json" <<'JSON'
     "verifier completed"
   ],
   "executor": { "type": "builtin" },
-  "run_id": "orch-smoke-json"
+  "run_id": "orch-smoke-json",
+  "max_rounds": 24
 }
 JSON
 
@@ -434,13 +462,23 @@ exoclaw event-log list \
   --agent planner \
   --json
 
+exoclaw orchestrate-list \
+  --state-dir "$tmpdir/state" \
+  --json
+
+exoclaw orchestrate-status orch-smoke-json \
+  --state-dir "$tmpdir/state" \
+  --include-mailbox \
+  --json
+
 exoclaw orchestrate-resume orch-smoke-json \
   --state-dir "$tmpdir/state" \
   --json
 ```
 
 Expected outcome: `outcome.status` is `succeeded`, and `state.json`,
-`input.json`, `events.jsonl`, and `mailbox.jsonl` exist under the run directory.
+`input.json`, `events.jsonl`, `mailbox.jsonl`, and `mailbox.seq` exist under the
+run directory.
 
 ## Current limitations / next integration work
 
