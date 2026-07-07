@@ -132,6 +132,57 @@ enum Commands {
         run_id: Option<String>,
     },
 
+    /// Resume a previously persisted orchestration run
+    OrchestrateResume {
+        /// Run id
+        run_id: String,
+
+        /// State directory containing run directories
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+
+        /// Command used for every agent. Receives AgentPrompt JSON on stdin and
+        /// should print AgentReport JSON on stdout.
+        #[arg(long)]
+        agent_cmd: Option<String>,
+
+        /// Use `exo run` as the agent executor
+        #[arg(long)]
+        use_exo: bool,
+
+        /// Exo binary path for --use-exo
+        #[arg(long, default_value = "exo")]
+        exo_bin: String,
+
+        /// Exo backend for --use-exo
+        #[arg(long, default_value = "native")]
+        exo_backend: String,
+
+        /// Exo image for --use-exo
+        #[arg(long, default_value = "host")]
+        exo_image: String,
+
+        /// Agent command for --use-exo
+        #[arg(long, default_value = "cat")]
+        exo_agent_cmd: String,
+
+        /// Volume mount for --use-exo (SRC:DEST), repeatable
+        #[arg(long = "volume")]
+        volumes: Vec<String>,
+
+        /// Secret to pass to exo run for --use-exo, repeatable
+        #[arg(long = "secret")]
+        secrets: Vec<String>,
+
+        /// Sandbox mode for --use-exo (auto/off/required)
+        #[arg(long)]
+        sandbox: Option<String>,
+
+        /// Output final orchestration state as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Append/read the durable run mailbox event log
     EventLog {
         #[command(subcommand)]
@@ -323,6 +374,33 @@ fn main() -> anyhow::Result<()> {
             state_dir,
             run_id,
         }),
+        Commands::OrchestrateResume {
+            run_id,
+            state_dir,
+            agent_cmd,
+            use_exo,
+            exo_bin,
+            exo_backend,
+            exo_image,
+            exo_agent_cmd,
+            volumes,
+            secrets,
+            sandbox,
+            json,
+        } => orchestrate_resume(OrchestrateResumeArgs {
+            run_id,
+            state_dir,
+            agent_cmd,
+            use_exo,
+            exo_bin,
+            exo_backend,
+            exo_image,
+            exo_agent_cmd,
+            volumes,
+            secrets,
+            sandbox,
+            json,
+        }),
         Commands::EventLog { command } => event_log(command),
     }
 }
@@ -481,6 +559,21 @@ struct OrchestrateRunArgs {
     run_id: Option<String>,
 }
 
+struct OrchestrateResumeArgs {
+    run_id: String,
+    state_dir: Option<std::path::PathBuf>,
+    agent_cmd: Option<String>,
+    use_exo: bool,
+    exo_bin: String,
+    exo_backend: String,
+    exo_image: String,
+    exo_agent_cmd: String,
+    volumes: Vec<String>,
+    secrets: Vec<String>,
+    sandbox: Option<String>,
+    json: bool,
+}
+
 struct StoreRunObserver {
     store: RunStore,
     run_id: String,
@@ -601,20 +694,25 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
         }
     };
 
+    let run_id = input.run_id.clone().unwrap_or_else(new_run_id);
+    let resolved_input = OrchestrateRunInput {
+        run_id: Some(run_id.clone()),
+        ..input.clone()
+    };
     let directive = PrimeDirective {
-        objective: input.objective,
-        success_criteria: input.success_criteria,
-        constraints: input.constraints,
+        objective: input.objective.clone(),
+        success_criteria: input.success_criteria.clone(),
+        constraints: input.constraints.clone(),
         max_rounds: 24,
     };
     let mut orchestrator = Orchestrator::new(directive, default_agent_roles());
-    let run_id = input.run_id.unwrap_or_else(new_run_id);
     let store = if let Some(dir) = args.state_dir {
         RunStore::new(dir)?
     } else {
         RunStore::new_default()?
     };
 
+    store.save_input(&run_id, &resolved_input)?;
     store.save(&RunRecord {
         run_id: run_id.clone(),
         state: orchestrator.state().clone(),
@@ -632,35 +730,7 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
     )?;
     let mut observer = StoreRunObserver::new(store.clone(), run_id.clone());
 
-    let outcome = match input.executor {
-        ExecutorConfig::Exo {
-            exo_bin,
-            backend,
-            image,
-            agent_command,
-            volumes,
-            secrets,
-            sandbox,
-        } => {
-            let mut executor =
-                ExoAgentExecutor::new(vec!["sh".to_string(), "-c".to_string(), agent_command]);
-            executor.exo_bin = exo_bin;
-            executor.backend = backend;
-            executor.image = image;
-            executor.sandbox = sandbox;
-            executor.secrets = secrets;
-            executor.volumes = parse_volume_pairs(volumes)?;
-            run_to_completion_with_observer(&mut orchestrator, &mut executor, 100, &mut observer)?
-        }
-        ExecutorConfig::Command { command } => {
-            let mut executor = CommandAgentExecutor::new(command);
-            run_to_completion_with_observer(&mut orchestrator, &mut executor, 100, &mut observer)?
-        }
-        ExecutorConfig::Builtin => {
-            let mut executor = BuiltinExecutor::new();
-            run_to_completion_with_observer(&mut orchestrator, &mut executor, 100, &mut observer)?
-        }
-    };
+    let outcome = run_with_executor_config_value(&mut orchestrator, input.executor, &mut observer)?;
 
     store.save(&RunRecord {
         run_id: run_id.clone(),
@@ -698,6 +768,126 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn orchestrate_resume(args: OrchestrateResumeArgs) -> anyhow::Result<()> {
+    let store = open_run_store(args.state_dir.clone())?;
+    let record = store.load(&args.run_id)?;
+    let previous_status = record.state.status;
+    let mut orchestrator = Orchestrator::from_state(record.state);
+    let executor_config = resume_executor_config(&args, &store)?;
+
+    store.append_event(&args.run_id, "resumed", "orchestration run resumed")?;
+    store.append_mailbox_event(
+        MailboxEvent::new(&args.run_id, "run_resumed", "orchestration run resumed")
+            .from("coordinator")
+            .payload(serde_json::json!({
+                "previous_status": previous_status,
+                "round": orchestrator.state().round,
+            })),
+    )?;
+
+    store.save(&RunRecord {
+        run_id: args.run_id.clone(),
+        state: orchestrator.state().clone(),
+        outcome: None,
+    })?;
+
+    let mut observer = StoreRunObserver::new(store.clone(), args.run_id.clone());
+    let outcome =
+        run_with_executor_config_value(&mut orchestrator, executor_config, &mut observer)?;
+
+    store.save(&RunRecord {
+        run_id: args.run_id.clone(),
+        state: orchestrator.state().clone(),
+        outcome: Some(outcome.clone()),
+    })?;
+    store.append_event(&args.run_id, "finished", &format!("{:?}", outcome.status))?;
+
+    if args.json {
+        let output = OrchestrateRunOutput {
+            run_id: &args.run_id,
+            outcome: &outcome,
+            state_path: store.state_path(&args.run_id).display().to_string(),
+            events_path: store.events_path(&args.run_id).display().to_string(),
+            mailbox_path: store.mailbox_path(&args.run_id).display().to_string(),
+            state: orchestrator.state(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Run ID: {}", args.run_id);
+    println!("State: {}", store.state_path(&args.run_id).display());
+    println!("Events: {}", store.events_path(&args.run_id).display());
+    println!("Mailbox: {}", store.mailbox_path(&args.run_id).display());
+    println!("Outcome: {:?}", outcome.status);
+    println!("Rounds: {}", outcome.rounds);
+    println!("{}", outcome.message);
+    Ok(())
+}
+
+fn resume_executor_config(
+    args: &OrchestrateResumeArgs,
+    store: &RunStore,
+) -> anyhow::Result<ExecutorConfig> {
+    if args.use_exo {
+        return Ok(ExecutorConfig::Exo {
+            exo_bin: args.exo_bin.clone(),
+            backend: args.exo_backend.clone(),
+            image: args.exo_image.clone(),
+            agent_command: args.exo_agent_cmd.clone(),
+            volumes: args.volumes.clone(),
+            secrets: args.secrets.clone(),
+            sandbox: args.sandbox.clone(),
+        });
+    }
+    if let Some(command) = &args.agent_cmd {
+        return Ok(ExecutorConfig::Command {
+            command: command.clone(),
+        });
+    }
+
+    match store.load_input::<OrchestrateRunInput>(&args.run_id) {
+        Ok(input) => Ok(input.executor),
+        Err(_) => Ok(ExecutorConfig::Builtin),
+    }
+}
+
+fn run_with_executor_config_value(
+    orchestrator: &mut Orchestrator,
+    config: ExecutorConfig,
+    observer: &mut dyn RunObserver,
+) -> anyhow::Result<RunOutcome> {
+    match config {
+        ExecutorConfig::Exo {
+            exo_bin,
+            backend,
+            image,
+            agent_command,
+            volumes,
+            secrets,
+            sandbox,
+        } => {
+            let mut executor =
+                ExoAgentExecutor::new(vec!["sh".to_string(), "-c".to_string(), agent_command]);
+            executor.exo_bin = exo_bin;
+            executor.backend = backend;
+            executor.image = image;
+            executor.sandbox = sandbox;
+            executor.secrets = secrets;
+            executor.volumes = parse_volume_pairs(volumes)?;
+            run_to_completion_with_observer(orchestrator, &mut executor, 100, observer)
+        }
+        ExecutorConfig::Command { command } => {
+            let mut executor = CommandAgentExecutor::new(command);
+            run_to_completion_with_observer(orchestrator, &mut executor, 100, observer)
+        }
+        ExecutorConfig::Builtin => {
+            let mut executor = BuiltinExecutor::new();
+            run_to_completion_with_observer(orchestrator, &mut executor, 100, observer)
+        }
+    }
 }
 
 fn parse_volume_pairs(values: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {

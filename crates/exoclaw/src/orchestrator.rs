@@ -129,6 +129,44 @@ impl Orchestrator {
         }
     }
 
+    /// Rebuild a coordinator from previously persisted state.
+    ///
+    /// This is the mechanical half of "resume": pending tasks are re-queued in
+    /// order, and any task left `Running` (an interrupted/crashed step) is
+    /// treated as pending again so it can be retried on the next drive. If the
+    /// previous coordinator ended blocked/failed, failed/blocked tasks are also
+    /// re-queued once so a caller can resume with a fixed executor or updated
+    /// environment. Reports and round counters are preserved so success
+    /// detection and audit history stay intact.
+    pub fn from_state(mut state: OrchestrationState) -> Self {
+        let mut ready_queue = VecDeque::new();
+        let should_retry_terminal_tasks = matches!(
+            state.status,
+            OrchestrationStatus::Blocked | OrchestrationStatus::Failed
+        );
+        for task in &mut state.tasks {
+            if task.status == TaskStatus::Running {
+                // The previous run stopped mid-flight; make it runnable again.
+                task.status = TaskStatus::Pending;
+                if task.attempts > 0 {
+                    task.attempts -= 1;
+                }
+            }
+            if should_retry_terminal_tasks
+                && matches!(task.status, TaskStatus::Failed | TaskStatus::Blocked)
+            {
+                task.status = TaskStatus::Pending;
+            }
+            if task.status == TaskStatus::Pending {
+                ready_queue.push_back(task.id.clone());
+            }
+        }
+        if state.status != OrchestrationStatus::Succeeded {
+            state.status = OrchestrationStatus::Running;
+        }
+        Self { state, ready_queue }
+    }
+
     pub fn state(&self) -> &OrchestrationState {
         &self.state
     }
@@ -440,5 +478,33 @@ mod tests {
         assert!(orch.state().tasks.iter().any(|task| {
             task.depends_on == vec![task_id.clone()] && task.prompt.contains("Follow-up requested")
         }));
+    }
+
+    #[test]
+    fn from_state_requeues_pending_and_interrupted_tasks() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let first = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task,
+            _ => panic!("expected prompt"),
+        };
+        orch.record_report(AgentReport {
+            task_id: first.id,
+            status: TaskStatus::Succeeded,
+            summary: "planning complete".to_string(),
+            artifacts: vec![],
+            followups: vec![],
+        });
+        let second = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task,
+            _ => panic!("expected prompt"),
+        };
+
+        let mut resumed = Orchestrator::from_state(orch.state().clone());
+        let next = match resumed.next() {
+            OrchestratorDecision::PromptAgent { task } => task,
+            other => panic!("expected resumed prompt, got {:?}", other),
+        };
+        assert_eq!(next.id, second.id);
+        assert_eq!(next.attempts, 1);
     }
 }

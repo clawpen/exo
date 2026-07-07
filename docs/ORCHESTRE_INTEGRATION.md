@@ -229,13 +229,17 @@ after the last sequence number it processed and rebuilds its local context.
 Current durable pieces:
 
 - `state.json`: latest coordinator state and final/in-progress outcome.
+- `input.json`: resolved original request/executor config used as resume default.
 - `mailbox.jsonl`: ordered inter-agent/coordinator events with sequence numbers.
 - `events.jsonl`: coarse lifecycle audit events such as `started`/`finished`.
 - `artifacts/`: files produced by agents or copied in by Orchestre.
 
 This is not full automatic resume yet; it is the durable substrate for resume.
-The next layer can create a new orchestrator from `state.json`, replay mailbox
-events after a checkpoint, and continue pending tasks.
+`exoclaw orchestrate-resume` now handles the mechanical part: it reloads
+`state.json`, re-queues pending/interrupted/failed tasks, appends `run_resumed`
+to `mailbox.jsonl`, and continues the run. Orchestre should own the policy part:
+when to wake a run, which executor to use, whether to override prompts, and how
+to chain goals.
 
 ## Persistent run-state layout
 
@@ -245,6 +249,7 @@ For run id `orch-demo-001` and state dir `/path/to/orchestrations`:
 /path/to/orchestrations/
 └── orch-demo-001/
     ├── state.json
+    ├── input.json
     ├── events.jsonl
     ├── mailbox.jsonl
     └── artifacts/
@@ -278,8 +283,15 @@ For run id `orch-demo-001` and state dir `/path/to/orchestrations`:
 }
 ```
 
-The file is written once at run start with `outcome: null`, then written again
-at run completion with the final state and outcome.
+The file is written once at run start with `outcome: null`, after each accepted
+agent report with the latest in-progress state, and again at run completion with
+the final state and outcome.
+
+### `input.json`
+
+`input.json` contains the resolved `OrchestrateRunInput`, including the generated
+`run_id` and executor config. `orchestrate-resume` uses this executor by default
+unless Orchestre passes an override such as `--agent-cmd` or `--use-exo`.
 
 ### `events.jsonl`
 
@@ -314,9 +326,42 @@ Built-in runner event kinds today:
 | `agent_report` | agent/runner | An agent report was accepted. |
 | `handoff_requested` | agent/runner | A report requested follow-up work. |
 | `run_finished` | coordinator | The runner reached succeeded/blocked/failed. |
+| `run_resumed` | coordinator | A persisted run was loaded and resumed. |
 
 External Orchestre/agent event kinds can include `message`, `checkpoint`,
 `sleep`, `wake`, `artifact`, or any other stable string.
+
+### Resume CLI
+
+Resume with the original persisted executor config:
+
+```bash
+exoclaw orchestrate-resume orch-demo-001 \
+  --state-dir /path/to/orchestrations \
+  --json
+```
+
+Resume with a fixed/overridden direct command executor:
+
+```bash
+exoclaw orchestrate-resume orch-demo-001 \
+  --state-dir /path/to/orchestrations \
+  --agent-cmd 'python3 /path/to/agent_worker.py' \
+  --json
+```
+
+Resume through Exo:
+
+```bash
+exoclaw orchestrate-resume orch-demo-001 \
+  --state-dir /path/to/orchestrations \
+  --use-exo \
+  --exo-backend native \
+  --exo-image host \
+  --exo-agent-cmd 'python3 /workspace/agent_worker.py' \
+  --volume "$PWD:/workspace" \
+  --json
+```
 
 ### Event-log CLI
 
@@ -388,10 +433,14 @@ exoclaw event-log list \
   --state-dir "$tmpdir/state" \
   --agent planner \
   --json
+
+exoclaw orchestrate-resume orch-smoke-json \
+  --state-dir "$tmpdir/state" \
+  --json
 ```
 
 Expected outcome: `outcome.status` is `succeeded`, and `state.json`,
-`events.jsonl`, and `mailbox.jsonl` exist under the run directory.
+`input.json`, `events.jsonl`, and `mailbox.jsonl` exist under the run directory.
 
 ## Current limitations / next integration work
 
@@ -399,7 +448,6 @@ Expected outcome: `outcome.status` is `succeeded`, and `state.json`,
   extension.
 - Resume-after-failure is not implemented yet, but the state layout is ready for
   it.
-- Automatic resume is not implemented yet. Agents can now checkpoint/sleep/wake
-  through the durable mailbox, but a future command still needs to reload
-  `state.json` and continue pending tasks.
+- `orchestrate-resume` is mechanical resume, not goal policy. Orchestre should
+  decide when/why to resume and whether to override the executor.
 - Real LLM `exo-agent` workers still need to be wired behind the Exo executor.

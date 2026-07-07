@@ -139,6 +139,10 @@ impl RunStore {
         self.run_dir(run_id).join("mailbox.jsonl")
     }
 
+    pub fn input_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("input.json")
+    }
+
     pub fn artifacts_dir(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("artifacts")
     }
@@ -158,6 +162,20 @@ impl RunStore {
     pub fn load(&self, run_id: &str) -> Result<RunRecord> {
         let bytes = std::fs::read(self.state_path(run_id))
             .with_context(|| format!("read run state {}", run_id))?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub fn save_input<T: Serialize>(&self, run_id: &str, input: &T) -> Result<()> {
+        let dir = self.run_dir(run_id);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(self.input_path(run_id), serde_json::to_vec_pretty(input)?)
+            .with_context(|| format!("write run input {}", run_id))?;
+        Ok(())
+    }
+
+    pub fn load_input<T: for<'de> Deserialize<'de>>(&self, run_id: &str) -> Result<T> {
+        let bytes = std::fs::read(self.input_path(run_id))
+            .with_context(|| format!("read run input {}", run_id))?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 

@@ -179,7 +179,8 @@ Status: **implemented / needs Orchestre hardening**
 - [x] Persist orchestration state to disk (`state.json`, `events.jsonl`, `artifacts/`).
 - [ ] Spawn real `exo-agent` LLM workers as Exo processes.
 - [x] Agent-to-agent durable mailbox/event log (`mailbox.jsonl`, `exoclaw event-log`).
-- [ ] Goal-resume after failure/restart.
+- [x] Mechanical resume after failure/restart (`exoclaw orchestrate-resume`).
+- [ ] Orchestre-owned goal-level resume policy.
 
 Acceptance command set:
 
@@ -208,6 +209,7 @@ cat > "$tmpdir/input.json" <<'JSON'
 JSON
 exoclaw orchestrate-run --json-input "$tmpdir/input.json" --state-dir "$tmpdir/state" --json
 test -f "$tmpdir/state/orch-smoke-json/state.json"
+test -f "$tmpdir/state/orch-smoke-json/input.json"
 test -f "$tmpdir/state/orch-smoke-json/events.jsonl"
 test -f "$tmpdir/state/orch-smoke-json/mailbox.jsonl"
 exoclaw event-log append --run-id orch-smoke-json --state-dir "$tmpdir/state" \
@@ -215,4 +217,5 @@ exoclaw event-log append --run-id orch-smoke-json --state-dir "$tmpdir/state" \
   "planner sleeping until more work arrives"
 exoclaw event-log list --run-id orch-smoke-json --state-dir "$tmpdir/state" \
   --agent planner --json
+exoclaw orchestrate-resume orch-smoke-json --state-dir "$tmpdir/state" --json
 ```
