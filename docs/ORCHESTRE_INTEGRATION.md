@@ -196,6 +196,7 @@ With `--json`, stdout is a single JSON object:
   },
   "state_path": "/path/to/orchestrations/orch-demo-001/state.json",
   "events_path": "/path/to/orchestrations/orch-demo-001/events.jsonl",
+  "mailbox_path": "/path/to/orchestrations/orch-demo-001/mailbox.jsonl",
   "state": {
     "directive": { "objective": "...", "success_criteria": [], "constraints": [], "max_rounds": 24 },
     "agents": [],
@@ -218,6 +219,24 @@ Outcome fields:
 The embedded `state` is the same object persisted in `state.json` inside a
 `RunRecord` wrapper.
 
+## Sleep/resume model
+
+The mailbox/event log is what lets agents sleep and come back to their work.
+An agent or Orchestre should record a `checkpoint` or `sleep` event before it
+stops doing work. When it wakes up, it reads `state.json` plus mailbox events
+after the last sequence number it processed and rebuilds its local context.
+
+Current durable pieces:
+
+- `state.json`: latest coordinator state and final/in-progress outcome.
+- `mailbox.jsonl`: ordered inter-agent/coordinator events with sequence numbers.
+- `events.jsonl`: coarse lifecycle audit events such as `started`/`finished`.
+- `artifacts/`: files produced by agents or copied in by Orchestre.
+
+This is not full automatic resume yet; it is the durable substrate for resume.
+The next layer can create a new orchestrator from `state.json`, replay mailbox
+events after a checkpoint, and continue pending tasks.
+
 ## Persistent run-state layout
 
 For run id `orch-demo-001` and state dir `/path/to/orchestrations`:
@@ -227,6 +246,7 @@ For run id `orch-demo-001` and state dir `/path/to/orchestrations`:
 └── orch-demo-001/
     ├── state.json
     ├── events.jsonl
+    ├── mailbox.jsonl
     └── artifacts/
 ```
 
@@ -263,16 +283,67 @@ at run completion with the final state and outcome.
 
 ### `events.jsonl`
 
-`events.jsonl` is append-only JSON Lines. Current event types:
+`events.jsonl` is append-only JSON Lines for coarse run lifecycle audit events.
+Current event types:
 
 ```jsonl
 {"timestamp_ms":1783451898216,"run_id":"orch-demo-001","event_type":"started","message":"orchestration run started"}
 {"timestamp_ms":1783451898216,"run_id":"orch-demo-001","event_type":"finished","message":"Succeeded"}
 ```
 
-Future mailbox/inter-agent communication should append message events here or in
-a sibling mailbox log while keeping this run directory as the durable source of
-truth.
+### `mailbox.jsonl`
+
+`mailbox.jsonl` is the append-only inter-agent event log. Every event has a
+monotonic `sequence` so an agent can persist "last seen sequence N", sleep, and
+later read only events where `sequence > N`.
+
+Example events:
+
+```jsonl
+{"sequence":1,"timestamp_ms":1783451898216,"run_id":"orch-demo-001","event_id":"evt-...","kind":"run_started","from":"coordinator","message":"orchestration run started","payload":{"objective":"..."}}
+{"sequence":2,"timestamp_ms":1783451898217,"run_id":"orch-demo-001","event_id":"evt-...","kind":"task_prompted","from":"coordinator","to":"planner","task_id":"task-1","message":"coordinator prompted planner","payload":{"prompt":"Prime directive:..."}}
+{"sequence":3,"timestamp_ms":1783451898218,"run_id":"orch-demo-001","event_id":"evt-...","kind":"agent_report","from":"planner","to":"coordinator","task_id":"task-1","message":"planner reported Succeeded","payload":{"summary":"planner completed"}}
+```
+
+Built-in runner event kinds today:
+
+| Kind | Producer | Meaning |
+| --- | --- | --- |
+| `run_started` | coordinator | Run state was initialized. |
+| `task_prompted` | coordinator | A prompt was assigned to an agent. |
+| `agent_report` | agent/runner | An agent report was accepted. |
+| `handoff_requested` | agent/runner | A report requested follow-up work. |
+| `run_finished` | coordinator | The runner reached succeeded/blocked/failed. |
+
+External Orchestre/agent event kinds can include `message`, `checkpoint`,
+`sleep`, `wake`, `artifact`, or any other stable string.
+
+### Event-log CLI
+
+Append one durable event:
+
+```bash
+exoclaw event-log append \
+  --run-id orch-demo-001 \
+  --state-dir /path/to/orchestrations \
+  --kind checkpoint \
+  --from-agent planner \
+  --to-agent builder \
+  --task-id task-1 \
+  --payload-json '{"last_file":"docs/plan.md"}' \
+  "planner is sleeping after drafting the plan"
+```
+
+Read all events after a checkpoint sequence:
+
+```bash
+exoclaw event-log list \
+  --run-id orch-demo-001 \
+  --state-dir /path/to/orchestrations \
+  --since 12 \
+  --agent builder \
+  --json
+```
 
 ### `artifacts/`
 
@@ -302,10 +373,25 @@ exoclaw orchestrate-run \
   --json
 
 cat "$tmpdir/state/orch-smoke-json/events.jsonl"
+cat "$tmpdir/state/orch-smoke-json/mailbox.jsonl"
+
+exoclaw event-log append \
+  --run-id orch-smoke-json \
+  --state-dir "$tmpdir/state" \
+  --kind sleep \
+  --from-agent planner \
+  --payload-json '{"last_seen_sequence":3}' \
+  "planner sleeping until more work arrives"
+
+exoclaw event-log list \
+  --run-id orch-smoke-json \
+  --state-dir "$tmpdir/state" \
+  --agent planner \
+  --json
 ```
 
-Expected outcome: `outcome.status` is `succeeded`, and both `state.json` and
-`events.jsonl` exist under the run directory.
+Expected outcome: `outcome.status` is `succeeded`, and `state.json`,
+`events.jsonl`, and `mailbox.jsonl` exist under the run directory.
 
 ## Current limitations / next integration work
 
@@ -313,6 +399,7 @@ Expected outcome: `outcome.status` is `succeeded`, and both `state.json` and
   extension.
 - Resume-after-failure is not implemented yet, but the state layout is ready for
   it.
-- Mailbox-style inter-agent communication is not implemented yet. Use
-  `followups` for coordinator-mediated handoff until mailbox events land.
+- Automatic resume is not implemented yet. Agents can now checkpoint/sleep/wake
+  through the durable mailbox, but a future command still needs to reload
+  `state.json` and continue pending tasks.
 - Real LLM `exo-agent` workers still need to be wired behind the Exo executor.

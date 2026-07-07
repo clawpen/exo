@@ -19,10 +19,11 @@ pub use orchestrator::{
     OrchestrationStatus, Orchestrator, OrchestratorDecision, PrimeDirective, TaskStatus,
 };
 pub use protocol::{AgentConfig, AgentMessage, HostMessage, ToolDefinition, ToolPermission};
-pub use run_store::{new_run_id, RunEvent, RunRecord, RunStore};
+pub use run_store::{new_run_id, MailboxEvent, RunEvent, RunRecord, RunStore};
 pub use runner::{
-    run_to_completion, AgentExecutor, AgentPrompt, BuiltinExecutor, CommandAgentExecutor,
-    ExoAgentExecutor, RunOutcome,
+    run_to_completion, run_to_completion_with_observer, AgentExecutor, AgentPrompt,
+    BuiltinExecutor, CommandAgentExecutor, ExoAgentExecutor, NoopRunObserver, RunObserver,
+    RunOutcome,
 };
 pub use tools::{DateTimeTool, Tool, ToolRegistry};
 

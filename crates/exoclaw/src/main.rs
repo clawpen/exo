@@ -1,12 +1,16 @@
 //! # exoClaw CLI - Secure Local Agent Harness
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use exoclaw::{
-    default_agent_roles, into_provider, new_run_id, run_to_completion, Agent, BuiltinExecutor,
-    CommandAgentExecutor, DateTimeTool, ExoAgentExecutor, LlmConfig, OpenAiCompatibleProvider,
-    Orchestrator, OrchestratorDecision, PrimeDirective, RunRecord, RunStore, ToolRegistry,
+    default_agent_roles, into_provider, new_run_id, run_to_completion_with_observer, Agent,
+    AgentReport, AgentTask, BuiltinExecutor, CommandAgentExecutor, DateTimeTool, ExoAgentExecutor,
+    LlmConfig, MailboxEvent, OpenAiCompatibleProvider, OrchestrationState, Orchestrator,
+    OrchestratorDecision, PrimeDirective, RunObserver, RunOutcome, RunRecord, RunStore,
+    ToolRegistry,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -127,6 +131,76 @@ enum Commands {
         #[arg(long)]
         run_id: Option<String>,
     },
+
+    /// Append/read the durable run mailbox event log
+    EventLog {
+        #[command(subcommand)]
+        command: EventLogCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventLogCommands {
+    /// Append one mailbox event to a run
+    Append {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+
+        /// State directory containing run directories
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+
+        /// Event kind, e.g. message, checkpoint, sleep, wake, handoff
+        #[arg(long, default_value = "message")]
+        kind: String,
+
+        /// Sender agent/id
+        #[arg(long)]
+        from_agent: Option<String>,
+
+        /// Recipient agent/id
+        #[arg(long)]
+        to_agent: Option<String>,
+
+        /// Related task id
+        #[arg(long)]
+        task_id: Option<String>,
+
+        /// Human-readable event message
+        message: String,
+
+        /// Optional JSON payload object/string
+        #[arg(long)]
+        payload_json: Option<String>,
+
+        /// Print appended event as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List mailbox events for a run
+    List {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+
+        /// State directory containing run directories
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+
+        /// Only events with sequence greater than this value
+        #[arg(long, default_value_t = 0)]
+        since: u64,
+
+        /// Filter events sent from or to this agent/id
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Print events as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +264,7 @@ struct OrchestrateRunOutput<'a> {
     pub outcome: &'a exoclaw::RunOutcome,
     pub state_path: String,
     pub events_path: String,
+    pub mailbox_path: String,
     pub state: &'a exoclaw::OrchestrationState,
 }
 
@@ -248,6 +323,7 @@ fn main() -> anyhow::Result<()> {
             state_dir,
             run_id,
         }),
+        Commands::EventLog { command } => event_log(command),
     }
 }
 
@@ -405,6 +481,96 @@ struct OrchestrateRunArgs {
     run_id: Option<String>,
 }
 
+struct StoreRunObserver {
+    store: RunStore,
+    run_id: String,
+}
+
+impl StoreRunObserver {
+    fn new(store: RunStore, run_id: String) -> Self {
+        Self { store, run_id }
+    }
+}
+
+impl RunObserver for StoreRunObserver {
+    fn on_task_prompted(&mut self, task: &AgentTask) -> anyhow::Result<()> {
+        self.store.append_mailbox_event(
+            MailboxEvent::new(
+                &self.run_id,
+                "task_prompted",
+                format!("coordinator prompted {}", task.agent_id),
+            )
+            .from("coordinator")
+            .to(&task.agent_id)
+            .task_id(&task.id)
+            .payload(serde_json::json!({
+                "prompt": &task.prompt,
+                "attempts": task.attempts,
+                "depends_on": &task.depends_on,
+            })),
+        )?;
+        Ok(())
+    }
+
+    fn on_agent_report(
+        &mut self,
+        task: &AgentTask,
+        report: &AgentReport,
+        state: &OrchestrationState,
+    ) -> anyhow::Result<()> {
+        self.store.append_mailbox_event(
+            MailboxEvent::new(
+                &self.run_id,
+                "agent_report",
+                format!("{} reported {:?}", task.agent_id, report.status),
+            )
+            .from(&task.agent_id)
+            .to("coordinator")
+            .task_id(&task.id)
+            .payload(serde_json::json!({
+                "status": report.status,
+                "summary": &report.summary,
+                "artifacts": &report.artifacts,
+                "followups": &report.followups,
+            })),
+        )?;
+
+        for followup in &report.followups {
+            self.store.append_mailbox_event(
+                MailboxEvent::new(&self.run_id, "handoff_requested", followup)
+                    .from(&task.agent_id)
+                    .to("coordinator")
+                    .task_id(&task.id)
+                    .payload(serde_json::json!({ "followup": followup })),
+            )?;
+        }
+
+        self.store.save(&RunRecord {
+            run_id: self.run_id.clone(),
+            state: state.clone(),
+            outcome: None,
+        })?;
+        Ok(())
+    }
+
+    fn on_run_finished(&mut self, outcome: &RunOutcome) -> anyhow::Result<()> {
+        self.store.append_mailbox_event(
+            MailboxEvent::new(
+                &self.run_id,
+                "run_finished",
+                format!("{:?}: {}", outcome.status, outcome.message),
+            )
+            .from("coordinator")
+            .payload(serde_json::json!({
+                "status": outcome.status,
+                "rounds": outcome.rounds,
+                "message": &outcome.message,
+            })),
+        )?;
+        Ok(())
+    }
+}
+
 fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
     let input = if let Some(path) = args.json_input {
         let bytes = std::fs::read(&path)?;
@@ -455,6 +621,16 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
         outcome: None,
     })?;
     store.append_event(&run_id, "started", "orchestration run started")?;
+    store.append_mailbox_event(
+        MailboxEvent::new(&run_id, "run_started", "orchestration run started")
+            .from("coordinator")
+            .payload(serde_json::json!({
+                "objective": &orchestrator.state().directive.objective,
+                "success_criteria": &orchestrator.state().directive.success_criteria,
+                "constraints": &orchestrator.state().directive.constraints,
+            })),
+    )?;
+    let mut observer = StoreRunObserver::new(store.clone(), run_id.clone());
 
     let outcome = match input.executor {
         ExecutorConfig::Exo {
@@ -474,15 +650,15 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
             executor.sandbox = sandbox;
             executor.secrets = secrets;
             executor.volumes = parse_volume_pairs(volumes)?;
-            run_to_completion(&mut orchestrator, &mut executor, 100)?
+            run_to_completion_with_observer(&mut orchestrator, &mut executor, 100, &mut observer)?
         }
         ExecutorConfig::Command { command } => {
             let mut executor = CommandAgentExecutor::new(command);
-            run_to_completion(&mut orchestrator, &mut executor, 100)?
+            run_to_completion_with_observer(&mut orchestrator, &mut executor, 100, &mut observer)?
         }
         ExecutorConfig::Builtin => {
             let mut executor = BuiltinExecutor::new();
-            run_to_completion(&mut orchestrator, &mut executor, 100)?
+            run_to_completion_with_observer(&mut orchestrator, &mut executor, 100, &mut observer)?
         }
     };
 
@@ -499,6 +675,7 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
             outcome: &outcome,
             state_path: store.state_path(&run_id).display().to_string(),
             events_path: store.events_path(&run_id).display().to_string(),
+            mailbox_path: store.mailbox_path(&run_id).display().to_string(),
             state: orchestrator.state(),
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -508,6 +685,7 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
     println!("Run ID: {}", run_id);
     println!("State: {}", store.state_path(&run_id).display());
     println!("Events: {}", store.events_path(&run_id).display());
+    println!("Mailbox: {}", store.mailbox_path(&run_id).display());
     println!("Outcome: {:?}", outcome.status);
     println!("Rounds: {}", outcome.rounds);
     println!("{}", outcome.message);
@@ -532,4 +710,99 @@ fn parse_volume_pairs(values: Vec<String>) -> anyhow::Result<Vec<(String, String
             Ok((source.to_string(), target.to_string()))
         })
         .collect()
+}
+
+fn event_log(command: EventLogCommands) -> anyhow::Result<()> {
+    match command {
+        EventLogCommands::Append {
+            run_id,
+            state_dir,
+            kind,
+            from_agent,
+            to_agent,
+            task_id,
+            message,
+            payload_json,
+            json,
+        } => {
+            let store = open_run_store(state_dir)?;
+            let mut event = MailboxEvent::new(&run_id, kind, message);
+            if let Some(from) = from_agent {
+                event = event.from(from);
+            }
+            if let Some(to) = to_agent {
+                event = event.to(to);
+            }
+            if let Some(task_id) = task_id {
+                event = event.task_id(task_id);
+            }
+            if let Some(payload_json) = payload_json {
+                event = event.payload(parse_payload_json(&payload_json)?);
+            }
+            let event = store.append_mailbox_event(event)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&event)?);
+            } else {
+                println!(
+                    "#{} {} {} -> {}: {}",
+                    event.sequence,
+                    event.kind,
+                    event.from.as_deref().unwrap_or("-"),
+                    event.to.as_deref().unwrap_or("-"),
+                    event.message
+                );
+            }
+            Ok(())
+        }
+        EventLogCommands::List {
+            run_id,
+            state_dir,
+            since,
+            agent,
+            json,
+        } => {
+            let store = open_run_store(state_dir)?;
+            let mut events = store.read_mailbox_since(&run_id, since)?;
+            if let Some(agent) = agent {
+                events.retain(|event| {
+                    event.from.as_deref() == Some(agent.as_str())
+                        || event.to.as_deref() == Some(agent.as_str())
+                });
+            }
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&events)?);
+            } else {
+                for event in events {
+                    let task = event
+                        .task_id
+                        .as_deref()
+                        .map(|task_id| format!(" ({})", task_id))
+                        .unwrap_or_default();
+                    println!(
+                        "#{} [{}] {} -> {}{}: {}",
+                        event.sequence,
+                        event.kind,
+                        event.from.as_deref().unwrap_or("-"),
+                        event.to.as_deref().unwrap_or("-"),
+                        task,
+                        event.message
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn open_run_store(state_dir: Option<std::path::PathBuf>) -> anyhow::Result<RunStore> {
+    if let Some(dir) = state_dir {
+        RunStore::new(dir)
+    } else {
+        RunStore::new_default()
+    }
+}
+
+fn parse_payload_json(input: &str) -> anyhow::Result<Value> {
+    serde_json::from_str(input).with_context(|| format!("invalid --payload-json: {}", input))
 }

@@ -7,6 +7,7 @@ use crate::orchestrator::OrchestrationState;
 use crate::runner::RunOutcome;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +24,70 @@ pub struct RunEvent {
     pub run_id: String,
     pub event_type: String,
     pub message: String,
+}
+
+/// Durable inter-agent/coordinator event.
+///
+/// The mailbox is append-only and ordered by `sequence`. Agents and Orchestre
+/// can read it after a restart to reconstruct handoffs, checkpoints, sleep/wake
+/// notices, and task reports without needing a live daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MailboxEvent {
+    pub sequence: u64,
+    pub timestamp_ms: u128,
+    pub run_id: String,
+    pub event_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub message: String,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+impl MailboxEvent {
+    pub fn new(
+        run_id: impl Into<String>,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            sequence: 0,
+            timestamp_ms: 0,
+            run_id: run_id.into(),
+            event_id: String::new(),
+            kind: kind.into(),
+            from: None,
+            to: None,
+            task_id: None,
+            message: message.into(),
+            payload: Value::Null,
+        }
+    }
+
+    pub fn from(mut self, from: impl Into<String>) -> Self {
+        self.from = Some(from.into());
+        self
+    }
+
+    pub fn to(mut self, to: impl Into<String>) -> Self {
+        self.to = Some(to.into());
+        self
+    }
+
+    pub fn task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = Some(task_id.into());
+        self
+    }
+
+    pub fn payload(mut self, payload: Value) -> Self {
+        self.payload = payload;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +135,10 @@ impl RunStore {
         self.run_dir(run_id).join("events.jsonl")
     }
 
+    pub fn mailbox_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("mailbox.jsonl")
+    }
+
     pub fn artifacts_dir(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("artifacts")
     }
@@ -108,6 +177,60 @@ impl RunStore {
         writeln!(file, "{}", serde_json::to_string(&event)?)?;
         Ok(())
     }
+
+    pub fn read_events(&self, run_id: &str) -> Result<Vec<RunEvent>> {
+        let path = self.events_path(run_id);
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        read_json_lines(&path)
+    }
+
+    /// Append one durable mailbox event and assign its sequence/timestamp/id.
+    pub fn append_mailbox_event(&self, mut event: MailboxEvent) -> Result<MailboxEvent> {
+        let dir = self.run_dir(&event.run_id);
+        std::fs::create_dir_all(&dir)?;
+        let path = self.mailbox_path(&event.run_id);
+        event.sequence = self.next_mailbox_sequence(&event.run_id)?;
+        event.timestamp_ms = now_ms();
+        if event.event_id.is_empty() {
+            event.event_id = format!("evt-{}", uuid::Uuid::new_v4());
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(file, "{}", serde_json::to_string(&event)?)?;
+        Ok(event)
+    }
+
+    pub fn read_mailbox(&self, run_id: &str) -> Result<Vec<MailboxEvent>> {
+        let path = self.mailbox_path(run_id);
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        read_json_lines(&path)
+    }
+
+    pub fn read_mailbox_since(
+        &self,
+        run_id: &str,
+        since_sequence: u64,
+    ) -> Result<Vec<MailboxEvent>> {
+        Ok(self
+            .read_mailbox(run_id)?
+            .into_iter()
+            .filter(|event| event.sequence > since_sequence)
+            .collect())
+    }
+
+    fn next_mailbox_sequence(&self, run_id: &str) -> Result<u64> {
+        Ok(self
+            .read_mailbox(run_id)?
+            .last()
+            .map(|event| event.sequence + 1)
+            .unwrap_or(1))
+    }
 }
 
 pub fn new_run_id() -> String {
@@ -119,6 +242,21 @@ fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut items = vec![];
+    for (idx, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item = serde_json::from_str(line)
+            .with_context(|| format!("parse JSON line {} in {}", idx + 1, path.display()))?;
+        items.push(item);
+    }
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -158,5 +296,35 @@ mod tests {
         let events = std::fs::read_to_string(store.events_path(&rec.run_id)).unwrap();
         assert!(events.contains("\"event_type\":\"started\""));
         assert!(store.artifacts_dir(&rec.run_id).is_dir());
+    }
+
+    #[test]
+    fn mailbox_is_append_only_and_ordered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::new(dir.path()).unwrap();
+        let first = store
+            .append_mailbox_event(
+                MailboxEvent::new("run-1", "message", "hello")
+                    .from("planner")
+                    .to("builder")
+                    .task_id("task-1")
+                    .payload(serde_json::json!({ "checkpoint": "draft ready" })),
+            )
+            .unwrap();
+        let second = store
+            .append_mailbox_event(MailboxEvent::new("run-1", "sleep", "planner sleeping"))
+            .unwrap();
+
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
+        assert!(!first.event_id.is_empty());
+
+        let all = store.read_mailbox("run-1").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].from.as_deref(), Some("planner"));
+        assert_eq!(all[0].to.as_deref(), Some("builder"));
+
+        let since_first = store.read_mailbox_since("run-1", 1).unwrap();
+        assert_eq!(since_first, vec![second]);
     }
 }

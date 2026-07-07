@@ -20,6 +20,31 @@ pub trait AgentExecutor {
     fn execute(&mut self, task: &AgentTask) -> Result<AgentReport>;
 }
 
+/// Observes runner progress for durable logs/checkpoints.
+pub trait RunObserver {
+    fn on_task_prompted(&mut self, _task: &AgentTask) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_agent_report(
+        &mut self,
+        _task: &AgentTask,
+        _report: &AgentReport,
+        _state: &crate::orchestrator::OrchestrationState,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_run_finished(&mut self, _outcome: &RunOutcome) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopRunObserver;
+
+impl RunObserver for NoopRunObserver {}
+
 /// Outcome of a full orchestration run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunOutcome {
@@ -37,32 +62,50 @@ pub fn run_to_completion(
     executor: &mut dyn AgentExecutor,
     max_steps: u32,
 ) -> Result<RunOutcome> {
+    let mut observer = NoopRunObserver;
+    run_to_completion_with_observer(orchestrator, executor, max_steps, &mut observer)
+}
+
+/// Drive the orchestrator to a terminal state and emit progress to an observer.
+pub fn run_to_completion_with_observer(
+    orchestrator: &mut Orchestrator,
+    executor: &mut dyn AgentExecutor,
+    max_steps: u32,
+    observer: &mut dyn RunObserver,
+) -> Result<RunOutcome> {
     let mut steps = 0u32;
     loop {
         match orchestrator.next() {
             OrchestratorDecision::Succeeded { summary } => {
-                return Ok(RunOutcome {
+                let outcome = RunOutcome {
                     status: OrchestrationStatus::Succeeded,
                     rounds: orchestrator.state().round,
                     message: summary,
-                });
+                };
+                observer.on_run_finished(&outcome)?;
+                return Ok(outcome);
             }
             OrchestratorDecision::Blocked { reason } => {
-                return Ok(RunOutcome {
+                let outcome = RunOutcome {
                     status: orchestrator.state().status,
                     rounds: orchestrator.state().round,
                     message: reason,
-                });
+                };
+                observer.on_run_finished(&outcome)?;
+                return Ok(outcome);
             }
             OrchestratorDecision::PromptAgent { task } => {
                 steps += 1;
                 if steps > max_steps {
-                    return Ok(RunOutcome {
+                    let outcome = RunOutcome {
                         status: OrchestrationStatus::Blocked,
                         rounds: orchestrator.state().round,
                         message: format!("runner exceeded max steps ({})", max_steps),
-                    });
+                    };
+                    observer.on_run_finished(&outcome)?;
+                    return Ok(outcome);
                 }
+                observer.on_task_prompted(&task)?;
                 let report = match executor.execute(&task) {
                     Ok(mut report) => {
                         // Executors may forget to echo the task id; enforce it.
@@ -77,7 +120,8 @@ pub fn run_to_completion(
                         followups: vec![],
                     },
                 };
-                orchestrator.record_report(report);
+                orchestrator.record_report(report.clone());
+                observer.on_agent_report(&task, &report, orchestrator.state())?;
             }
         }
     }
