@@ -31,41 +31,53 @@
 //! # }
 //! ```
 
-pub mod namespace;
-pub mod process;
-pub mod container;
-pub mod config;
-pub mod userns;
-pub mod rootfs;
-pub mod cgroup;
-pub mod security;
-pub mod seccomp;
-pub mod binfmt;
-pub mod storage;
-pub mod image;
-pub mod channel;
 pub mod agent;
-pub mod manager;
-pub mod network;
+pub mod backend;
+pub mod binfmt;
+pub mod cgroup;
+pub mod channel;
+pub mod config;
+pub mod container;
 pub mod events;
+pub mod image;
+pub mod manager;
+pub mod namespace;
+pub mod network;
+pub mod process;
 pub mod reconcile;
+pub mod rootfs;
+pub mod seccomp;
+pub mod secrets;
+pub mod security;
+pub mod storage;
+pub mod userns;
+pub mod volume;
 
-pub use container::{Container, ContainerHandle, ContainerStatus};
-pub use manager::{ContainerManager, ContainerMetadata, ContainerJson, ContainerListJson, CONTAINER_STATE_DIR};
-pub use config::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
-pub use namespace::Namespace;
-pub use userns::{UidMap, GidMap, setup_user_namespace};
-pub use cgroup::{CgroupManager, parse_size as parse_cgroup_size, cpu_count_to_quota};
-pub use security::{Capability, drop_capabilities, raise_capabilities, get_default_caps};
-pub use seccomp::{SeccompProfile, SeccompAction, apply_seccomp, default_profile};
-pub use binfmt::{Architecture, register_binfmt, is_qemu_available, setup_foreign_exec};
-pub use storage::{OverlayfsDriver, ContainerOverlay};
-pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};
+pub use agent::{get_agent_profile, AgentConfigExt, AgentProfile, NetworkAccess};
+pub use backend::{
+    BackendCapabilities, ExecOptions, ExoBackend, ListOptions, LogOptions as BackendLogOptions,
+    LogStream, RemoveOptions, RunOptions as BackendRunOptions, RunResult, StartOptions,
+    StopOptions,
+};
+pub use binfmt::{is_qemu_available, register_binfmt, setup_foreign_exec, Architecture};
+pub use cgroup::{cpu_count_to_quota, parse_size as parse_cgroup_size, CgroupManager};
 pub use channel::{AgentChannel, AgentMessage, ToolRequest, ToolResponse};
-pub use agent::{AgentProfile, NetworkAccess, get_agent_profile, AgentConfigExt};
+pub use config::{BackendSelection, ContainerConfig, MountConfig, NetworkConfig, ResourceConfig};
+pub use config::{RestartPolicy, SandboxMode};
+pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use events::{Event, EventLog, EventType};
-pub use config::RestartPolicy;
-pub use reconcile::{Reconciler, ReconcileOptions, ReconcileSummary, DEFAULT_CGROUP_ROOT};
+pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};
+pub use manager::{
+    ContainerJson, ContainerListJson, ContainerManager, ContainerMetadata, CONTAINER_STATE_DIR,
+};
+pub use namespace::Namespace;
+pub use reconcile::{ReconcileOptions, ReconcileSummary, Reconciler, DEFAULT_CGROUP_ROOT};
+pub use seccomp::{apply_seccomp, default_profile, SeccompAction, SeccompProfile};
+pub use secrets::SecretStore;
+pub use security::{drop_capabilities, get_default_caps, raise_capabilities, Capability};
+pub use storage::{ContainerOverlay, OverlayfsDriver};
+pub use userns::{setup_user_namespace, GidMap, UidMap};
+pub use volume::VolumeStore;
 
 use anyhow::Result;
 

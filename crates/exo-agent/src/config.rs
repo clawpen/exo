@@ -9,31 +9,31 @@ use std::path::PathBuf;
 pub struct AgentConfig {
     /// Agent name
     pub name: String,
-    
+
     /// LLM configuration
     pub llm: LlmConfig,
-    
+
     /// Memory configuration
     pub memory: MemoryConfig,
-    
+
     /// Channel configuration
     pub channel: ChannelConfig,
-    
+
     /// System prompt
     pub system_prompt: Option<String>,
-    
+
     /// Maximum tokens per response
     pub max_tokens: Option<u32>,
-    
+
     /// Temperature (0.0 - 2.0)
     pub temperature: Option<f32>,
-    
+
     /// Enabled tools
     pub tools: Vec<String>,
-    
+
     /// Working directory
     pub workdir: PathBuf,
-    
+
     /// Volume mounts (for file access)
     #[serde(default)]
     pub volumes: Vec<VolumeMount>,
@@ -44,13 +44,13 @@ pub struct AgentConfig {
 pub struct LlmConfig {
     /// Provider: openai, anthropic, zai, ollama
     pub provider: String,
-    
+
     /// API base URL (optional, uses defaults)
     pub base_url: Option<String>,
-    
+
     /// API key (loaded from env or secrets)
     pub api_key: Option<String>,
-    
+
     /// Model name
     pub model: String,
 }
@@ -60,13 +60,13 @@ pub struct LlmConfig {
 pub struct MemoryConfig {
     /// Enable memory persistence
     pub enabled: bool,
-    
+
     /// Database path (SQLite)
     pub db_path: PathBuf,
-    
+
     /// Maximum conversation turns to keep
     pub max_turns: Option<usize>,
-    
+
     /// Maximum tokens in context
     pub max_context_tokens: Option<usize>,
 }
@@ -76,7 +76,7 @@ pub struct MemoryConfig {
 pub struct ChannelConfig {
     /// Communication mode: stdio, websocket
     pub mode: ChannelMode,
-    
+
     /// WebSocket URL (if mode is websocket)
     pub websocket_url: Option<String>,
 }
@@ -103,34 +103,33 @@ pub enum ChannelMode {
 impl AgentConfig {
     /// Load configuration from environment
     pub fn from_env() -> Result<Self> {
-        let workdir = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("/workspace"));
-        
+        let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/workspace"));
+
         let config_path = workdir.join("config.toml");
-        
+
         if config_path.exists() {
             Self::from_file(&config_path)
         } else {
             Self::default_config()
         }
     }
-    
+
     /// Load configuration from file
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;
-        
-        let mut config: AgentConfig = toml::from_str(&content)
-            .with_context(|| "Failed to parse config TOML")?;
-        
+
+        let mut config: AgentConfig =
+            toml::from_str(&content).with_context(|| "Failed to parse config TOML")?;
+
         // Resolve API key from environment if not set
         if config.llm.api_key.is_none() {
             config.llm.api_key = Self::resolve_api_key(&config.llm.provider);
         }
-        
+
         Ok(config)
     }
-    
+
     /// Create default configuration
     pub fn default_config() -> Result<Self> {
         Ok(Self {
@@ -159,13 +158,14 @@ impl AgentConfig {
             volumes: vec![],
         })
     }
-    
+
     /// Resolve API key for a provider
     fn resolve_api_key(provider: &str) -> Option<String> {
         match provider {
             "openai" => std::env::var("OPENAI_API_KEY").ok(),
             "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
-            "zai" => std::env::var("ZAI_API_KEY").ok()
+            "zai" => std::env::var("ZAI_API_KEY")
+                .ok()
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok()),
             "ollama" => None, // No key needed
             _ => None,

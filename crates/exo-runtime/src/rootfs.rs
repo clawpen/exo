@@ -47,8 +47,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use {
     nix::mount::{mount, MsFlags},
+    nix::sys::stat::{makedev, mknod, Mode, SFlag},
     nix::unistd::pivot_root,
-    nix::sys::stat::{mknod, SFlag, Mode, makedev},
     std::fs::File,
     std::os::unix::io::AsRawFd,
 };
@@ -74,20 +74,66 @@ pub const IMAGE_ROOTFS_DIR: &str = "/tmp/exo-images/rootfs";
 /// Get the container root directory with fallback to user directory.
 /// Tries /var/lib/exo/containers first, falls back to ~/.local/share/exo/containers.
 pub fn get_container_root() -> PathBuf {
+    if let Ok(state_dir) = std::env::var("EXO_STATE_DIR") {
+        let state_dir = PathBuf::from(state_dir);
+        if ensure_writable_dir(&state_dir) {
+            return state_dir;
+        }
+    }
+
     let system_dir = PathBuf::from(CONTAINER_ROOT_DIR);
-    if system_dir.exists() || create_dir_all(&system_dir).is_ok() {
+    if ensure_writable_dir(&system_dir) {
         return system_dir;
     }
-    
+
+    if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
+        let xdg_dir = PathBuf::from(xdg_data_home).join("exo").join("containers");
+        if ensure_writable_dir(&xdg_dir) {
+            return xdg_dir;
+        }
+    }
+
     // Fall back to user directory
     if let Ok(home) = std::env::var("HOME") {
         let user_dir = PathBuf::from(home).join(".local/share/exo/containers");
-        let _ = create_dir_all(&user_dir);
-        return user_dir;
+        if ensure_writable_dir(&user_dir) {
+            return user_dir;
+        }
     }
-    
+
     // Last resort: /tmp
-    PathBuf::from("/tmp/exo-containers")
+    let temp_dir = std::env::temp_dir()
+        .join("exo")
+        .join("containers")
+        .join(format!("uid-{}", current_uid()));
+    let _ = create_dir_all(&temp_dir);
+    temp_dir
+}
+
+fn ensure_writable_dir(path: &Path) -> bool {
+    if create_dir_all(path).is_err() {
+        return false;
+    }
+
+    let probe = path.join(format!(".exo-write-test-{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn current_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::getuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 /// Prepare the root filesystem for a container.
@@ -106,38 +152,35 @@ pub fn get_container_root() -> PathBuf {
 /// Path to the prepared root filesystem (overlay merged view)
 pub fn prepare_rootfs(config: &ContainerConfig) -> Result<PathBuf> {
     let container_id = &config.name;
-    
+
     // Check if an extracted image rootfs exists
-    let image_rootfs = PathBuf::from(IMAGE_ROOTFS_DIR)
-        .join(config.image.replace(['/', ':'], "_"));
-    
+    let image_rootfs = PathBuf::from(IMAGE_ROOTFS_DIR).join(config.image.replace(['/', ':'], "_"));
+
     if image_rootfs.exists() && image_rootfs.join("bin").exists() {
         tracing::info!("Using extracted image rootfs: {:?}", image_rootfs);
-        
+
         // Set up overlayfs for writable layer
-        let container_root = get_container_root()
-            .join(container_id);
-        
+        let container_root = get_container_root().join(container_id);
+
         let overlay_paths = OverlayPaths {
             rootfs: container_root.join(ROOTFS_DIR),
             upper: container_root.join(UPPER_DIR),
             work: container_root.join(WORK_DIR),
             lower: image_rootfs,
         };
-        
+
         // Create overlay directories (mount happens in setup_overlay_rootfs)
         create_overlay_dirs(&overlay_paths)?;
-        
+
         // Store overlay info for later mounting
         store_overlay_config(container_id, &overlay_paths)?;
-        
+
         // Return the merged rootfs path (will be mounted later)
         return Ok(overlay_paths.rootfs);
     }
-    
+
     // Fall back to creating a minimal rootfs with bind mounts
-    let container_root = get_container_root()
-        .join(container_id);
+    let container_root = get_container_root().join(container_id);
     let rootfs_dir = container_root.join(ROOTFS_DIR);
 
     // Create the rootfs directory if it doesn't exist
@@ -183,18 +226,18 @@ fn store_overlay_config(container_id: &str, paths: &OverlayPaths) -> Result<()> 
     let container_root = get_container_root().join(container_id);
     let config_dir = container_root.join("config");
     create_dir_all(&config_dir)?;
-    
+
     let overlay_config = serde_json::json!({
         "rootfs": paths.rootfs,
         "upper": paths.upper,
         "work": paths.work,
         "lower": paths.lower,
     });
-    
+
     let config_path = config_dir.join("overlay.json");
     std::fs::write(&config_path, serde_json::to_string_pretty(&overlay_config)?)
         .with_context(|| format!("Failed to write overlay config: {:?}", config_path))?;
-    
+
     Ok(())
 }
 
@@ -204,17 +247,17 @@ pub fn load_overlay_config(container_id: &str) -> Result<Option<OverlayPaths>> {
         .join(container_id)
         .join("config")
         .join("overlay.json");
-    
+
     if !config_path.exists() {
         return Ok(None);
     }
-    
+
     let content = std::fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read overlay config: {:?}", config_path))?;
-    
-    let config: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| "Failed to parse overlay config")?;
-    
+
+    let config: serde_json::Value =
+        serde_json::from_str(&content).with_context(|| "Failed to parse overlay config")?;
+
     Ok(Some(OverlayPaths {
         rootfs: PathBuf::from(config["rootfs"].as_str().unwrap_or("")),
         upper: PathBuf::from(config["upper"].as_str().unwrap_or("")),
@@ -242,10 +285,10 @@ pub fn load_overlay_config(container_id: &str) -> Result<Option<OverlayPaths>> {
 pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
     let paths = load_overlay_config(container_id)?
         .ok_or_else(|| anyhow::anyhow!("No overlay config found for container {}", container_id))?;
-    
+
     // Ensure directories exist
     create_overlay_dirs(&paths)?;
-    
+
     // Build overlay mount options
     // Format: lowerdir=<lower>,upperdir=<upper>,workdir=<work>
     let options = format!(
@@ -254,13 +297,12 @@ pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
         paths.upper.display(),
         paths.work.display()
     );
-    
+
     tracing::info!("Mounting overlayfs with options: {}", options);
-    
+
     // Try kernel mount first
-    let options_cstr = std::ffi::CString::new(options.as_str())
-        .context("Invalid mount options")?;
-    
+    let options_cstr = std::ffi::CString::new(options.as_str()).context("Invalid mount options")?;
+
     match mount(
         Some("overlay"),
         paths.rootfs.as_path(),
@@ -276,7 +318,7 @@ pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
             tracing::warn!("Kernel overlay mount failed: {}, trying fuse-overlayfs", e);
         }
     }
-    
+
     // Fallback to fuse-overlayfs
     let status = std::process::Command::new("fuse-overlayfs")
         .arg("-o")
@@ -284,12 +326,12 @@ pub fn setup_overlay_rootfs(container_id: &str) -> Result<PathBuf> {
         .arg(&paths.rootfs)
         .status()
         .context("Failed to run fuse-overlayfs")?;
-    
+
     if status.success() {
         tracing::info!("fuse-overlayfs mounted successfully");
         return Ok(paths.rootfs);
     }
-    
+
     // Both failed - return error with read-only fallback hint
     Err(anyhow::anyhow!(
         "Both kernel overlay and fuse-overlayfs failed. Falling back to read-only rootfs."
@@ -307,19 +349,18 @@ pub fn setup_overlay_rootfs(_container_id: &str) -> Result<PathBuf> {
 pub fn unmount_overlay_rootfs(container_id: &str) -> Result<()> {
     let paths = load_overlay_config(container_id)?
         .ok_or_else(|| anyhow::anyhow!("No overlay config found for container {}", container_id))?;
-    
+
     if paths.rootfs.exists() {
         // Check if it's actually mounted
-        let mount_info = std::fs::read_to_string("/proc/mounts")
-            .unwrap_or_default();
-        
+        let mount_info = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+
         if mount_info.contains(&format!("overlay {}", paths.rootfs.display())) {
             nix::mount::umount(&paths.rootfs)
                 .with_context(|| format!("Failed to unmount overlayfs at {:?}", paths.rootfs))?;
             tracing::info!("Unmounted overlayfs for container {}", container_id);
         }
     }
-    
+
     Ok(())
 }
 
@@ -335,10 +376,26 @@ pub fn unmount_overlay_rootfs(_container_id: &str) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn setup_minimal_rootfs(rootfs: &Path) -> Result<()> {
     let dirs = [
-        "bin", "sbin", "usr/bin", "usr/sbin", "usr/local/bin",
-        "etc", "lib", "lib64", "usr/lib", "usr/lib64",
-        "proc", "sys", "dev", "tmp", "var/tmp", "var/run",
-        "home", "root", "mnt", "media",
+        "bin",
+        "sbin",
+        "usr/bin",
+        "usr/sbin",
+        "usr/local/bin",
+        "etc",
+        "lib",
+        "lib64",
+        "usr/lib",
+        "usr/lib64",
+        "proc",
+        "sys",
+        "dev",
+        "tmp",
+        "var/tmp",
+        "var/run",
+        "home",
+        "root",
+        "mnt",
+        "media",
     ];
 
     for dir in dirs {
@@ -469,7 +526,8 @@ fn create_dev_nodes(rootfs: &Path) -> Result<()> {
 /// 5. Unmount the old root
 #[cfg(target_os = "linux")]
 pub fn pivot_rootfs(new_root: &Path) -> Result<()> {
-    let new_root = new_root.canonicalize()
+    let new_root = new_root
+        .canonicalize()
         .with_context(|| format!("Failed to canonicalize new_root: {:?}", new_root))?;
 
     // Create put_old directory inside new_root
@@ -490,21 +548,17 @@ pub fn pivot_rootfs(new_root: &Path) -> Result<()> {
     )?;
 
     // Call pivot_root
-    pivot_root(&new_root, &put_old)
-        .context("pivot_root syscall failed")?;
+    pivot_root(&new_root, &put_old).context("pivot_root syscall failed")?;
 
     // Change to new root
-    std::env::set_current_dir("/")
-        .context("Failed to change directory to new root")?;
+    std::env::set_current_dir("/").context("Failed to change directory to new root")?;
 
     // Unmount the old root
     let old_root = PathBuf::from("/").join(PIVOT_OLD_ROOT);
-    nix::mount::umount(&old_root)
-        .context("Failed to unmount old root")?;
+    nix::mount::umount(&old_root).context("Failed to unmount old root")?;
 
     // Remove the old root directory
-    std::fs::remove_dir(&old_root)
-        .context("Failed to remove old root directory")?;
+    std::fs::remove_dir(&old_root).context("Failed to remove old root directory")?;
 
     tracing::debug!("pivot_root completed successfully");
 
@@ -524,18 +578,18 @@ pub fn pivot_rootfs(_new_root: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn mount_proc(rootfs: &Path) -> Result<()> {
     use std::ffi::CString;
-    
+
     let proc_path = rootfs.join("proc");
-    
+
     // Create directory if it doesn't exist
     if !proc_path.exists() {
         create_dir_all(&proc_path)
             .with_context(|| format!("Failed to create {}", proc_path.display()))?;
     }
-    
+
     let target = CString::new(proc_path.to_str().unwrap())
         .context("Failed to create CString for proc path")?;
-    
+
     // Try regular proc mount first (works in user namespace with CAP_SYS_ADMIN)
     let result = unsafe {
         libc::mount(
@@ -546,40 +600,49 @@ pub fn mount_proc(rootfs: &Path) -> Result<()> {
             std::ptr::null(),
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /proc (procfs)");
         return Ok(());
     }
-    
+
     let proc_err = std::io::Error::last_os_error();
     tracing::warn!("Regular proc mount failed: {}", proc_err);
-    
+
     // Fallback: bind mount host /proc (read-only, recursive)
     // This shows host PIDs instead of container PIDs, but allows Node.js and other
     // tools that need /proc/self to function in rootless mode.
     tracing::info!("Falling back to bind mount of host /proc (rootless mode)");
-    
+
     let host_proc = CString::new("/proc").unwrap();
     let bind_result = unsafe {
         libc::mount(
             host_proc.as_ptr(),
             target.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_PRIVATE,
+            libc::MS_BIND
+                | libc::MS_REC
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NODEV
+                | libc::MS_PRIVATE,
             std::ptr::null(),
         )
     };
-    
+
     if bind_result == 0 {
         tracing::info!("Bind-mounted host /proc (read-only) - note: shows host PIDs");
         return Ok(());
     }
-    
+
     let bind_err = std::io::Error::last_os_error();
     tracing::warn!("Bind mount of host /proc also failed: {}", bind_err);
     tracing::warn!("Container will run without /proc - limited functionality");
-    Err(anyhow::anyhow!("Failed to mount /proc: proc={}, bind={}", proc_err, bind_err))
+    Err(anyhow::anyhow!(
+        "Failed to mount /proc: proc={}, bind={}",
+        proc_err,
+        bind_err
+    ))
 }
 
 /// Mount /sys in the container.
@@ -588,17 +651,17 @@ pub fn mount_proc(rootfs: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn mount_sys(rootfs: &Path) -> Result<()> {
     use std::ffi::CString;
-    
+
     let sys_path = rootfs.join("sys");
-    
+
     if !sys_path.exists() {
         create_dir_all(&sys_path)
             .with_context(|| format!("Failed to create {}", sys_path.display()))?;
     }
-    
+
     let target = CString::new(sys_path.to_str().unwrap())
         .context("Failed to create CString for sys path")?;
-    
+
     // Try regular sysfs mount first (works in user namespace with CAP_SYS_ADMIN)
     let result = unsafe {
         libc::mount(
@@ -609,28 +672,33 @@ pub fn mount_sys(rootfs: &Path) -> Result<()> {
             std::ptr::null(),
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /sys (read-only)");
         return Ok(());
     }
-    
+
     // Fallback: try bind mount from host /sys (read-only for safety)
     let result = unsafe {
         libc::mount(
             b"/sys\0".as_ptr() as *const i8,
             target.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+            libc::MS_BIND
+                | libc::MS_REC
+                | libc::MS_RDONLY
+                | libc::MS_NOSUID
+                | libc::MS_NOEXEC
+                | libc::MS_NODEV,
             std::ptr::null(),
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Bind-mounted /sys from host (read-only)");
         return Ok(());
     }
-    
+
     tracing::warn!("Could not mount /sys: {}", std::io::Error::last_os_error());
     Ok(()) // Non-fatal
 }
@@ -641,17 +709,17 @@ pub fn mount_sys(rootfs: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn mount_dev(rootfs: &Path) -> Result<()> {
     use std::ffi::CString;
-    
+
     let dev_path = rootfs.join("dev");
-    
+
     if !dev_path.exists() {
         create_dir_all(&dev_path)
             .with_context(|| format!("Failed to create {}", dev_path.display()))?;
     }
-    
+
     let target = CString::new(dev_path.to_str().unwrap())
         .context("Failed to create CString for dev path")?;
-    
+
     // Mount devtmpfs
     let result = unsafe {
         libc::mount(
@@ -662,14 +730,14 @@ pub fn mount_dev(rootfs: &Path) -> Result<()> {
             b"mode=755\0".as_ptr() as *const libc::c_void,
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /dev (devtmpfs)");
         return Ok(());
     }
-    
+
     let devtmpfs_err = std::io::Error::last_os_error();
-    
+
     // Fallback 1: try tmpfs (works in user namespace)
     let result = unsafe {
         libc::mount(
@@ -680,14 +748,14 @@ pub fn mount_dev(rootfs: &Path) -> Result<()> {
             b"mode=755\0".as_ptr() as *const libc::c_void,
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /dev (tmpfs fallback)");
         return Ok(());
     }
-    
+
     let tmpfs_err = std::io::Error::last_os_error();
-    
+
     // Fallback 2: bind mount host /dev
     let result = unsafe {
         libc::mount(
@@ -698,16 +766,18 @@ pub fn mount_dev(rootfs: &Path) -> Result<()> {
             std::ptr::null(),
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Bind-mounted /dev from host");
         return Ok(());
     }
-    
-    tracing::warn!("Could not mount /dev: {} (tmpfs: {}, bind: {})", 
-        devtmpfs_err, 
+
+    tracing::warn!(
+        "Could not mount /dev: {} (tmpfs: {}, bind: {})",
+        devtmpfs_err,
         tmpfs_err,
-        std::io::Error::last_os_error());
+        std::io::Error::last_os_error()
+    );
     Ok(())
 }
 
@@ -717,17 +787,17 @@ pub fn mount_dev(rootfs: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn mount_dev_shm(rootfs: &Path) -> Result<()> {
     use std::ffi::CString;
-    
+
     let dev_shm_path = rootfs.join("dev/shm");
-    
+
     if !dev_shm_path.exists() {
         create_dir_all(&dev_shm_path)
             .with_context(|| format!("Failed to create {}", dev_shm_path.display()))?;
     }
-    
+
     let target = CString::new(dev_shm_path.to_str().unwrap())
         .context("Failed to create CString for dev/shm path")?;
-    
+
     // Mount tmpfs on /dev/shm
     let result = unsafe {
         libc::mount(
@@ -738,13 +808,16 @@ pub fn mount_dev_shm(rootfs: &Path) -> Result<()> {
             b"size=65536k\0".as_ptr() as *const libc::c_void,
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /dev/shm (tmpfs)");
         return Ok(());
     }
-    
-    tracing::warn!("Could not mount /dev/shm: {}", std::io::Error::last_os_error());
+
+    tracing::warn!(
+        "Could not mount /dev/shm: {}",
+        std::io::Error::last_os_error()
+    );
     Ok(())
 }
 
@@ -754,17 +827,17 @@ pub fn mount_dev_shm(rootfs: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn mount_tmp(rootfs: &Path) -> Result<()> {
     use std::ffi::CString;
-    
+
     let tmp_path = rootfs.join("tmp");
-    
+
     if !tmp_path.exists() {
         create_dir_all(&tmp_path)
             .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
     }
-    
+
     let target = CString::new(tmp_path.to_str().unwrap())
         .context("Failed to create CString for tmp path")?;
-    
+
     // Mount tmpfs on /tmp
     let result = unsafe {
         libc::mount(
@@ -775,12 +848,12 @@ pub fn mount_tmp(rootfs: &Path) -> Result<()> {
             b"size=1048576k\0".as_ptr() as *const libc::c_void,
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /tmp (tmpfs)");
         return Ok(());
     }
-    
+
     tracing::warn!("Could not mount /tmp: {}", std::io::Error::last_os_error());
     Ok(())
 }
@@ -791,17 +864,17 @@ pub fn mount_tmp(rootfs: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn mount_run(rootfs: &Path) -> Result<()> {
     use std::ffi::CString;
-    
+
     let run_path = rootfs.join("run");
-    
+
     if !run_path.exists() {
         create_dir_all(&run_path)
             .with_context(|| format!("Failed to create {}", run_path.display()))?;
     }
-    
+
     let target = CString::new(run_path.to_str().unwrap())
         .context("Failed to create CString for run path")?;
-    
+
     // Mount tmpfs on /run
     let result = unsafe {
         libc::mount(
@@ -812,12 +885,12 @@ pub fn mount_run(rootfs: &Path) -> Result<()> {
             b"size=65536k\0".as_ptr() as *const libc::c_void,
         )
     };
-    
+
     if result == 0 {
         tracing::info!("Mounted /run (tmpfs)");
         return Ok(());
     }
-    
+
     tracing::warn!("Could not mount /run: {}", std::io::Error::last_os_error());
     Ok(())
 }
@@ -829,13 +902,13 @@ pub fn mount_run(rootfs: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn setup_container_mounts(rootfs: &Path) -> Result<()> {
     // Order matters: /dev first, then /dev/shm
-    let _ = mount_dev(rootfs);       // Non-fatal
-    let _ = mount_dev_shm(rootfs);   // Non-fatal
-    let _ = mount_proc(rootfs);      // Non-fatal
-    let _ = mount_sys(rootfs);       // Non-fatal
-    let _ = mount_tmp(rootfs);       // Non-fatal
-    let _ = mount_run(rootfs);       // Non-fatal
-    
+    let _ = mount_dev(rootfs); // Non-fatal
+    let _ = mount_dev_shm(rootfs); // Non-fatal
+    let _ = mount_proc(rootfs); // Non-fatal
+    let _ = mount_sys(rootfs); // Non-fatal
+    let _ = mount_tmp(rootfs); // Non-fatal
+    let _ = mount_run(rootfs); // Non-fatal
+
     Ok(())
 }
 
@@ -920,7 +993,11 @@ pub fn apply_bind_mounts_before_pivot(config: &ContainerConfig, rootfs: &Path) -
                     continue;
                 }
 
-                tracing::info!("Setting up bind mount BEFORE pivot: {:?} -> {:?}", source, target);
+                tracing::info!(
+                    "Setting up bind mount BEFORE pivot: {:?} -> {:?}",
+                    source,
+                    target
+                );
 
                 // Ensure target directory exists in container rootfs
                 if let Some(parent) = target.parent() {
@@ -929,15 +1006,17 @@ pub fn apply_bind_mounts_before_pivot(config: &ContainerConfig, rootfs: &Path) -
                 }
                 if !target.exists() {
                     if source.is_dir() {
-                        create_dir_all(&target)
-                            .with_context(|| format!("Failed to create mount target: {:?}", target))?;
+                        create_dir_all(&target).with_context(|| {
+                            format!("Failed to create mount target: {:?}", target)
+                        })?;
                     } else {
                         // Create parent for file mount
                         if let Some(parent) = target.parent() {
                             create_dir_all(parent)?;
                         }
-                        File::create(&target)
-                            .with_context(|| format!("Failed to create mount target file: {:?}", target))?;
+                        File::create(&target).with_context(|| {
+                            format!("Failed to create mount target file: {:?}", target)
+                        })?;
                     }
                 }
 
@@ -966,7 +1045,8 @@ pub fn apply_bind_mounts_before_pivot(config: &ContainerConfig, rootfs: &Path) -
                     None::<&str>,
                     MsFlags::MS_BIND | MsFlags::MS_REC,
                     None::<&str>,
-                ).with_context(|| format!("Failed to bind mount {:?} -> {:?}", source, target))?;
+                )
+                .with_context(|| format!("Failed to bind mount {:?} -> {:?}", source, target))?;
 
                 // Remount with flags (to apply read-only etc.)
                 if mount_spec.readonly || !mount_spec.propagation.is_empty() {
@@ -976,14 +1056,22 @@ pub fn apply_bind_mounts_before_pivot(config: &ContainerConfig, rootfs: &Path) -
                         None::<&str>,
                         flags | MsFlags::MS_REMOUNT,
                         None::<&str>,
-                    ).with_context(|| format!("Failed to remount with flags: {:?}", target))?;
+                    )
+                    .with_context(|| format!("Failed to remount with flags: {:?}", target))?;
                 }
 
-                tracing::info!("Applied bind mount BEFORE pivot: {:?} -> {:?}", source, target);
+                tracing::info!(
+                    "Applied bind mount BEFORE pivot: {:?} -> {:?}",
+                    source,
+                    target
+                );
             }
             "tmpfs" => {
                 // tmpfs mounts should be done after pivot_root, skip here
-                tracing::debug!("Deferring tmpfs mount until after pivot_root: {}", mount_spec.target);
+                tracing::debug!(
+                    "Deferring tmpfs mount until after pivot_root: {}",
+                    mount_spec.target
+                );
             }
             _ => {
                 tracing::warn!("Unsupported mount type: {}", mount_spec.mount_type);
@@ -1008,7 +1096,7 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
     // Check if old root is still accessible (pivot_root may have failed or old root not unmounted)
     let old_root = Path::new("/.pivot_old");
     let old_root_exists = old_root.exists();
-    
+
     for mount_spec in &config.mounts {
         match mount_spec.mount_type.as_str() {
             "bind" => {
@@ -1030,11 +1118,17 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
                 } else if old_root_exists {
                     let via_old_root = old_root.join(mount_spec.source.trim_start_matches('/'));
                     if via_old_root.exists() {
-                        tracing::debug!("Using old root path for bind mount source: {:?}", via_old_root);
+                        tracing::debug!(
+                            "Using old root path for bind mount source: {:?}",
+                            via_old_root
+                        );
                         via_old_root
                     } else {
-                        tracing::warn!("Bind mount source not found: {:?} (also tried via old root: {:?})", 
-                            original_source, via_old_root);
+                        tracing::warn!(
+                            "Bind mount source not found: {:?} (also tried via old root: {:?})",
+                            original_source,
+                            via_old_root
+                        );
                         continue;
                     }
                 } else {
@@ -1043,7 +1137,11 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
                     continue;
                 };
 
-                tracing::info!("Applying bind mount after pivot_root: {:?} -> {:?}", source, target);
+                tracing::info!(
+                    "Applying bind mount after pivot_root: {:?} -> {:?}",
+                    source,
+                    target
+                );
 
                 // Ensure target directory exists in container
                 if let Some(parent) = target.parent() {
@@ -1054,8 +1152,9 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
                     // Check if source is a directory
                     let is_dir = source.is_dir();
                     if is_dir {
-                        create_dir_all(target)
-                            .with_context(|| format!("Failed to create mount target: {:?}", target))?;
+                        create_dir_all(target).with_context(|| {
+                            format!("Failed to create mount target: {:?}", target)
+                        })?;
                     } else {
                         if let Some(parent) = target.parent() {
                             create_dir_all(parent)?;
@@ -1099,10 +1198,19 @@ pub fn apply_bind_mounts(config: &ContainerConfig) -> Result<()> {
                                 None::<&str>,
                             );
                         }
-                        tracing::info!("Successfully applied bind mount: {:?} -> {:?}", source, target);
+                        tracing::info!(
+                            "Successfully applied bind mount: {:?} -> {:?}",
+                            source,
+                            target
+                        );
                     }
                     Err(e) => {
-                        tracing::error!("Failed to apply bind mount {:?} -> {:?}: {}", source, target, e);
+                        tracing::error!(
+                            "Failed to apply bind mount {:?} -> {:?}: {}",
+                            source,
+                            target,
+                            e
+                        );
                     }
                 }
             }
@@ -1156,7 +1264,9 @@ fn setup_readonly_rootfs() -> Result<()> {
         None::<&str>,
         "/",
         None::<&str>,
-        nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
+        nix::mount::MsFlags::MS_REMOUNT
+            | nix::mount::MsFlags::MS_RDONLY
+            | nix::mount::MsFlags::MS_BIND,
         None::<&str>,
     )?;
 
@@ -1195,7 +1305,7 @@ pub fn cleanup_rootfs_ex(config: &ContainerConfig, keep_upper: bool) -> Result<(
             // Keep upper directory, remove rootfs mount point and work dir
             let rootfs = container_root.join(ROOTFS_DIR);
             let work = container_root.join(WORK_DIR);
-            
+
             if rootfs.exists() {
                 std::fs::remove_dir_all(&rootfs)
                     .with_context(|| format!("Failed to remove rootfs directory: {:?}", rootfs))?;
@@ -1204,13 +1314,14 @@ pub fn cleanup_rootfs_ex(config: &ContainerConfig, keep_upper: bool) -> Result<(
                 std::fs::remove_dir_all(&work)
                     .with_context(|| format!("Failed to remove work directory: {:?}", work))?;
             }
-            
+
             tracing::info!("Cleaned up rootfs (kept upper layer): {:?}", container_root);
         } else {
             // Full cleanup - remove everything
-            std::fs::remove_dir_all(&container_root)
-                .with_context(|| format!("Failed to remove rootfs directory: {:?}", container_root))?;
-            
+            std::fs::remove_dir_all(&container_root).with_context(|| {
+                format!("Failed to remove rootfs directory: {:?}", container_root)
+            })?;
+
             tracing::info!("Cleaned up rootfs: {:?}", container_root);
         }
     }
@@ -1227,30 +1338,26 @@ pub fn cleanup_overlay_mount(config: &ContainerConfig) -> Result<()> {
 
 /// Check if a container has an existing writable layer (upper directory).
 pub fn has_existing_upper(container_id: &str) -> bool {
-    let upper_path = get_container_root()
-        .join(container_id)
-        .join(UPPER_DIR);
-    
+    let upper_path = get_container_root().join(container_id).join(UPPER_DIR);
+
     upper_path.exists() && is_directory_non_empty(&upper_path).unwrap_or(false)
 }
 
 /// Check if a directory is non-empty.
 fn is_directory_non_empty(path: &Path) -> Result<bool> {
-    let mut entries = std::fs::read_dir(path)
-        .with_context(|| format!("Failed to read directory: {:?}", path))?;
+    let mut entries =
+        std::fs::read_dir(path).with_context(|| format!("Failed to read directory: {:?}", path))?;
     Ok(entries.next().is_some())
 }
 
 /// Get the size of the upper layer (writable changes).
 pub fn get_upper_layer_size(container_id: &str) -> Result<u64> {
-    let upper_path = get_container_root()
-        .join(container_id)
-        .join(UPPER_DIR);
-    
+    let upper_path = get_container_root().join(container_id).join(UPPER_DIR);
+
     if !upper_path.exists() {
         return Ok(0);
     }
-    
+
     dir_size(&upper_path)
 }
 
@@ -1312,10 +1419,8 @@ mod tests {
             ..Default::default()
         };
 
-        let expected = PathBuf::from("/var/lib/exo/containers/test-container/rootfs");
-        let actual = get_container_root()
-            .join(&config.name)
-            .join(ROOTFS_DIR);
+        let expected = get_container_root().join("test-container").join(ROOTFS_DIR);
+        let actual = get_container_root().join(&config.name).join(ROOTFS_DIR);
 
         assert_eq!(expected, actual);
     }
@@ -1328,18 +1433,17 @@ mod tests {
         };
 
         let container_root = get_container_root().join(&config.name);
-        
+
+        let expected_root = get_container_root().join("overlay-test");
+
         assert_eq!(
             container_root.join(ROOTFS_DIR),
-            PathBuf::from("/var/lib/exo/containers/overlay-test/rootfs")
+            expected_root.join(ROOTFS_DIR)
         );
         assert_eq!(
             container_root.join(UPPER_DIR),
-            PathBuf::from("/var/lib/exo/containers/overlay-test/upper")
+            expected_root.join(UPPER_DIR)
         );
-        assert_eq!(
-            container_root.join(WORK_DIR),
-            PathBuf::from("/var/lib/exo/containers/overlay-test/work")
-        );
+        assert_eq!(container_root.join(WORK_DIR), expected_root.join(WORK_DIR));
     }
 }

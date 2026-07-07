@@ -13,19 +13,40 @@ pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
         anyhow::bail!("No command specified");
     }
 
-    println!("Executing in container {}: {:?}", args.container, args.command);
-
-    if args.interactive {
-        println!("Interactive mode enabled");
+    #[cfg(target_os = "macos")]
+    {
+        if args.interactive {
+            tracing::warn!("macOS native backend exec inherits stdin/stdout by default");
+        }
+        if args.tty {
+            tracing::warn!("macOS native backend does not allocate a new pseudo-TTY");
+        }
+        let code = super::mac::backend()?.exec(&args.container, args.command, args.user)?;
+        if code != 0 {
+            anyhow::bail!("exec exited with code {}", code);
+        }
+        return Ok(());
     }
 
-    if args.tty {
-        println!("TTY enabled");
-    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!(
+            "Executing in container {}: {:?}",
+            args.container, args.command
+        );
 
-    if let Some(user) = &args.user {
-        println!("Running as user: {}", user);
-    }
+        if args.interactive {
+            println!("Interactive mode enabled");
+        }
 
-    Ok(())
+        if args.tty {
+            println!("TTY enabled");
+        }
+
+        if let Some(user) = &args.user {
+            println!("Running as user: {}", user);
+        }
+
+        Ok(())
+    }
 }

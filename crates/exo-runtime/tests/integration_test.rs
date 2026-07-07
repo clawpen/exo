@@ -12,23 +12,22 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use anyhow::Result;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
-use anyhow::Result;
 
 #[cfg(target_os = "linux")]
 use exo_runtime::{
-    Container, ContainerConfig, ContainerStatus, ResourceConfig,
-    NetworkConfig, UidMap, GidMap, Capability,
-    CgroupManager, drop_capabilities, apply_seccomp, default_profile, SeccompAction,
+    apply_seccomp, default_profile, drop_capabilities, Capability, CgroupManager, Container,
+    ContainerConfig, ContainerStatus, GidMap, NetworkConfig, ResourceConfig, SeccompAction, UidMap,
 };
 
 use exo_runtime::{
-    storage::OverlayfsDriver,
+    channel::{AgentMessage, MessageType, ToolRequest, ToolResponse},
     image::ImageManager,
-    channel::{ToolRequest, ToolResponse, AgentMessage, MessageType},
+    storage::OverlayfsDriver,
 };
 
 // Test configuration
@@ -58,7 +57,9 @@ fn test_environment_setup() {
 #[test]
 fn test_minimal_rootfs_creation() {
     let env = common::TestEnv::new().expect("Failed to create test env");
-    let rootfs = env.create_minimal_rootfs().expect("Failed to create rootfs");
+    let rootfs = env
+        .create_minimal_rootfs()
+        .expect("Failed to create rootfs");
 
     assert!(rootfs.exists());
     assert!(rootfs.join("bin").exists());
@@ -78,8 +79,7 @@ fn test_cgroup_manager_creation() {
     let env = common::TestEnv::new().expect("Failed to create test env");
     let test_id = format!("test_cgroup_{}", std::process::id());
 
-    let manager = CgroupManager::new(&test_id)
-        .expect("Failed to create cgroup manager");
+    let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup manager");
 
     // Verify cgroup directory exists
     let cgroup_path = format!("/sys/fs/cgroup/{}", test_id);
@@ -97,13 +97,13 @@ fn test_cgroup_memory_limit() {
 
     let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
 
-    manager.set_memory_limit(TEST_MEMORY_LIMIT)
+    manager
+        .set_memory_limit(TEST_MEMORY_LIMIT)
         .expect("Failed to set memory limit");
 
     // Verify limit was set
     let memory_max = format!("/sys/fs/cgroup/{}/memory.max", test_id);
-    let content = fs::read_to_string(&memory_max)
-        .expect("Failed to read memory.max");
+    let content = fs::read_to_string(&memory_max).expect("Failed to read memory.max");
     let limit: u64 = content.trim().parse().expect("Failed to parse limit");
 
     assert_eq!(limit, TEST_MEMORY_LIMIT);
@@ -120,13 +120,13 @@ fn test_cgroup_cpu_limit() {
 
     let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
 
-    manager.set_cpu_limit(TEST_CPU_QUOTA, TEST_CPU_PERIOD)
+    manager
+        .set_cpu_limit(TEST_CPU_QUOTA, TEST_CPU_PERIOD)
         .expect("Failed to set CPU limit");
 
     // Verify limit was set
     let cpu_max = format!("/sys/fs/cgroup/{}/cpu.max", test_id);
-    let content = fs::read_to_string(&cpu_max)
-        .expect("Failed to read cpu.max");
+    let content = fs::read_to_string(&cpu_max).expect("Failed to read cpu.max");
 
     let parts: Vec<&str> = content.trim().split_whitespace().collect();
     assert_eq!(parts.len(), 2);
@@ -148,13 +148,13 @@ fn test_cgroup_pids_limit() {
 
     let manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
 
-    manager.set_pids_limit(TEST_PID_LIMIT)
+    manager
+        .set_pids_limit(TEST_PID_LIMIT)
         .expect("Failed to set PIDs limit");
 
     // Verify limit was set
     let pids_max = format!("/sys/fs/cgroup/{}/pids.max", test_id);
-    let content = fs::read_to_string(&pids_max)
-        .expect("Failed to read pids.max");
+    let content = fs::read_to_string(&pids_max).expect("Failed to read pids.max");
 
     let limit: u64 = content.trim().parse().expect("Failed to parse limit");
     assert_eq!(limit, TEST_PID_LIMIT);
@@ -191,7 +191,10 @@ fn test_default_seccomp_profile() {
     let profile = default_profile();
 
     // Verify default profile allows common syscalls
-    assert!(profile.allow.len() > 0, "Default profile should allow syscalls");
+    assert!(
+        profile.allow.len() > 0,
+        "Default profile should allow syscalls"
+    );
 
     // Check for essential syscalls
     let essential = ["read", "write", "exit", "sigreturn"];
@@ -224,8 +227,7 @@ fn test_seccomp_profile_deny_mode() {
 
 #[test]
 fn test_overlay_driver_creation() {
-    let driver = OverlayfsDriver::new()
-        .expect("Failed to create overlay driver");
+    let driver = OverlayfsDriver::new().expect("Failed to create overlay driver");
 
     // Just verify it can be created
     assert!(true);
@@ -233,12 +235,12 @@ fn test_overlay_driver_creation() {
 
 #[test]
 fn test_storage_layer_creation() {
-    let driver = OverlayfsDriver::new()
-        .expect("Failed to create overlay driver");
+    let driver = OverlayfsDriver::new().expect("Failed to create overlay driver");
 
     // Create a test layer using add_layer with empty data
     let layer_id = "test_layer_001";
-    let _layer = driver.add_layer(layer_id, b"test data")
+    let _layer = driver
+        .add_layer(layer_id, b"test data")
         .expect("Failed to create layer");
 
     // Verify layer can be retrieved
@@ -248,11 +250,11 @@ fn test_storage_layer_creation() {
 
 #[test]
 fn test_storage_layer_add_file() {
-    let driver = OverlayfsDriver::new()
-        .expect("Failed to create overlay driver");
+    let driver = OverlayfsDriver::new().expect("Failed to create overlay driver");
 
     let layer_id = "test_layer_002";
-    let _layer = driver.add_layer(layer_id, b"more test data")
+    let _layer = driver
+        .add_layer(layer_id, b"more test data")
         .expect("Failed to create layer");
 
     // Verify layer exists
@@ -262,17 +264,18 @@ fn test_storage_layer_add_file() {
 
 #[test]
 fn test_container_overlay_creation() {
-    let driver = OverlayfsDriver::new()
-        .expect("Failed to create overlay driver");
+    let driver = OverlayfsDriver::new().expect("Failed to create overlay driver");
 
     // Create a base layer
     let base_layer = "test_base_001";
-    driver.add_layer(base_layer, b"base layer data")
+    driver
+        .add_layer(base_layer, b"base layer data")
         .expect("Failed to create base layer");
 
     // Create container overlay
     let container_id = "test_container_001";
-    let overlay = driver.create_container_overlay(container_id, vec![base_layer.to_string()])
+    let overlay = driver
+        .create_container_overlay(container_id, vec![base_layer.to_string()])
         .expect("Failed to create overlay");
 
     assert!(overlay.merged.exists());
@@ -284,8 +287,7 @@ fn test_container_overlay_creation() {
 
 #[test]
 fn test_image_manager_creation() {
-    let manager = ImageManager::new()
-        .expect("Failed to create image manager");
+    let manager = ImageManager::new().expect("Failed to create image manager");
 
     // Just verify it can be created
     assert!(true);
@@ -302,8 +304,8 @@ fn test_parse_image_reference() {
         ("ubuntu:latest", "library/ubuntu"),
         ("alpine:3.18", "library/alpine"),
         ("nginx", "library/nginx"),
-        ("gcr.io/distroless/base", "distroless/base"),  // registry is gcr.io, repo is distroless/base
-        ("localhost:5000/myimage:v1", "myimage"),  // registry is localhost:5000, repo is myimage
+        ("gcr.io/distroless/base", "distroless/base"), // registry is gcr.io, repo is distroless/base
+        ("localhost:5000/myimage:v1", "myimage"), // registry is localhost:5000, repo is myimage
     ];
 
     for (reference, expected_repo) in cases {
@@ -311,13 +313,17 @@ fn test_parse_image_reference() {
         assert!(parsed.is_ok(), "Failed to parse: {}", reference);
 
         let parsed = parsed.unwrap();
-        assert_eq!(parsed.repository, expected_repo, "Repository mismatch for: {}", reference);
+        assert_eq!(
+            parsed.repository, expected_repo,
+            "Repository mismatch for: {}",
+            reference
+        );
     }
 }
 
 #[test]
 fn test_parse_image_reference_with_digest() {
-    use exo_runtime::image::{DEFAULT_LIBRARY, TagOrDigest};
+    use exo_runtime::image::{TagOrDigest, DEFAULT_LIBRARY};
 
     let manager = ImageManager::new().unwrap();
 
@@ -359,8 +365,7 @@ fn test_tool_request_serialization() {
     assert!(json.contains("bash"));
     assert!(json.contains("echo hello"));
 
-    let deserialized: ToolRequest = serde_json::from_str(&json)
-        .expect("Failed to deserialize");
+    let deserialized: ToolRequest = serde_json::from_str(&json).expect("Failed to deserialize");
     assert_eq!(deserialized.tool, "bash");
 }
 
@@ -380,8 +385,7 @@ fn test_tool_response_serialization() {
     let json = serde_json::to_string(&response).expect("Failed to serialize");
     assert!(json.contains("hello"));
 
-    let deserialized: ToolResponse = serde_json::from_str(&json)
-        .expect("Failed to deserialize");
+    let deserialized: ToolResponse = serde_json::from_str(&json).expect("Failed to deserialize");
     assert_eq!(deserialized.stdout, "hello");
     assert_eq!(deserialized.exit_code, 0);
 }
@@ -463,7 +467,8 @@ fn test_multiple_cgroup_create_destroy() {
         let manager = CgroupManager::new(&test_id)
             .expect(&format!("Failed to create cgroup at iteration {}", i));
 
-        manager.set_memory_limit(64 * 1024 * 1024)
+        manager
+            .set_memory_limit(64 * 1024 * 1024)
             .expect("Failed to set memory limit");
 
         let cgroup_path = format!("/sys/fs/cgroup/{}", test_id);
@@ -520,7 +525,7 @@ fn test_invalid_image_reference() {
 
     // Reference with @ but no proper digest
     let result = manager.parse_image_reference("image@invalid");
-    assert!(result.is_ok());  // Currently succeeds
+    assert!(result.is_ok()); // Currently succeeds
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -534,8 +539,7 @@ fn test_cgroup_cleanup() {
     let test_id = format!("test_cleanup_{}", std::process::id());
 
     {
-        let _manager = CgroupManager::new(&test_id)
-            .expect("Failed to create cgroup");
+        let _manager = CgroupManager::new(&test_id).expect("Failed to create cgroup");
         let cgroup_path = format!("/sys/fs/cgroup/{}", test_id);
         assert!(Path::new(&cgroup_path).exists());
     }

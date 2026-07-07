@@ -1,9 +1,10 @@
 //! Remove container command
 
+use anyhow::Result;
+#[cfg(all(not(windows), not(target_os = "macos")))]
+use exo_runtime::ContainerManager;
 #[cfg(windows)]
 use exo_wsl::WslCommand;
-use exo_runtime::ContainerManager;
-use anyhow::Result;
 
 pub struct RemoveArgs {
     pub container: String,
@@ -16,7 +17,12 @@ pub async fn execute(args: RemoveArgs) -> Result<()> {
         return execute_windows(args).await;
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        return execute_macos(args).await;
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         return execute_linux(args).await;
     }
@@ -24,7 +30,7 @@ pub async fn execute(args: RemoveArgs) -> Result<()> {
 
 #[cfg(windows)]
 async fn execute_windows(args: RemoveArgs) -> Result<()> {
-    use exo_wsl::{WslConfig, WindowsPortForwarder};
+    use exo_wsl::{WindowsPortForwarder, WslConfig};
 
     let wsl_cmd = WslCommand::new(WslConfig::default());
 
@@ -41,7 +47,10 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
 
     // Check if container is running
     if list_output.contains("running") && !args.force {
-        anyhow::bail!("Container {} is running. Use --force to stop and remove.", args.container);
+        anyhow::bail!(
+            "Container {} is running. Use --force to stop and remove.",
+            args.container
+        );
     }
 
     // If running and force, stop first
@@ -53,14 +62,20 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
 
     // Remove the container
     // First try to unmount any overlay mounts that might still be active
-    let _ = wsl_cmd.exec(&format!("umount /var/lib/exo/containers/{}/rootfs 2>/dev/null || true", args.container));
+    let _ = wsl_cmd.exec(&format!(
+        "umount /var/lib/exo/containers/{}/rootfs 2>/dev/null || true",
+        args.container
+    ));
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let remove_result = wsl_cmd.exec(&format!("exo-runtime rm {}", args.container))?;
 
     if remove_result.exit_code != 0 {
         // If removal still fails, try force remove
-        let force_result = wsl_cmd.exec(&format!("rm -rf /var/lib/exo/containers/{} 2>/dev/null && echo 'REMOVED' || echo 'FAILED'", args.container))?;
+        let force_result = wsl_cmd.exec(&format!(
+            "rm -rf /var/lib/exo/containers/{} 2>/dev/null && echo 'REMOVED' || echo 'FAILED'",
+            args.container
+        ))?;
         if force_result.stdout.contains("REMOVED") {
             println!("Container {} removed", args.container);
             return Ok(());
@@ -76,33 +91,44 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+async fn execute_macos(args: RemoveArgs) -> Result<()> {
+    let output = super::mac::backend()?.remove(&args.container, args.force)?;
+    print!("{}", output);
+    Ok(())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 async fn execute_linux(args: RemoveArgs) -> Result<()> {
     let manager = ContainerManager::new()?;
 
     // Find container by name or ID
-    let metadata = manager.find(&args.container)?
+    let metadata = manager
+        .find(&args.container)?
         .ok_or_else(|| anyhow::anyhow!("Container not found: {}", args.container))?;
-    
+
     // Check if container is running
     if metadata.is_running() && !args.force {
-        anyhow::bail!("Container {} is running. Use --force to stop and remove.", metadata.name);
+        anyhow::bail!(
+            "Container {} is running. Use --force to stop and remove.",
+            metadata.name
+        );
     }
-    
+
     // If running and force, stop first
     if metadata.is_running() && args.force {
         println!("Stopping container {} before removal", metadata.name);
-        
+
         if let Some(pid) = metadata.pid {
             // Send SIGKILL
             #[cfg(target_os = "linux")]
             {
                 use nix::sys::signal::{kill, Signal};
                 use nix::unistd::Pid;
-                
+
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
-            
+
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = std::process::Command::new("kill")
@@ -110,16 +136,16 @@ async fn execute_linux(args: RemoveArgs) -> Result<()> {
                     .arg(pid.to_string())
                     .output();
             }
-            
+
             // Wait a moment for process to die
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
-    
+
     // Remove container metadata
     manager.remove(&metadata.name)?;
-    
+
     println!("Container {} removed", metadata.name);
-    
+
     Ok(())
 }

@@ -22,9 +22,9 @@ pub fn is_daemon_running() -> bool {
 /// Start the daemon in WSL2
 #[cfg(target_os = "linux")]
 pub fn start_daemon() -> Result<()> {
-    use std::os::unix::net::UnixListener;
-    use std::os::unix::fs::PermissionsExt;
     use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
     use std::process::Command;
 
     // Clean up old socket if it exists
@@ -73,7 +73,10 @@ fn handle_connection(mut stream: std::os::unix::net::UnixStream) -> Result<()> {
     println!("Exo WSL daemon listening on: {}", SOCKET_PATH);
 
     // Set socket permissions
-    let _ = std::fs::set_permissions(SOCKET_PATH, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+    let _ = std::fs::set_permissions(
+        SOCKET_PATH,
+        std::os::unix::fs::PermissionsExt::from_mode(0o777),
+    );
 
     // Accept connections
     for stream in listener.incoming() {
@@ -96,8 +99,8 @@ fn handle_connection(mut stream: std::os::unix::net::UnixStream) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn handle_connection(mut stream: std::os::unix::net::UnixStream) -> Result<()> {
     use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
     use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
 
     // Set read timeout
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -159,9 +162,7 @@ fn process_request(request: DaemonRequest) -> Result<DaemonResponse> {
                 args.join(" ")
             );
 
-            let output = Command::new("bash")
-                .args(["-c", &cmd])
-                .output()?;
+            let output = Command::new("bash").args(["-c", &cmd]).output()?;
 
             if output.status.success() {
                 Ok(DaemonResponse::Ok {
@@ -194,9 +195,7 @@ fn process_request(request: DaemonRequest) -> Result<DaemonResponse> {
 
         DaemonRequest::List { all } => {
             let arg = if all { "--all" } else { "" };
-            let output = Command::new("exo-runtime")
-                .args(["list", arg])
-                .output()?;
+            let output = Command::new("exo-runtime").args(["list", arg]).output()?;
 
             if output.status.success() {
                 Ok(DaemonResponse::List {
@@ -218,7 +217,8 @@ fn process_request(request: DaemonRequest) -> Result<DaemonResponse> {
 
             // Parse status from list output
             let status = if stdout.contains(&container_id) {
-                if stdout.lines()
+                if stdout
+                    .lines()
                     .any(|l| l.contains(&container_id) && l.contains("running"))
                 {
                     "running".to_string()
@@ -350,10 +350,14 @@ pub fn is_daemon_running() -> bool {
 
 #[cfg(not(target_os = "linux"))]
 pub fn start_daemon() -> Result<()> {
-    Err(anyhow::anyhow!("Daemon mode is only supported on Linux/WSL2"))
+    Err(anyhow::anyhow!(
+        "Daemon mode is only supported on Linux/WSL2"
+    ))
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn stop_daemon() -> Result<()> {
-    Err(anyhow::anyhow!("Daemon mode is only supported on Linux/WSL2"))
+    Err(anyhow::anyhow!(
+        "Daemon mode is only supported on Linux/WSL2"
+    ))
 }

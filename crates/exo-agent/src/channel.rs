@@ -74,24 +74,24 @@ impl StdioChannel {
             stdout: BufWriter::new(tokio::io::stdout()),
         }
     }
-    
+
     /// Receive a message
     pub async fn recv(&mut self) -> Result<Option<InputMessage>> {
         let mut line = String::new();
         self.stdin.read_line(&mut line).await?;
-        
+
         if line.is_empty() {
             return Ok(None);
         }
-        
+
         // Parse JSON
         let msg: InputMessage = serde_json::from_str(&line)
             .with_context(|| format!("Failed to parse message: {}", line))?;
-        
+
         debug!("Received message: {:?}", msg);
         Ok(Some(msg))
     }
-    
+
     /// Send a message
     pub async fn send(&mut self, msg: &OutputMessage) -> Result<()> {
         let json = serde_json::to_string(msg)? + "\n";

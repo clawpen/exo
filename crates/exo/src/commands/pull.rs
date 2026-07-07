@@ -1,6 +1,6 @@
 //! Pull image command
 
-use exo_image::{ImageReference, RegistryClient, ImageStore};
+use exo_image::{ImageReference, ImageStore, RegistryClient};
 
 pub struct PullArgs {
     pub image: String,
@@ -20,7 +20,7 @@ pub async fn execute(args: PullArgs) -> anyhow::Result<()> {
 
     // Create image store
     let store = ImageStore::default();
-    
+
     // Check if already pulled
     if store.has_image(&image_ref) {
         println!("  Image already exists locally");
@@ -30,10 +30,10 @@ pub async fn execute(args: PullArgs) -> anyhow::Result<()> {
     // Create registry client and pull
     let mut client = RegistryClient::new(store)?;
     let pulled = client.pull(&image_ref).await?;
-    
+
     println!("  Config: {}", pulled.config_digest);
     println!("  Layers: {}", pulled.layer_digests.len());
-    
+
     println!("\nSuccessfully pulled {}", args.image);
 
     Ok(())

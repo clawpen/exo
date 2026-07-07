@@ -4,8 +4,8 @@ use crate::WslConfig;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
-use tokio::process::Command as AsyncCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as AsyncCommand;
 
 /// Result from running a command in WSL.
 #[derive(Debug, Clone)]
@@ -129,8 +129,8 @@ impl WslCommand {
 
         // Try to extract the container ID (UUID format)
         if let Some(uuid_line) = stdout.lines().find(|line| {
-            line.contains("Container running in background:") ||
-            line.contains("Starting container:")
+            line.contains("Container running in background:")
+                || line.contains("Starting container:")
         }) {
             // Extract UUID from the line
             if let Some(uuid) = uuid_line
@@ -151,7 +151,10 @@ impl WslCommand {
         }
 
         // Final fallback: use the name as ID
-        tracing::warn!("Could not parse container ID from output, using name: {}", spec.name);
+        tracing::warn!(
+            "Could not parse container ID from output, using name: {}",
+            spec.name
+        );
         Ok(spec.name.clone())
     }
 
@@ -159,11 +162,8 @@ impl WslCommand {
     /// Returns the exit code and combined stdout/stderr output.
     pub fn run_container_sync(&self, spec: &ContainerSpec) -> Result<(i32, String)> {
         // Build the command line args from ContainerSpec
-        let mut args: Vec<String> = vec![
-            "run".to_string(),
-            "--name".to_string(),
-            spec.name.clone(),
-        ];
+        let mut args: Vec<String> =
+            vec!["run".to_string(), "--name".to_string(), spec.name.clone()];
 
         // Add workdir if specified
         if !spec.workdir.is_empty() && spec.workdir != "/" {

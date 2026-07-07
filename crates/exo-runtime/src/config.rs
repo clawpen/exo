@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 /// Complete container configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +74,116 @@ pub struct ContainerConfig {
     /// Defaults to Never (record exit, no restart).
     #[serde(default)]
     pub restart_policy: RestartPolicy,
+
+    /// Runtime backend selection.
+    ///
+    /// `auto` lets the CLI choose the best backend for the current platform,
+    /// while `native` and `linux` pin execution to a specific backend class.
+    #[serde(default)]
+    pub backend: BackendSelection,
+
+    /// Names of secrets (from the Exo secret store) to inject as environment
+    /// variables at spawn time. Only the *names* are stored here so container
+    /// metadata never persists secret values.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+
+    /// Host sandbox policy for backends that support one (currently macOS
+    /// native mode). `auto` applies sandboxing when available and falls back
+    /// with a warning; `required` fails closed if unavailable.
+    #[serde(default)]
+    pub sandbox: SandboxMode,
+}
+
+/// Runtime backend selection for a container run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendSelection {
+    /// Let Exo select the backend for the platform/image.
+    #[default]
+    Auto,
+    /// Native host-process execution (macOS native agent mode).
+    Native,
+    /// Linux container execution (Linux host or macOS microVM once available).
+    Linux,
+}
+
+impl BackendSelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendSelection::Auto => "auto",
+            BackendSelection::Native => "native",
+            BackendSelection::Linux => "linux",
+        }
+    }
+}
+
+impl fmt::Display for BackendSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BackendSelection {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "" | "auto" => Ok(BackendSelection::Auto),
+            "native" | "host" | "native-macos" => Ok(BackendSelection::Native),
+            "linux" | "oci" | "container" | "macos-linux" => Ok(BackendSelection::Linux),
+            other => anyhow::bail!(
+                "invalid backend '{}'; expected one of: auto, native, linux",
+                other
+            ),
+        }
+    }
+}
+
+/// Host sandbox policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    /// Use a host sandbox when supported, otherwise continue with weaker
+    /// isolation and a warning.
+    #[default]
+    Auto,
+    /// Disable host sandboxing.
+    Off,
+    /// Require host sandboxing and fail if it cannot be applied.
+    Required,
+}
+
+impl SandboxMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SandboxMode::Auto => "auto",
+            SandboxMode::Off => "off",
+            SandboxMode::Required => "required",
+        }
+    }
+}
+
+impl fmt::Display for SandboxMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SandboxMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "" | "auto" => Ok(SandboxMode::Auto),
+            "0" | "false" | "off" | "disabled" | "none" => Ok(SandboxMode::Off),
+            "1" | "true" | "on" | "required" | "require" => Ok(SandboxMode::Required),
+            other => anyhow::bail!(
+                "invalid sandbox mode '{}'; expected one of: auto, off, required",
+                other
+            ),
+        }
+    }
 }
 
 /// When the reconciler should re-spawn a container whose process has died.
@@ -109,6 +221,9 @@ impl Default for ContainerConfig {
             architecture: None,
             platform: None,
             restart_policy: RestartPolicy::default(),
+            backend: BackendSelection::default(),
+            secrets: vec![],
+            sandbox: SandboxMode::default(),
         }
     }
 }
@@ -130,13 +245,13 @@ fn default_namespaces() -> Namespaces {
     // Network and cgroup require privileges
     // PID namespace DISABLED: causes hangs with node.js processes in WSL2
     Namespaces {
-        pid: false,      // DISABLED: double-fork hangs with node.js
-        network: false,  // Requires CAP_NET_ADMIN
-        ipc: true,       // Works in user namespace
-        uts: true,       // Works in user namespace
-        mount: true,     // Works in user namespace
-        user: true,      // Core of rootless containers
-        cgroup: false,   // Requires CAP_SYS_ADMIN
+        pid: false,     // DISABLED: double-fork hangs with node.js
+        network: false, // Requires CAP_NET_ADMIN
+        ipc: true,      // Works in user namespace
+        uts: true,      // Works in user namespace
+        mount: true,    // Works in user namespace
+        user: true,     // Core of rootless containers
+        cgroup: false,  // Requires CAP_SYS_ADMIN
     }
 }
 
@@ -360,7 +475,9 @@ pub fn parse_size(size: &str) -> anyhow::Result<u64> {
         (&size[..], "b")
     };
 
-    let num: u64 = num.parse().map_err(|_| anyhow::anyhow!("Invalid size: {}", size))?;
+    let num: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid size: {}", size))?;
 
     Ok(match unit {
         "g" => num * 1024 * 1024 * 1024,
@@ -487,9 +604,27 @@ mod tests {
         assert_eq!(config.hostname, "containment");
         assert!(!config.privileged);
         assert!(!config.readonly_rootfs);
+        assert_eq!(config.backend, BackendSelection::Auto);
         assert!(config.env.is_empty());
         assert!(config.mounts.is_empty());
         assert!(config.gpu.is_none());
+    }
+
+    #[test]
+    fn test_backend_selection_from_str() {
+        assert_eq!(
+            "auto".parse::<BackendSelection>().unwrap(),
+            BackendSelection::Auto
+        );
+        assert_eq!(
+            "native".parse::<BackendSelection>().unwrap(),
+            BackendSelection::Native
+        );
+        assert_eq!(
+            "linux".parse::<BackendSelection>().unwrap(),
+            BackendSelection::Linux
+        );
+        assert!("docker".parse::<BackendSelection>().is_err());
     }
 
     #[test]
@@ -512,13 +647,13 @@ mod tests {
     #[test]
     fn test_namespaces_default() {
         let ns = Namespaces::default();
-        assert!(ns.user);     // Core of rootless containers
-        assert!(!ns.pid);     // DISABLED: hangs with node.js in WSL2
+        assert!(ns.user); // Core of rootless containers
+        assert!(!ns.pid); // DISABLED: hangs with node.js in WSL2
         assert!(!ns.network); // Requires CAP_NET_ADMIN
-        assert!(ns.mount);    // Works in user namespace
-        assert!(ns.uts);      // Works in user namespace
-        assert!(ns.ipc);      // Works in user namespace
-        assert!(!ns.cgroup);  // Requires CAP_SYS_ADMIN
+        assert!(ns.mount); // Works in user namespace
+        assert!(ns.uts); // Works in user namespace
+        assert!(ns.ipc); // Works in user namespace
+        assert!(!ns.cgroup); // Requires CAP_SYS_ADMIN
     }
 
     #[test]
@@ -558,8 +693,8 @@ mod tests {
         assert!(json.contains("test"));
         assert!(json.contains("ubuntu:latest"));
 
-        let deserialized: ContainerConfig = serde_json::from_str(&json)
-            .expect("Failed to deserialize");
+        let deserialized: ContainerConfig =
+            serde_json::from_str(&json).expect("Failed to deserialize");
         assert_eq!(deserialized.name, "test");
         assert_eq!(deserialized.image, "ubuntu:latest");
     }

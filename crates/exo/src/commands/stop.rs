@@ -1,9 +1,10 @@
 //! Stop container command
 
+use anyhow::Result;
+#[cfg(all(not(windows), not(target_os = "macos")))]
+use exo_runtime::ContainerManager;
 #[cfg(windows)]
 use exo_wsl::WslCommand;
-use exo_runtime::ContainerManager;
-use anyhow::Result;
 
 pub struct StopArgs {
     pub container: String,
@@ -17,7 +18,12 @@ pub async fn execute(args: StopArgs) -> Result<()> {
         return execute_windows(args).await;
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        return execute_macos(args).await;
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         return execute_linux(args).await;
     }
@@ -25,7 +31,7 @@ pub async fn execute(args: StopArgs) -> Result<()> {
 
 #[cfg(windows)]
 async fn execute_windows(args: StopArgs) -> Result<()> {
-    use exo_wsl::{WslConfig, WindowsPortForwarder};
+    use exo_wsl::{WindowsPortForwarder, WslConfig};
 
     let wsl_cmd = WslCommand::new(WslConfig::default());
 
@@ -67,21 +73,33 @@ async fn execute_windows(args: StopArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+async fn execute_macos(args: StopArgs) -> Result<()> {
+    let output = super::mac::backend()?.stop(&args.container, args.force, args.time)?;
+    print!("{}", output);
+    Ok(())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 async fn execute_linux(args: StopArgs) -> Result<()> {
     let manager = ContainerManager::new()?;
 
     // Find container by name or ID
-    let mut metadata = manager.find(&args.container)?
+    let mut metadata = manager
+        .find(&args.container)?
         .ok_or_else(|| anyhow::anyhow!("Container not found: {}", args.container))?;
 
     // Check if container is running
     if !metadata.is_running() {
-        println!("Container {} is not running (status: {})", metadata.name, metadata.status);
+        println!(
+            "Container {} is not running (status: {})",
+            metadata.name, metadata.status
+        );
         return Ok(());
     }
 
-    let pid = metadata.pid
+    let pid = metadata
+        .pid
         .ok_or_else(|| anyhow::anyhow!("Container has no PID"))?;
 
     // Send signal to stop the container
@@ -90,7 +108,10 @@ async fn execute_linux(args: StopArgs) -> Result<()> {
         // Send SIGKILL
         send_signal(pid, 9)?;
     } else {
-        println!("Stopping container: {} (waiting {}s)", metadata.name, args.time);
+        println!(
+            "Stopping container: {} (waiting {}s)",
+            metadata.name, args.time
+        );
         // Send SIGTERM
         send_signal(pid, 15)?;
 
@@ -119,17 +140,17 @@ fn send_signal(pid: u32, signal: i32) -> Result<()> {
     {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
-        
+
         let signal = match signal {
             9 => Signal::SIGKILL,
             15 => Signal::SIGTERM,
             _ => return Err(anyhow::anyhow!("Unsupported signal: {}", signal)),
         };
-        
+
         kill(Pid::from_raw(pid as i32), signal)
             .map_err(|e| anyhow::anyhow!("Failed to send signal: {}", e))?;
     }
-    
+
     #[cfg(not(target_os = "linux"))]
     {
         // Fallback for non-Linux systems
@@ -138,12 +159,12 @@ fn send_signal(pid: u32, signal: i32) -> Result<()> {
             .arg(pid.to_string())
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to send signal: {}", e))?;
-        
+
         if !output.status.success() {
             return Err(anyhow::anyhow!("Failed to send signal to process {}", pid));
         }
     }
-    
+
     Ok(())
 }
 
@@ -151,18 +172,18 @@ fn send_signal(pid: u32, signal: i32) -> Result<()> {
 fn wait_for_exit(pid: u32, timeout_secs: u64) -> bool {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
-    
+
     loop {
         // Check if process still exists
         let proc_path = format!("/proc/{}", pid);
         if !std::path::Path::new(&proc_path).exists() {
             return true;
         }
-        
+
         if start.elapsed() >= timeout {
             return false;
         }
-        
+
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }

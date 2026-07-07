@@ -76,13 +76,27 @@ impl Architecture {
     /// Get the magic bytes for ELF identification as a byte string.
     pub fn magic_bytes(&self) -> &'static [u8] {
         match self {
-            Architecture::Arm => b"\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00",
-            Architecture::Aarch64 => b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xb7\x00",
-            Architecture::Riscv64 => b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf3\x00",
-            Architecture::Ppc64Le => b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x15\x00",
-            Architecture::S390x => b"\x7fELF\x02\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x16",
-            Architecture::X86_64 | Architecture::Amd64 => b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x3e\x00",
-            Architecture::Mips64Le => b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00",
+            Architecture::Arm => {
+                b"\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00"
+            }
+            Architecture::Aarch64 => {
+                b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xb7\x00"
+            }
+            Architecture::Riscv64 => {
+                b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf3\x00"
+            }
+            Architecture::Ppc64Le => {
+                b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x15\x00"
+            }
+            Architecture::S390x => {
+                b"\x7fELF\x02\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x16"
+            }
+            Architecture::X86_64 | Architecture::Amd64 => {
+                b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x3e\x00"
+            }
+            Architecture::Mips64Le => {
+                b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00"
+            }
         }
     }
 
@@ -181,8 +195,7 @@ pub const BINFMT_MISC_PATH: &str = "/proc/sys/fs/binfmt_misc";
 
 /// Check if binfmt_misc is available and mounted.
 pub fn is_binfmt_available() -> bool {
-    Path::new(BINFMT_MISC_PATH).exists() ||
-        Path::new("/sys/fs/binfmt_misc").exists()
+    Path::new(BINFMT_MISC_PATH).exists() || Path::new("/sys/fs/binfmt_misc").exists()
 }
 
 /// Mount binfmt_misc if not already mounted.
@@ -240,23 +253,26 @@ pub fn register_binfmt(arch: Architecture) -> Result<()> {
     let mask = arch.elf_mask();
 
     // Convert byte arrays to hex strings for binfmt_misc
-    let magic_hex: String = magic.iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let magic_hex: String = magic.iter().map(|b| format!("{:02x}", b)).collect();
 
-    let mask_hex: String = mask.iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let mask_hex: String = mask.iter().map(|b| format!("{:02x}", b)).collect();
 
     let registration = format!(
         ":{}:{}:{}:{}:OC",
-        binfmt_name, magic_hex, mask_hex, qemu_path.display()
+        binfmt_name,
+        magic_hex,
+        mask_hex,
+        qemu_path.display()
     );
 
     fs::write(&register_path, registration)
         .with_context(|| format!("Failed to register binfmt for {:?}", arch))?;
 
-    tracing::info!("Registered binfmt handler for {:?}: {}", arch, qemu_path.display());
+    tracing::info!(
+        "Registered binfmt handler for {:?}: {}",
+        arch,
+        qemu_path.display()
+    );
 
     Ok(())
 }
@@ -378,10 +394,7 @@ impl BinfmtStatus {
 
         // Remaining lines are flags
         let flags = if lines.len() > 2 {
-            lines[2..]
-                .iter()
-                .map(|s| s.trim().to_string())
-                .collect()
+            lines[2..].iter().map(|s| s.trim().to_string()).collect()
         } else {
             vec![]
         };
@@ -427,13 +440,13 @@ pub fn detect_binary_arch(path: &Path) -> Option<Architecture> {
     let e_machine = u16::from_le_bytes([buffer[18], buffer[19]]);
 
     match (e_machine, is_64bit, is_little_endian) {
-        (40, false, _) => Some(Architecture::Arm),          // EM_ARM
-        (62, true, _) => Some(Architecture::X86_64),       // EM_X86_64
-        (183, true, _) => Some(Architecture::Aarch64),     // EM_AARCH64
-        (243, true, _) => Some(Architecture::Riscv64),     // EM_RISCV
-        (21, true, true) => Some(Architecture::Ppc64Le),   // EM_PPC64 (little endian)
-        (22, true, false) => Some(Architecture::S390x),    // EM_S390
-        (8, true, true) => Some(Architecture::Mips64Le),   // EM_MIPS
+        (40, false, _) => Some(Architecture::Arm),       // EM_ARM
+        (62, true, _) => Some(Architecture::X86_64),     // EM_X86_64
+        (183, true, _) => Some(Architecture::Aarch64),   // EM_AARCH64
+        (243, true, _) => Some(Architecture::Riscv64),   // EM_RISCV
+        (21, true, true) => Some(Architecture::Ppc64Le), // EM_PPC64 (little endian)
+        (22, true, false) => Some(Architecture::S390x),  // EM_S390
+        (8, true, true) => Some(Architecture::Mips64Le), // EM_MIPS
         _ => None,
     }
 }
@@ -518,10 +531,16 @@ mod tests {
     #[test]
     fn test_architecture_from_str() {
         assert_eq!(Architecture::from_str("arm"), Some(Architecture::Arm));
-        assert_eq!(Architecture::from_str("aarch64"), Some(Architecture::Aarch64));
+        assert_eq!(
+            Architecture::from_str("aarch64"),
+            Some(Architecture::Aarch64)
+        );
         assert_eq!(Architecture::from_str("arm64"), Some(Architecture::Aarch64));
         assert_eq!(Architecture::from_str("x86_64"), Some(Architecture::X86_64));
-        assert_eq!(Architecture::from_str("riscv64"), Some(Architecture::Riscv64));
+        assert_eq!(
+            Architecture::from_str("riscv64"),
+            Some(Architecture::Riscv64)
+        );
         assert_eq!(Architecture::from_str("unknown"), None);
     }
 

@@ -41,7 +41,9 @@ impl ToolRegistry {
 
     pub fn execute(&self, name: &str, args: Value) -> Result<Value> {
         let tools = self.tools.lock().unwrap();
-        let tool = tools.get(name).ok_or_else(|| Error::ToolNotFound(name.to_string()))?;
+        let tool = tools
+            .get(name)
+            .ok_or_else(|| Error::ToolNotFound(name.to_string()))?;
         tool.execute(args)
     }
 

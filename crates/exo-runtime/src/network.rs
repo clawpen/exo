@@ -5,8 +5,8 @@
 //! forward traffic from host ports to container ports.
 
 use anyhow::{Context, Result};
-use std::process::{Child, Command, Stdio};
 use std::fs;
+use std::process::{Child, Command, Stdio};
 
 /// Port forwarder using socat or similar tools.
 pub struct PortForwarder {
@@ -29,7 +29,7 @@ impl PortForwarder {
     }
 
     /// Start port forwarding using socat.
-    /// 
+    ///
     /// For rootless containers, this listens on the host port and
     /// forwards connections to the container's loopback interface.
     /// Note: This works best when the container shares the host network namespace.
@@ -57,7 +57,11 @@ impl PortForwarder {
             .context("Failed to start socat for port forwarding")?;
 
         self.process = Some(child);
-        tracing::info!("Started port forwarding: {} -> {}", host_port, container_port);
+        tracing::info!(
+            "Started port forwarding: {} -> {}",
+            host_port,
+            container_port
+        );
 
         Ok(())
     }
@@ -85,7 +89,11 @@ impl PortForwarder {
             .context("Failed to start ncat for port forwarding")?;
 
         self.process = Some(child);
-        tracing::info!("Started port forwarding with ncat: {} -> {}", host_port, container_port);
+        tracing::info!(
+            "Started port forwarding with ncat: {} -> {}",
+            host_port,
+            container_port
+        );
 
         Ok(())
     }
@@ -95,7 +103,11 @@ impl PortForwarder {
         if let Some(mut child) = self.process.take() {
             let _ = child.kill();
             let _ = child.wait();
-            tracing::info!("Stopped port forwarding: {} -> {}", self.host_port, self.container_port);
+            tracing::info!(
+                "Stopped port forwarding: {} -> {}",
+                self.host_port,
+                self.container_port
+            );
         }
         Ok(())
     }
@@ -117,15 +129,15 @@ fn is_command_available(cmd: &str) -> bool {
 }
 
 /// Set up port forwarding for a container.
-/// 
+///
 /// For containers with isolated network namespaces, this requires
 /// the container's network namespace file descriptor to enter it.
 /// For containers sharing the host network, no forwarding is needed.
-/// 
+///
 /// # Arguments
 /// * `port_mappings` - List of port mappings (host_port, container_port)
 /// * `netns_path` - Path to the container's network namespace (e.g., /proc/PID/ns/net)
-/// 
+///
 /// # Returns
 /// Vector of PortForwarder handles that will clean up when dropped.
 pub fn setup_port_forwarding(
@@ -136,8 +148,12 @@ pub fn setup_port_forwarding(
 
     for (host_port, container_port) in port_mappings {
         let mut forwarder = PortForwarder::new(*host_port, *container_port);
-        forwarder.start()
-            .with_context(|| format!("Failed to set up port forwarding {} -> {}", host_port, container_port))?;
+        forwarder.start().with_context(|| {
+            format!(
+                "Failed to set up port forwarding {} -> {}",
+                host_port, container_port
+            )
+        })?;
         forwarders.push(forwarder);
     }
 
@@ -145,7 +161,7 @@ pub fn setup_port_forwarding(
 }
 
 /// Port forwarder that runs in the background and forwards to a specific PID's network namespace.
-/// 
+///
 /// This is useful for rootless containers with isolated network namespaces.
 pub struct NetnsPortForwarder {
     /// The socat process
@@ -156,13 +172,15 @@ pub struct NetnsPortForwarder {
 
 impl NetnsPortForwarder {
     /// Create a port forwarder that enters a specific network namespace.
-    /// 
+    ///
     /// Uses nsenter to enter the container's network namespace and then
     /// socat to forward traffic.
     pub fn new_for_netns(host_port: u16, container_port: u16, pid: u32) -> Result<Self> {
         // Check if nsenter and socat are available
         if !is_command_available("nsenter") {
-            return Err(anyhow::anyhow!("nsenter not available for network namespace port forwarding"));
+            return Err(anyhow::anyhow!(
+                "nsenter not available for network namespace port forwarding"
+            ));
         }
         if !is_command_available("socat") {
             return Err(anyhow::anyhow!("socat not available for port forwarding"));
@@ -183,8 +201,12 @@ impl NetnsPortForwarder {
             .spawn()
             .context("Failed to start nsenter+socat for port forwarding")?;
 
-        tracing::info!("Started netns port forwarding: host {} -> container PID {} port {}", 
-            host_port, pid, container_port);
+        tracing::info!(
+            "Started netns port forwarding: host {} -> container PID {} port {}",
+            host_port,
+            pid,
+            container_port
+        );
 
         Ok(Self {
             process: Some(child),
@@ -211,15 +233,26 @@ impl Drop for NetnsPortForwarder {
 
 /// Alternative: Use iptables for port forwarding (requires elevated privileges).
 /// This is typically not available for rootless containers.
-pub fn setup_iptables_forwarding(host_port: u16, container_ip: &str, container_port: u16) -> Result<()> {
+pub fn setup_iptables_forwarding(
+    host_port: u16,
+    container_ip: &str,
+    container_port: u16,
+) -> Result<()> {
     // DNAT rule for incoming traffic
     let status = Command::new("iptables")
         .args([
-            "-t", "nat", "-A", "PREROUTING",
-            "-p", "tcp",
-            "--dport", &host_port.to_string(),
-            "-j", "DNAT",
-            "--to-destination", &format!("{}:{}", container_ip, container_port),
+            "-t",
+            "nat",
+            "-A",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "--dport",
+            &host_port.to_string(),
+            "-j",
+            "DNAT",
+            "--to-destination",
+            &format!("{}:{}", container_ip, container_port),
         ])
         .status()
         .context("Failed to run iptables")?;
@@ -231,11 +264,18 @@ pub fn setup_iptables_forwarding(host_port: u16, container_ip: &str, container_p
     // SNAT rule for response traffic
     let status = Command::new("iptables")
         .args([
-            "-t", "nat", "-A", "POSTROUTING",
-            "-p", "tcp",
-            "-d", container_ip,
-            "--dport", &container_port.to_string(),
-            "-j", "MASQUERADE",
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-p",
+            "tcp",
+            "-d",
+            container_ip,
+            "--dport",
+            &container_port.to_string(),
+            "-j",
+            "MASQUERADE",
         ])
         .status()
         .context("Failed to run iptables")?;
@@ -244,7 +284,12 @@ pub fn setup_iptables_forwarding(host_port: u16, container_ip: &str, container_p
         return Err(anyhow::anyhow!("iptables SNAT rule failed"));
     }
 
-    tracing::info!("Set up iptables port forwarding: {} -> {}:{}", host_port, container_ip, container_port);
+    tracing::info!(
+        "Set up iptables port forwarding: {} -> {}:{}",
+        host_port,
+        container_ip,
+        container_port
+    );
     Ok(())
 }
 

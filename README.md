@@ -90,6 +90,7 @@ exo/
 │   │   │   └── process.rs       # Process spawning
 │   ├── exo-image/               # OCI image operations
 │   ├── exo-wsl/                 # WSL2 backend (Windows)
+│   ├── exo-mac/                 # Native process backend (macOS)
 │   └── exo-gpu/                 # GPU detection
 └── docs/                        # Architecture & design docs
 ```
@@ -124,6 +125,18 @@ Windows ──────▶ WSL2 ──────▶ Linux Container
 
 Single `exo.exe` handles WSL2 installation, distro management, and container execution.
 
+## macOS Support
+
+On macOS, Exo uses a native Rust process backend. It keeps Exo lifecycle
+semantics for local agent/tool workloads without requiring Lima, Docker Desktop,
+or another VM. The backend clears inherited host environment variables, uses
+per-container Exo home/tmp directories, and applies a macOS sandbox profile when
+the host permits it. Linux-only isolation features are reported as unsupported
+rather than silently emulated. `--gpu` detects and exposes the host Mac GPU via
+Metal-friendly environment hints.
+
+See [`docs/MACOS.md`](docs/MACOS.md) for usage and current limitations.
+
 ## For All Agents
 
 Exo is designed to serve any AI agent that needs sandboxed tool execution:
@@ -140,6 +153,7 @@ One container runtime, many agents.
 - [x] Storage layer (overlay2, OCI images)
 - [x] Agent communication protocol
 - [x] Windows support (WSL2 backend)
+- [x] macOS support (native process backend)
 - [x] GPU passthrough
 - [ ] Container networking (bridge mode)
 - [ ] Multi-agent orchestration

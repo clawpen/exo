@@ -16,7 +16,7 @@ struct Cli {
     command: Commands,
 
     /// Enable debug logging
-    #[arg(short, long, global = true)]
+    #[arg(long, global = true)]
     debug: bool,
 
     /// Quiet mode (minimal output)
@@ -54,6 +54,10 @@ enum Commands {
         /// Environment variables (KEY=VALUE)
         #[arg(short, long, value_name = "KEY=VALUE")]
         env: Vec<String>,
+
+        /// Secret names to inject from `exo secret` as environment variables
+        #[arg(long, value_name = "NAME")]
+        secret: Vec<String>,
 
         /// Enable GPU passthrough
         #[arg(long)]
@@ -94,6 +98,14 @@ enum Commands {
         /// Detach from container (run in background)
         #[arg(short, long)]
         detach: bool,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
+
+        /// Host sandbox mode: auto, off, or required
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        sandbox: String,
     },
 
     /// List running containers
@@ -157,7 +169,7 @@ enum Commands {
         tail: usize,
 
         /// Show timestamps
-        #[arg(short, long)]
+        #[arg(long)]
         timestamps: bool,
     },
 
@@ -206,6 +218,19 @@ enum Commands {
         name: Option<String>,
     },
 
+    /// Manage local Exo secrets
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommands,
+    },
+
+    /// Diagnose host readiness for Exo
+    Doctor {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show the daemon's lifecycle event log
     Events {
         /// Filter to one container (by id or name)
@@ -247,9 +272,172 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Show backend information and capabilities
+    Backend {
+        #[command(subcommand)]
+        command: BackendCommands,
+    },
+
+    /// Inspect GPU availability
+    Gpu {
+        #[command(subcommand)]
+        command: GpuCommands,
+    },
+
+    /// Manage the Exo Linux microVM (macOS only)
+    #[command(alias = "machine")]
+    Vm {
+        #[command(subcommand)]
+        command: VmCommands,
+    },
+
+    /// Manage named volumes
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommands,
+    },
 }
 
-#[tokio::main]
+#[derive(Subcommand, Debug)]
+enum BackendCommands {
+    /// Show active backend and capabilities
+    Info {
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GpuCommands {
+    /// List detected GPUs
+    List {
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum VmCommands {
+    /// Download/build the guest image
+    Init {
+        /// Force re-download and rebuild
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Start the VM
+    Start {
+        /// Run in foreground and attach to VM output
+        #[arg(long)]
+        foreground: bool,
+    },
+
+    /// Internal: run the VM control daemon in this process
+    #[command(hide = true)]
+    Serve,
+
+    /// Stop the VM
+    Stop {
+        /// Force stop
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Show VM status
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Reset the VM image and state
+    Reset {
+        /// Keep runtime state file
+        #[arg(long)]
+        keep_state: bool,
+    },
+
+    /// Install a built guest agent binary for embedding during `exo vm init`
+    InstallGuestAgent {
+        /// Path to exo-vm-guest-init built for the Linux guest architecture
+        path: PathBuf,
+    },
+
+    /// Import an image rootfs tarball already visible inside the guest VM
+    ImportImage {
+        /// Image name/tag to register in guest state
+        image: String,
+
+        /// Path to a tar or tar.gz archive inside the guest VM
+        #[arg(long, value_name = "PATH")]
+        guest_path: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SecretCommands {
+    /// Store a secret value (from --value, matching env var, or stdin)
+    Set {
+        /// Secret name
+        name: String,
+
+        /// Secret value; omit to read env var with the same name or stdin
+        #[arg(long)]
+        value: Option<String>,
+    },
+
+    /// List secret names (values are never printed)
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a secret
+    Remove {
+        /// Secret name
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum VolumeCommands {
+    /// Create a named volume
+    Create {
+        /// Volume name
+        name: String,
+    },
+
+    /// List named volumes
+    #[command(alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect a named volume
+    Inspect {
+        /// Volume name
+        name: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a named volume
+    #[command(alias = "rm")]
+    Remove {
+        /// Volume name
+        name: String,
+    },
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -269,7 +457,28 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the appropriate command
     match cli.command {
-        Commands::Run { image, command, name, config, workdir, volume, env, gpu, gpu_type, memory, cpu, network, publish, rm, interactive, tty, detach } => {
+        Commands::Run {
+            image,
+            command,
+            name,
+            config,
+            workdir,
+            volume,
+            env,
+            secret,
+            gpu,
+            gpu_type,
+            memory,
+            cpu,
+            network,
+            publish,
+            rm,
+            interactive,
+            tty,
+            detach,
+            backend,
+            sandbox,
+        } => {
             commands::run::execute(commands::run::RunArgs {
                 image,
                 command,
@@ -278,6 +487,7 @@ async fn main() -> anyhow::Result<()> {
                 workdir,
                 volume,
                 env,
+                secret,
                 gpu,
                 gpu_type,
                 memory,
@@ -288,7 +498,10 @@ async fn main() -> anyhow::Result<()> {
                 interactive,
                 tty,
                 detach,
-            }).await?
+                backend,
+                sandbox,
+            })
+            .await?
         }
         Commands::List { all, json } => {
             commands::list::execute(commands::list::ListArgs { all, json }).await?
@@ -296,17 +509,50 @@ async fn main() -> anyhow::Result<()> {
         Commands::Start { container, attach } => {
             commands::start::execute(commands::start::StartArgs { container, attach }).await?
         }
-        Commands::Stop { container, force, time } => {
-            commands::stop::execute(commands::stop::StopArgs { container, force, time }).await?
+        Commands::Stop {
+            container,
+            force,
+            time,
+        } => {
+            commands::stop::execute(commands::stop::StopArgs {
+                container,
+                force,
+                time,
+            })
+            .await?
         }
         Commands::Remove { container, force } => {
             commands::remove::execute(commands::remove::RemoveArgs { container, force }).await?
         }
-        Commands::Logs { container, follow, tail, timestamps } => {
-            commands::logs::execute(commands::logs::LogsArgs { container, follow, tail, timestamps }).await?
+        Commands::Logs {
+            container,
+            follow,
+            tail,
+            timestamps,
+        } => {
+            commands::logs::execute(commands::logs::LogsArgs {
+                container,
+                follow,
+                tail,
+                timestamps,
+            })
+            .await?
         }
-        Commands::Exec { container, command, interactive, tty, user } => {
-            commands::exec::execute(commands::exec::ExecArgs { container, command, interactive, tty, user }).await?
+        Commands::Exec {
+            container,
+            command,
+            interactive,
+            tty,
+            user,
+        } => {
+            commands::exec::execute(commands::exec::ExecArgs {
+                container,
+                command,
+                interactive,
+                tty,
+                user,
+            })
+            .await?
         }
         Commands::Pull { image } => {
             commands::pull::execute(commands::pull::PullArgs { image }).await?
@@ -318,12 +564,43 @@ async fn main() -> anyhow::Result<()> {
             commands::import::execute(commands::import::ImportArgs {
                 tarball: PathBuf::from(tarball),
                 name,
-            }).await?
+            })
+            .await?
         }
-        Commands::Events { container, limit, json } => {
-            commands::events::execute(commands::events::EventsArgs { container, limit, json }).await?
+        Commands::Secret { command } => match command {
+            SecretCommands::Set { name, value } => {
+                commands::secret::set(commands::secret::SecretSetArgs { name, value }).await?
+            }
+            SecretCommands::List { json } => {
+                commands::secret::list(commands::secret::SecretListArgs { json }).await?
+            }
+            SecretCommands::Remove { name } => {
+                commands::secret::remove(commands::secret::SecretRemoveArgs { name }).await?
+            }
+        },
+        Commands::Doctor { json } => {
+            commands::doctor::execute(commands::doctor::DoctorArgs { json }).await?
         }
-        Commands::Daemon { foreground, stop, status, socket, timeout, json } => {
+        Commands::Events {
+            container,
+            limit,
+            json,
+        } => {
+            commands::events::execute(commands::events::EventsArgs {
+                container,
+                limit,
+                json,
+            })
+            .await?
+        }
+        Commands::Daemon {
+            foreground,
+            stop,
+            status,
+            socket,
+            timeout,
+            json,
+        } => {
             if stop {
                 commands::daemon::stop()?;
             } else if status {
@@ -337,6 +614,45 @@ async fn main() -> anyhow::Result<()> {
                 })?;
             }
         }
+        Commands::Backend { command } => match command {
+            BackendCommands::Info { json } => {
+                commands::backend::info(commands::backend::BackendInfoArgs { json }).await?
+            }
+        },
+        Commands::Gpu { command } => match command {
+            GpuCommands::List { json } => {
+                commands::gpu::list(commands::gpu::GpuListArgs { json }).await?
+            }
+        },
+        Commands::Vm { command } => match command {
+            VmCommands::Init { force } => commands::vm::init(force).await?,
+            VmCommands::Start { foreground } => commands::vm::start(foreground).await?,
+            VmCommands::Serve => commands::vm::serve().await?,
+            VmCommands::Stop { force } => commands::vm::stop(force).await?,
+            VmCommands::Status { json } => commands::vm::status(json).await?,
+            VmCommands::Reset { keep_state } => commands::vm::reset(keep_state).await?,
+            VmCommands::InstallGuestAgent { path } => {
+                commands::vm::install_guest_agent(path).await?
+            }
+            VmCommands::ImportImage { image, guest_path } => {
+                commands::vm::import_image(image, guest_path).await?
+            }
+        },
+        Commands::Volume { command } => match command {
+            VolumeCommands::Create { name } => {
+                commands::volume::create(commands::volume::VolumeCreateArgs { name }).await?
+            }
+            VolumeCommands::List { json } => {
+                commands::volume::list(commands::volume::VolumeListArgs { json }).await?
+            }
+            VolumeCommands::Inspect { name, json } => {
+                commands::volume::inspect(commands::volume::VolumeInspectArgs { name, json })
+                    .await?
+            }
+            VolumeCommands::Remove { name } => {
+                commands::volume::remove(commands::volume::VolumeRemoveArgs { name }).await?
+            }
+        },
     }
 
     Ok(())

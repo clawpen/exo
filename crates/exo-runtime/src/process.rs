@@ -4,27 +4,27 @@
 //! with proper Linux namespace isolation, cgroup limits, root filesystem
 //! setup, and security filtering.
 
+use crate::agent::{self, get_agent_profile, AgentConfigExt, AgentProfile};
+use crate::binfmt::{self, Architecture};
 use crate::cgroup::{self, CgroupManager};
 use crate::config::ContainerConfig;
+use crate::namespace::{unshare_namespaces, Namespace, NamespaceFlags};
 use crate::rootfs::{self, pivot_rootfs, prepare_rootfs, setup_mounts};
 use crate::seccomp::{self, apply_seccomp, default_profile};
 use crate::security::{self, drop_capabilities, get_default_caps};
 use crate::userns::{self, setup_user_namespace, GidMap, UidMap};
-use crate::namespace::{Namespace, NamespaceFlags, unshare_namespaces};
-use crate::binfmt::{self, Architecture};
-use crate::agent::{self, AgentConfigExt, get_agent_profile, AgentProfile};
 use anyhow::{Context, Result};
 
 #[cfg(target_os = "linux")]
 use {
-    nix::sys::wait::{waitpid, WaitStatus},
-    nix::sys::signal::{self, Signal},
-    nix::unistd::{self, Pid, Uid, Gid},
-    nix::sched::{clone, unshare, CloneFlags},
     nix::mount::{mount, MsFlags},
+    nix::sched::{clone, unshare, CloneFlags},
+    nix::sys::signal::{self, Signal},
+    nix::sys::wait::{waitpid, WaitStatus},
+    nix::unistd::{self, Gid, Pid, Uid},
     std::ffi::CString,
-    std::os::unix::io::{AsRawFd, RawFd, OwnedFd},
     std::fs::File,
+    std::os::unix::io::{AsRawFd, OwnedFd, RawFd},
 };
 
 /// Container process handle.
@@ -121,8 +121,7 @@ impl ContainerProcess {
         }
 
         // First, prepare the rootfs (creates directories, checks for image)
-        let rootfs_path = prepare_rootfs(config)
-            .context("Failed to prepare root filesystem")?;
+        let rootfs_path = prepare_rootfs(config).context("Failed to prepare root filesystem")?;
 
         // Set up overlay mount BEFORE forking (requires CAP_SYS_ADMIN)
         // This is critical: overlay mounts must be done in the parent process
@@ -136,7 +135,10 @@ impl ContainerProcess {
                     // Overlay mount failed - use the actual image rootfs (lower layer)
                     // NOT the empty mount point directory
                     tracing::warn!("Overlay mount failed ({}), using read-only image rootfs", e);
-                    tracing::info!("Falling back to image rootfs at: {:?}", overlay_config.lower);
+                    tracing::info!(
+                        "Falling back to image rootfs at: {:?}",
+                        overlay_config.lower
+                    );
                     overlay_config.lower
                 }
             }
@@ -146,7 +148,8 @@ impl ContainerProcess {
 
         // Set up cgroup manager
         let mut cgroup_manager = CgroupManager::new(&config.name)?;
-        cgroup_manager.initialize()
+        cgroup_manager
+            .initialize()
             .context("Failed to initialize cgroup")?;
 
         // Apply resource limits from config
@@ -189,7 +192,9 @@ impl ContainerProcess {
     /// Non-Linux stub
     #[cfg(not(target_os = "linux"))]
     pub fn spawn(_config: &ContainerConfig) -> Result<Self> {
-        Err(anyhow::anyhow!("Container spawning is only supported on Linux"))
+        Err(anyhow::anyhow!(
+            "Container spawning is only supported on Linux"
+        ))
     }
 
     /// Wait for the process to exit.
@@ -198,12 +203,8 @@ impl ContainerProcess {
         use nix::errno::Errno;
 
         match waitpid(self.pid, None) {
-            Ok(WaitStatus::Exited(_, exit_code)) => {
-                Ok(ProcessState::Exited(exit_code))
-            }
-            Ok(WaitStatus::Signaled(_, signal, _)) => {
-                Ok(ProcessState::Failed(signal as i32))
-            }
+            Ok(WaitStatus::Exited(_, exit_code)) => Ok(ProcessState::Exited(exit_code)),
+            Ok(WaitStatus::Signaled(_, signal, _)) => Ok(ProcessState::Failed(signal as i32)),
             Ok(_) => Ok(ProcessState::Running),
             Err(Errno::ESRCH) => {
                 // Process already exited and was reaped - treat as success
@@ -217,11 +218,17 @@ impl ContainerProcess {
                 let proc_path = format!("/proc/{}", self.pid.as_raw());
                 if std::path::Path::new(&proc_path).exists() {
                     // Process is still running - return Running and let caller poll again
-                    tracing::trace!("Process {} is not a direct child but still running", self.pid);
+                    tracing::trace!(
+                        "Process {} is not a direct child but still running",
+                        self.pid
+                    );
                     Ok(ProcessState::Running)
                 } else {
                     // Process has exited
-                    tracing::debug!("Process {} not a direct child and not in /proc, assuming exit 0", self.pid);
+                    tracing::debug!(
+                        "Process {} not a direct child and not in /proc, assuming exit 0",
+                        self.pid
+                    );
                     Ok(ProcessState::Exited(0))
                 }
             }
@@ -329,7 +336,8 @@ fn apply_resource_limits(cgroup: &CgroupManager, config: &ContainerConfig) -> Re
     // CPU limit
     if let Some(ref cpu_str) = config.resources.cpu {
         // Parse as CPU count (e.g., "2" for 2 CPUs, "0.5" for half a CPU)
-        let cpu_count: f64 = cpu_str.parse()
+        let cpu_count: f64 = cpu_str
+            .parse()
             .or_else(|_| {
                 // Try parsing as percentage (e.g., "200%")
                 let s = cpu_str.trim().trim_end_matches('%');
@@ -385,10 +393,10 @@ pub fn spawn_container_fork(
     options: &SpawnOptions,
 ) -> Result<(Pid, RawFd)> {
     use std::io::{Read, Write};
-    
+
     // Check if we need PID namespace (requires double-fork)
     let use_pid_namespace = config.namespaces.pid;
-    
+
     // Create pipes for bidirectional synchronization
     // Pipe 1: child -> parent (child ready for uid_map)
     // Pipe 2: parent -> child (uid_map written, continue)
@@ -401,59 +409,64 @@ pub fn spawn_container_fork(
             // Close child ends in parent
             drop(child_to_parent_write);
             drop(parent_to_child_read);
-            
+
             if options.use_user_namespace {
                 // Wait for child to create user namespace
                 let mut buf = [0u8; 1];
                 let _ = unistd::read(child_to_parent_read.as_raw_fd(), &mut buf);
-                
+
                 // Write uid_map: map container uid 0 to our uid
                 let uid = unsafe { libc::getuid() };
                 let gid = unsafe { libc::getgid() };
-                
+
                 let uid_map_path = format!("/proc/{}/uid_map", child.as_raw());
                 let gid_map_path = format!("/proc/{}/gid_map", child.as_raw());
                 let setgroups_path = format!("/proc/{}/setgroups", child.as_raw());
-                
+
                 // Disable setgroups before writing gid_map (required for unprivileged)
                 let _ = std::fs::write(&setgroups_path, "deny\n");
-                
+
                 // uid_map format: "container_uid host_uid count"
                 // Map container root (0) to our uid, range 1
                 let uid_map = format!("0 {} 1\n", uid);
                 let gid_map = format!("0 {} 1\n", gid);
-                
+
                 std::fs::write(&uid_map_path, &uid_map)
                     .with_context(|| format!("Failed to write uid_map to {}", uid_map_path))?;
                 std::fs::write(&gid_map_path, &gid_map)
                     .with_context(|| format!("Failed to write gid_map to {}", gid_map_path))?;
-                
-                tracing::debug!("Wrote uid_map: {} and gid_map: {}", uid_map.trim(), gid_map.trim());
-                
+
+                tracing::debug!(
+                    "Wrote uid_map: {} and gid_map: {}",
+                    uid_map.trim(),
+                    gid_map.trim()
+                );
+
                 // Signal child to continue
                 let _ = unistd::write(&parent_to_child_write, b"X");
             }
-            
+
             // Wait for the actual container PID if using double-fork
             let container_pid = if use_pid_namespace {
                 // The intermediate process will write the grandchild PID to us
                 let mut pid_buf = [0u8; 16];
                 let n = unistd::read(child_to_parent_read.as_raw_fd(), &mut pid_buf)
                     .context("Failed to read container PID from intermediate")?;
-                let pid_str = std::str::from_utf8(&pid_buf[..n])
-                    .context("Invalid PID string")?;
-                let pid: i32 = pid_str.trim().parse()
+                let pid_str = std::str::from_utf8(&pid_buf[..n]).context("Invalid PID string")?;
+                let pid: i32 = pid_str
+                    .trim()
+                    .parse()
                     .context("Failed to parse container PID")?;
                 tracing::debug!("Container running in PID namespace as PID {}", pid);
                 Pid::from_raw(pid)
             } else {
                 child
             };
-            
+
             // Close remaining pipes
             drop(child_to_parent_read);
             drop(parent_to_child_write);
-            
+
             Ok((container_pid, 0))
         }
         unistd::ForkResult::Child => {
@@ -463,15 +476,14 @@ pub fn spawn_container_fork(
 
             // Child process - set up container environment
             if let Err(e) = container_child_init_with_uidmap(
-                config, 
-                rootfs_path, 
-                options, 
+                config,
+                rootfs_path,
+                options,
                 child_to_parent_write,
                 parent_to_child_read,
                 use_pid_namespace,
             ) {
-                for cause in e.chain() {
-                }
+                for cause in e.chain() {}
                 std::process::exit(1);
             }
 
@@ -491,27 +503,24 @@ fn container_child_init_with_uidmap(
     wait_for_parent_fd: OwnedFd,
     use_pid_namespace: bool,
 ) -> Result<()> {
-    
     // Step 1: Create user namespace FIRST
     if options.use_user_namespace {
-        unshare(CloneFlags::CLONE_NEWUSER)
-            .context("Failed to create user namespace")?;
-        
+        unshare(CloneFlags::CLONE_NEWUSER).context("Failed to create user namespace")?;
+
         // Notify parent that we've created the user namespace
         let _ = unistd::write(&notify_parent_fd, b"X");
-        
+
         // Wait for parent to write uid_map/gid_map
         let mut buf = [0u8; 1];
         let _ = unistd::read(wait_for_parent_fd.as_raw_fd(), &mut buf);
     }
-    
+
     // Step 2: If PID namespace is requested, unshare it now and fork again
     // unshare(CLONE_NEWPID) only affects *children*, not the calling process
     if use_pid_namespace {
         tracing::debug!("Unsharing PID namespace (will affect child process)");
-        unshare(CloneFlags::CLONE_NEWPID)
-            .context("Failed to unshare PID namespace")?;
-        
+        unshare(CloneFlags::CLONE_NEWPID).context("Failed to unshare PID namespace")?;
+
         // Fork again - this child will be PID 1 in the new PID namespace
         match unsafe { unistd::fork() }? {
             unistd::ForkResult::Parent { child } => {
@@ -519,14 +528,14 @@ fn container_child_init_with_uidmap(
                 // Send the grandchild PID to the original parent
                 let pid_str = format!("{}\n", child.as_raw());
                 let _ = unistd::write(&notify_parent_fd, pid_str.as_bytes());
-                
+
                 // Exit - we're just the intermediate
                 std::process::exit(0);
             }
             unistd::ForkResult::Child => {
                 // We're now PID 1 in the new PID namespace!
                 tracing::debug!("Running as PID 1 in new PID namespace");
-                
+
                 // Continue with container setup
                 container_child_init(config, rootfs_path, options)
             }
@@ -546,13 +555,12 @@ fn container_child_init(
     rootfs_path: &std::path::Path,
     options: &SpawnOptions,
 ) -> Result<()> {
-    
     // Check our effective UID after mapping
     let uid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getegid() };
-    
+
     tracing::debug!("Child process started with euid={}, egid={}", uid, gid);
-    
+
     // Step 2: Unshare other namespaces (user namespace already created)
     let mut flags = CloneFlags::empty();
 
@@ -578,38 +586,35 @@ fn container_child_init(
 
     if !flags.is_empty() {
         tracing::debug!("Unsharing namespaces: {:?}", flags);
-        unshare(flags)
-            .context("Failed to unshare namespaces")?;
+        unshare(flags).context("Failed to unshare namespaces")?;
     }
 
-    
     // Step 3: Set up rootfs with pivot_root
     // Canonicalize the path to resolve symlinks
-    let rootfs_canonical = rootfs_path.canonicalize()
+    let rootfs_canonical = rootfs_path
+        .canonicalize()
         .with_context(|| format!("Failed to canonicalize rootfs path: {:?}", rootfs_path))?;
-    
+
     tracing::debug!("Canonicalized rootfs path: {:?}", rootfs_canonical);
-    
+
     // Check what's in the rootfs before pivot
     if rootfs_canonical.join("bin").exists() {
         tracing::debug!("Rootfs /bin exists");
     } else {
         tracing::warn!("Rootfs /bin does not exist!");
     }
-    
+
     // NOTE: We do NOT apply bind mounts before pivot_root because:
     // 1. The bind mount source is on the host filesystem
     // 2. After pivot_root, the old root (with the source) moves to /.pivot_old
     // 3. The bind mount would then point to a path on the old root
-    // 
+    //
     // Instead, we apply bind mounts AFTER pivot_root, when the container's
     // root is properly set up and we're in the new mount namespace.
-    
-    // Change to the new root directory
-    std::env::set_current_dir(&rootfs_canonical)
-        .context("Failed to change to rootfs directory")?;
 
-    
+    // Change to the new root directory
+    std::env::set_current_dir(&rootfs_canonical).context("Failed to change to rootfs directory")?;
+
     // Try a simpler mount first - just bind, no recursive
     // This makes the directory a mount point, which is required for pivot_root
     mount(
@@ -618,19 +623,22 @@ fn container_child_init(
         None::<&str>,
         MsFlags::MS_BIND,
         None::<&str>,
-    ).context("Failed to bind mount rootfs")?;
+    )
+    .context("Failed to bind mount rootfs")?;
 
     // Create put_old directory
     let put_old = rootfs_canonical.join(".pivot_old");
-    std::fs::create_dir_all(&put_old)
-        .context("Failed to create pivot_old directory")?;
+    std::fs::create_dir_all(&put_old).context("Failed to create pivot_old directory")?;
 
     // Mount /proc BEFORE pivot_root (requires CAP_SYS_ADMIN which we have now)
     // This is critical for Node.js and other runtimes that need proper /proc
     tracing::debug!("Attempting to mount /proc before pivot_root");
     match crate::rootfs::mount_proc(&rootfs_canonical) {
         Ok(()) => tracing::info!("Mounted /proc before pivot_root"),
-        Err(e) => tracing::warn!("Could not mount /proc before pivot_root: {} (will retry after)", e),
+        Err(e) => tracing::warn!(
+            "Could not mount /proc before pivot_root: {} (will retry after)",
+            e
+        ),
     }
 
     // Try pivot_root first, fall back to chroot if it fails
@@ -638,8 +646,7 @@ fn container_child_init(
         Ok(()) => {
             tracing::debug!("pivot_root successful");
             // Change to new root
-            std::env::set_current_dir("/")
-                .context("Failed to change directory to new root")?;
+            std::env::set_current_dir("/").context("Failed to change directory to new root")?;
 
             // Unmount the old root (now at /.pivot_old)
             let old_root = std::path::PathBuf::from("/.pivot_old");
@@ -653,10 +660,8 @@ fn container_child_init(
             tracing::warn!("pivot_root failed: {}, falling back to chroot", e);
             // Fall back to chroot for weaker isolation
             // chroot is escapable but works for trusted code
-            nix::unistd::chroot(&rootfs_canonical)
-                .context("chroot failed")?;
-            std::env::set_current_dir("/")
-                .context("Failed to change directory to /")?;
+            nix::unistd::chroot(&rootfs_canonical).context("chroot failed")?;
+            std::env::set_current_dir("/").context("Failed to change directory to /")?;
             tracing::debug!("chroot successful");
         }
     }
@@ -669,8 +674,7 @@ fn container_child_init(
     // Step 5: Set hostname if UTS namespace is isolated
     if config.namespaces.uts && !config.hostname.is_empty() {
         tracing::debug!("Setting hostname");
-        unistd::sethostname(&config.hostname)
-            .context("Failed to set hostname")?;
+        unistd::sethostname(&config.hostname).context("Failed to set hostname")?;
         tracing::debug!("Hostname set successfully");
     }
 
@@ -703,7 +707,10 @@ fn container_child_init(
                 const PR_SET_NO_NEW_PRIVS: i32 = 38;
                 let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
                 if ret != 0 {
-                    tracing::warn!("Failed to set no_new_privs: {}", std::io::Error::last_os_error());
+                    tracing::warn!(
+                        "Failed to set no_new_privs: {}",
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
         } else {
@@ -728,7 +735,6 @@ fn container_child_init(
         tracing::debug!("Security profile application completed");
     }
 
-
     // Step 9: Execute the container command
     tracing::debug!("About to execute container command");
     exec_container_command(config, &options.workdir)?;
@@ -744,8 +750,7 @@ fn setup_loopback_network() -> Result<()> {
     use std::os::unix::io::AsRawFd;
 
     // Create a socket for ioctl
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .or_else(|_| UdpSocket::bind("[::]:0"))?;
+    let socket = UdpSocket::bind("0.0.0.0:0").or_else(|_| UdpSocket::bind("[::]:0"))?;
 
     // Use ioctl to bring up lo
     // This is simplified - real implementation would use netlink or proper ioctl
@@ -757,8 +762,8 @@ fn setup_loopback_network() -> Result<()> {
 /// Execute the container command.
 #[cfg(target_os = "linux")]
 fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()> {
-    use std::ffi::CString;
     use nix::unistd::execve;
+    use std::ffi::CString;
 
     if config.command.is_empty() {
         anyhow::bail!("No command specified");
@@ -771,7 +776,7 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
     // Resolve the program path
     let program_str = config.command[0].as_str();
     let program_path = std::path::Path::new(program_str);
-    
+
     // Find the actual binary to execute
     let resolved_program = if program_path.is_absolute() {
         // Absolute path - use as-is
@@ -787,7 +792,7 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
         // Try to find it in PATH
         let search_paths = ["/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin"];
         let mut found = None;
-        
+
         for path_entry in &search_paths {
             let full_path = std::path::Path::new(path_entry).join(program_str);
             if full_path.exists() {
@@ -795,7 +800,7 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
                 break;
             }
         }
-        
+
         match found {
             Some(path) => path,
             None => {
@@ -807,10 +812,12 @@ fn exec_container_command(config: &ContainerConfig, workdir: &str) -> Result<()>
 
     tracing::debug!("Resolved program path: {}", resolved_program);
 
-    let program = CString::new(resolved_program.as_bytes())
-        .context("Command contains null bytes")?;
+    let program =
+        CString::new(resolved_program.as_bytes()).context("Command contains null bytes")?;
 
-    let args: Vec<CString> = config.command.iter()
+    let args: Vec<CString> = config
+        .command
+        .iter()
         .map(|a| CString::new(a.as_bytes()))
         .collect::<Result<Vec<_>, _>>()
         .context("Command args contain null bytes")?;
@@ -843,7 +850,9 @@ pub fn spawn_container_fork(
     _rootfs_path: &std::path::Path,
     _options: &(),
 ) -> Result<(u32, i32)> {
-    Err(anyhow::anyhow!("Container forking is only supported on Linux"))
+    Err(anyhow::anyhow!(
+        "Container forking is only supported on Linux"
+    ))
 }
 
 /// Enter a container's namespaces.
@@ -855,7 +864,12 @@ pub fn enter_container_namespaces(pid: Pid) -> Result<()> {
     use crate::namespace::{enter_namespace, Namespace};
 
     // Try to enter each namespace
-    for ns in &[Namespace::Mount, Namespace::Uts, Namespace::Ipc, Namespace::Network] {
+    for ns in &[
+        Namespace::Mount,
+        Namespace::Uts,
+        Namespace::Ipc,
+        Namespace::Network,
+    ] {
         if let Err(e) = enter_namespace(pid, *ns) {
             tracing::warn!("Failed to enter {:?} namespace: {}", ns, e);
         }
@@ -880,15 +894,15 @@ pub fn get_process_caps(pid: Pid) -> Result<String> {
 }
 
 /// Set up port forwarding for a container.
-/// 
+///
 /// For containers with isolated network namespace, we use socat to proxy
 /// traffic from the host port to the container's network namespace.
-/// For containers sharing the host network (default for rootless), 
+/// For containers sharing the host network (default for rootless),
 /// no forwarding is needed - the container can bind directly.
 #[cfg(target_os = "linux")]
 fn setup_port_forwarding_for_container(config: &ContainerConfig, pid: Pid) -> Result<()> {
     use std::process::Command;
-    
+
     // If network namespace is NOT isolated, container shares host network
     // and can bind directly to ports - no forwarding needed
     if !config.namespaces.network {
@@ -899,7 +913,8 @@ fn setup_port_forwarding_for_container(config: &ContainerConfig, pid: Pid) -> Re
         for pm in &config.network.port_mappings {
             tracing::info!(
                 "  Port {}: container can bind directly to port {}",
-                pm.host_port, pm.container_port
+                pm.host_port,
+                pm.container_port
             );
         }
         return Ok(());
@@ -923,9 +938,7 @@ fn setup_port_forwarding_for_container(config: &ContainerConfig, pid: Pid) -> Re
             "socat not available - port forwarding will not work. \
              Install socat for port forwarding support with isolated network namespaces."
         );
-        tracing::warn!(
-            "Alternative: use --network host to share the host network namespace"
-        );
+        tracing::warn!("Alternative: use --network host to share the host network namespace");
         return Ok(());
     }
 
@@ -952,13 +965,17 @@ fn setup_port_forwarding_for_container(config: &ContainerConfig, pid: Pid) -> Re
             Ok(_handle) => {
                 tracing::info!(
                     "Started port forwarding: host {} -> container PID {} port {}",
-                    host_port, pid_num, container_port
+                    host_port,
+                    pid_num,
+                    container_port
                 );
             }
             Err(e) => {
                 tracing::error!(
                     "Failed to start port forwarding {} -> {}: {}",
-                    host_port, container_port, e
+                    host_port,
+                    container_port,
+                    e
                 );
             }
         }

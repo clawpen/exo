@@ -1,6 +1,6 @@
 //! Agent runtime
 
-use crate::llm::{LlmProvider, LlmRequest, LlmMessage};
+use crate::llm::{LlmMessage, LlmProvider, LlmRequest};
 use crate::protocol::ToolPermission;
 use crate::tools::ToolRegistry;
 use crate::{Result, SecurityEvent};
@@ -23,11 +23,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(
-        name: String,
-        llm: Arc<dyn LlmProvider>,
-        tool_registry: Arc<ToolRegistry>,
-    ) -> Self {
+    pub fn new(name: String, llm: Arc<dyn LlmProvider>, tool_registry: Arc<ToolRegistry>) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         Self {
             id,
@@ -100,6 +96,9 @@ impl Agent {
     /// Log a security event
     pub fn log_security(&self, event: SecurityEvent) {
         let timestamp = chrono::Local::now().to_rfc3339();
-        println!("[{}] {} - {}: {}", timestamp, event.agent_id, event.event_type, event.details);
+        println!(
+            "[{}] {} - {}: {}",
+            timestamp, event.agent_id, event.event_type, event.details
+        );
     }
 }

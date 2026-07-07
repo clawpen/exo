@@ -2,8 +2,8 @@
 
 use crate::{WslCommand, WslConfig};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
 use base64::prelude::*;
+use std::path::{Path, PathBuf};
 
 const RUNTIME_BINARY_NAME: &str = "exo-runtime";
 const RUNTIME_INSTALL_PATH: &str = "/usr/local/bin";
@@ -54,7 +54,10 @@ impl WslDeployer {
                 tracing::info!("Runtime not found in WSL, deploying...");
             }
             Err(e) => {
-                tracing::warn!("Failed to check runtime status: {}, attempting deployment...", e);
+                tracing::warn!(
+                    "Failed to check runtime status: {}, attempting deployment...",
+                    e
+                );
             }
         }
 
@@ -82,8 +85,7 @@ impl WslDeployer {
         let cmd = WslCommand::new(self.config.clone());
         cmd.exec(&format!(
             "install -m 755 {} {}",
-            wsl_temp,
-            RUNTIME_INSTALL_PATH
+            wsl_temp, RUNTIME_INSTALL_PATH
         ))?;
 
         // Remove temp file
@@ -167,9 +169,7 @@ impl WslDeployer {
         use std::process::Command;
 
         // Check WSL is installed
-        let result = Command::new("wsl")
-            .arg("--version")
-            .output()?;
+        let result = Command::new("wsl").arg("--version").output()?;
         if !result.status.success() {
             anyhow::bail!("WSL not available. Install WSL2 first.");
         }
@@ -180,7 +180,8 @@ impl WslDeployer {
         let result = cmd.exec("which socat")?;
         if result.exit_code != 0 {
             tracing::info!("Installing socat for daemon communication...");
-            let install_result = cmd.exec("apt-get update -qq && apt-get install -y socat 2>/dev/null")?;
+            let install_result =
+                cmd.exec("apt-get update -qq && apt-get install -y socat 2>/dev/null")?;
             if install_result.exit_code != 0 {
                 tracing::warn!("Could not install socat, daemon mode may not work");
             }
@@ -217,9 +218,7 @@ impl WslDeployer {
         let result = cmd.exec(&format!(
             "wsl --import {} ${{HOME}}/.local/share/wsl/distributions/{} 2>/dev/null || \
              wsl --install -d {}",
-            self.config.distro_name,
-            self.config.distro_name,
-            "Ubuntu-22.04"
+            self.config.distro_name, self.config.distro_name, "Ubuntu-22.04"
         ))?;
 
         if result.exit_code != 0 {

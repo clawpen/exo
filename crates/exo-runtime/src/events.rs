@@ -129,7 +129,9 @@ impl EventLog {
         )?;
 
         Ok(Self {
-            inner: Arc::new(EventLogInner { conn: Mutex::new(conn) }),
+            inner: Arc::new(EventLogInner {
+                conn: Mutex::new(conn),
+            }),
         })
     }
 
@@ -164,7 +166,13 @@ impl EventLog {
         conn.execute(
             "INSERT INTO events (ts, container_id, container_name, event_type, detail)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![ts, container_id, container_name, event_type.as_str(), detail],
+            params![
+                ts,
+                container_id,
+                container_name,
+                event_type.as_str(),
+                detail
+            ],
         )?;
 
         // Trim ring buffer. Bounded by the PK index, so O(deleted_rows).
@@ -194,7 +202,8 @@ impl EventLog {
                 detail: row.get(4)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Most recent N events for a single container (newest first).
@@ -214,7 +223,8 @@ impl EventLog {
                 detail: row.get(4)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Total rows currently stored. Mainly for tests / debugging.
@@ -240,7 +250,8 @@ mod tests {
     fn test_record_and_recent() {
         let (log, _dir) = make_log();
         log.record("id1", "c1", EventType::Created, None).unwrap();
-        log.record("id1", "c1", EventType::Started, Some("pid=1234")).unwrap();
+        log.record("id1", "c1", EventType::Started, Some("pid=1234"))
+            .unwrap();
 
         let recent = log.recent(10).unwrap();
         assert_eq!(recent.len(), 2);
@@ -268,7 +279,8 @@ mod tests {
         let (log, _dir) = make_log();
         let total = (RING_BUFFER_SIZE + 50) as usize;
         for i in 0..total {
-            log.record("c", "name", EventType::Created, Some(&i.to_string())).unwrap();
+            log.record("c", "name", EventType::Created, Some(&i.to_string()))
+                .unwrap();
         }
         let count = log.count().unwrap();
         assert!(count <= RING_BUFFER_SIZE, "count {} exceeded cap", count);
@@ -277,7 +289,9 @@ mod tests {
         let recent = log.recent(RING_BUFFER_SIZE as usize).unwrap();
         assert!(!recent.iter().any(|e| e.detail.as_deref() == Some("0")));
         // The newest detail value must still be there.
-        assert!(recent.iter().any(|e| e.detail.as_deref() == Some(&(total - 1).to_string())));
+        assert!(recent
+            .iter()
+            .any(|e| e.detail.as_deref() == Some(&(total - 1).to_string())));
     }
 
     #[test]

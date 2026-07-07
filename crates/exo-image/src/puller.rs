@@ -18,7 +18,7 @@ impl ImagePuller {
         let client = RegistryClient::new(store)?;
         Ok(Self { client })
     }
-    
+
     /// Pull an image from a registry.
     pub async fn pull(&mut self, reference: &ImageReference) -> Result<()> {
         info!("Pulling image {}", reference);

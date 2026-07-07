@@ -27,8 +27,7 @@ pub async fn execute(args: ImagesArgs) -> anyhow::Result<()> {
             &img.repository
         };
 
-        println!("{:<30} {:<15} {:<20}",
-            repo, img.tag, img.registry);
+        println!("{:<30} {:<15} {:<20}", repo, img.tag, img.registry);
     }
 
     Ok(())

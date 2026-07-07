@@ -4,7 +4,7 @@ use crate::WslConfig;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Command;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// Represents a WSL2 distro managed by OpenClaw.
 pub struct WslDistro {
@@ -19,13 +19,12 @@ impl WslDistro {
 
     /// Check if the OpenClaw distro exists.
     pub fn exists(&self) -> bool {
-        match Command::new("wsl")
-            .args(["--list", "--quiet"])
-            .output()
-        {
+        match Command::new("wsl").args(["--list", "--quiet"]).output() {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                stdout.lines().any(|line| line.trim() == self.config.distro_name)
+                stdout
+                    .lines()
+                    .any(|line| line.trim() == self.config.distro_name)
             }
             Err(_) => false,
         }
@@ -147,9 +146,7 @@ impl WslDistro {
 
     fn ensure_wsl_installed(&self) -> Result<()> {
         // Check if WSL is installed
-        let output = Command::new("wsl")
-            .args(["--status"])
-            .output();
+        let output = Command::new("wsl").args(["--status"]).output();
 
         match output {
             Ok(o) if o.status.success() => Ok(()),
@@ -216,7 +213,10 @@ impl WslDistroManager {
             .unwrap_or_else(|| PathBuf::from("openclaw-runtime"));
 
         if runtime_path.exists() {
-            distro.copy_in(runtime_path.to_str().unwrap(), "/usr/local/bin/openclaw-runtime")?;
+            distro.copy_in(
+                runtime_path.to_str().unwrap(),
+                "/usr/local/bin/openclaw-runtime",
+            )?;
             distro.exec("chmod +x /usr/local/bin/openclaw-runtime")?;
         } else {
             // For development, we'll compile it in-place

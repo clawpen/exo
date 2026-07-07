@@ -1,43 +1,49 @@
 //! Daemon mode for exo - runs a persistent server for faster command execution
 
 use anyhow::Result;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::io::{BufRead, BufReader, Write};
-use std::thread;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::collections::HashMap;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::PathBuf;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::thread;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::time::Duration;
 
 /// Tokio runtime handle captured at daemon startup so worker threads (which
 /// run outside the tokio context) can `block_on` async work like image pulls.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 static RUNTIME_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::unix::net::{UnixListener, UnixStream};
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use exo_runtime::{
-    Container, ContainerJson, ContainerListJson, ContainerManager, ContainerMetadata,
-    EventLog, EventType, ReconcileOptions, Reconciler,
+    Container, ContainerJson, ContainerListJson, ContainerManager, ContainerMetadata, EventLog,
+    EventType, ReconcileOptions, Reconciler,
 };
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use tokio::sync::Semaphore;
 
 /// Default cap on concurrent `execute_run` operations. Tunable via
 /// `EXO_MAX_CONCURRENT_STARTS`. Picked to keep WSL2 from thrashing under
 /// fan-out at N=1000 — measured empirically; revisit when the daemon
 /// actually pulls images itself (see project_v2_image_pull_dedup memory).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const DEFAULT_MAX_CONCURRENT_STARTS: usize = 32;
 
 /// Default cap on in-flight client connections. Tunable via
 /// `EXO_MAX_CONCURRENT_CONNS`. Each connection currently consumes a
 /// thread, so this guards against thread/stack OOM under thundering herd.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 const DEFAULT_MAX_CONCURRENT_CONNS: usize = 256;
 
 const SOCKET_PATH: &str = "/tmp/exo-daemon.sock";
@@ -89,7 +95,7 @@ pub struct MountSpec {
 }
 
 /// Start the daemon
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn start(args: DaemonArgs) -> Result<()> {
     let config = DaemonConfig {
         socket_path: args.socket_path.unwrap_or_else(|| SOCKET_PATH.to_string()),
@@ -137,7 +143,8 @@ pub fn start(args: DaemonArgs) -> Result<()> {
     let wsl_cmd = WslCommand::new(WslConfig::default());
 
     // Check if daemon is already running
-    let check_result = wsl_cmd.exec("test -S /tmp/exo-daemon.sock && echo 'RUNNING' || echo 'NOT_RUNNING'")?;
+    let check_result =
+        wsl_cmd.exec("test -S /tmp/exo-daemon.sock && echo 'RUNNING' || echo 'NOT_RUNNING'")?;
 
     if check_result.stdout.contains("RUNNING") {
         println!("Exo daemon is already running in WSL2");
@@ -146,7 +153,8 @@ pub fn start(args: DaemonArgs) -> Result<()> {
     }
 
     // Start the daemon in background
-    let start_cmd = "setsid exo-runtime daemon --foreground > /tmp/exo-daemon.log 2>&1 < /dev/null & echo $!";
+    let start_cmd =
+        "setsid exo-runtime daemon --foreground > /tmp/exo-daemon.log 2>&1 < /dev/null & echo $!";
     let result = wsl_cmd.exec(start_cmd)?;
 
     if result.exit_code == 0 {
@@ -156,7 +164,8 @@ pub fn start(args: DaemonArgs) -> Result<()> {
         // Wait and verify
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        let verify_result = wsl_cmd.exec("test -S /tmp/exo-daemon.sock && echo 'RUNNING' || echo 'NOT_RUNNING'")?;
+        let verify_result =
+            wsl_cmd.exec("test -S /tmp/exo-daemon.sock && echo 'RUNNING' || echo 'NOT_RUNNING'")?;
         if verify_result.stdout.contains("RUNNING") {
             println!("Daemon is running and ready");
         } else {
@@ -170,8 +179,16 @@ pub fn start(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+/// Start the daemon (macOS native backend).
+#[cfg(target_os = "macos")]
+pub fn start(_args: DaemonArgs) -> Result<()> {
+    println!("The native macOS backend runs directly and does not require an Exo daemon.");
+    println!("Use `exo run --detach ...` for background processes.");
+    Ok(())
+}
+
 /// Stop the daemon
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn stop() -> Result<()> {
     // Read PID file
     if let Ok(pid_str) = std::fs::read_to_string(PID_FILE) {
@@ -218,7 +235,8 @@ pub fn stop() -> Result<()> {
     let wsl_cmd = WslCommand::new(WslConfig::default());
 
     // Stop the daemon
-    let result = wsl_cmd.exec("exo-runtime daemon shutdown 2>/dev/null || pkill -f 'exo.*daemon' || true")?;
+    let result = wsl_cmd
+        .exec("exo-runtime daemon shutdown 2>/dev/null || pkill -f 'exo.*daemon' || true")?;
 
     println!("Daemon stopped");
 
@@ -228,8 +246,15 @@ pub fn stop() -> Result<()> {
     Ok(())
 }
 
+/// Stop the daemon (macOS native backend).
+#[cfg(target_os = "macos")]
+pub fn stop() -> Result<()> {
+    println!("No Exo daemon is running for the native macOS backend.");
+    Ok(())
+}
+
 /// Check daemon status
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn status(args: DaemonStatusArgs) -> Result<()> {
     if is_daemon_running(SOCKET_PATH) {
         if args.json {
@@ -258,7 +283,8 @@ pub fn status(args: DaemonStatusArgs) -> Result<()> {
     let wsl_cmd = WslCommand::new(WslConfig::default());
 
     // Check if socket exists
-    let result = wsl_cmd.exec("test -S /tmp/exo-daemon.sock && echo 'RUNNING' || echo 'NOT_RUNNING'")?;
+    let result =
+        wsl_cmd.exec("test -S /tmp/exo-daemon.sock && echo 'RUNNING' || echo 'NOT_RUNNING'")?;
 
     let running = result.stdout.contains("RUNNING");
 
@@ -282,16 +308,26 @@ pub fn status(args: DaemonStatusArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+/// Check daemon status (macOS native backend).
+#[cfg(target_os = "macos")]
+pub fn status(args: DaemonStatusArgs) -> Result<()> {
+    if args.json {
+        println!(r#"{{"running": false, "backend": "native-macos", "required": false}}"#);
+    } else {
+        println!("Exo daemon is not required on the native macOS backend");
+        println!("Backend: native-macos");
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn is_daemon_running(socket_path: &str) -> bool {
     std::path::Path::new(socket_path).exists()
 }
 
 #[cfg(target_os = "linux")]
 fn is_process_running(pid: u32) -> bool {
-    unsafe {
-        libc::kill(pid as i32, 0) == 0
-    }
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -300,13 +336,16 @@ fn is_process_running(_pid: u32) -> bool {
 }
 
 /// Run the daemon server
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run_daemon(config: DaemonConfig) -> Result<()> {
     // Open the event log (best-effort; daemon still runs without it).
     let events = match EventLog::open_default() {
         Ok(log) => Some(log),
         Err(e) => {
-            tracing::warn!("event log unavailable, lifecycle events will not be persisted: {}", e);
+            tracing::warn!(
+                "event log unavailable, lifecycle events will not be persisted: {}",
+                e
+            );
             None
         }
     };
@@ -359,7 +398,9 @@ fn run_daemon(config: DaemonConfig) -> Result<()> {
         let rec = reconciler.clone();
         handle.spawn(async move { rec.run_loop().await });
     } else {
-        tracing::warn!("no current tokio runtime; periodic reconciler disabled and image pulls will fail");
+        tracing::warn!(
+            "no current tokio runtime; periodic reconciler disabled and image pulls will fail"
+        );
     }
 
     // Build admission-control semaphores.
@@ -375,7 +416,8 @@ fn run_daemon(config: DaemonConfig) -> Result<()> {
     let conn_sem = Arc::new(Semaphore::new(max_conns));
     tracing::info!(
         "admission caps: max_concurrent_starts={}, max_concurrent_conns={}",
-        max_starts, max_conns
+        max_starts,
+        max_conns
     );
 
     // Spawn a background thread to handle connections.
@@ -384,7 +426,14 @@ fn run_daemon(config: DaemonConfig) -> Result<()> {
     let events_for_server = events.clone();
 
     thread::spawn(move || {
-        if let Err(e) = run_server(listener, state, config_clone, events_for_server, start_sem, conn_sem) {
+        if let Err(e) = run_server(
+            listener,
+            state,
+            config_clone,
+            events_for_server,
+            start_sem,
+            conn_sem,
+        ) {
             eprintln!("Daemon error: {}", e);
         }
     });
@@ -410,7 +459,7 @@ struct ContainerInfo {
 }
 
 /// Run the server loop
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run_server(
     listener: UnixListener,
     state: Arc<Mutex<DaemonState>>,
@@ -466,7 +515,7 @@ fn run_server(
 }
 
 /// Handle a single client connection
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn handle_client(
     mut stream: UnixStream,
     _state: Arc<Mutex<DaemonState>>,
@@ -500,24 +549,14 @@ fn handle_client(
 
     // Process request
     let response: DaemonResponse = match request {
-        DaemonRequest::Run { spec } => {
-            execute_run(&spec, events, start_sem)
-        }
-        DaemonRequest::Stop { container_id } => {
-            execute_stop(&container_id, events)
-        }
-        DaemonRequest::List { all } => {
-            execute_list(all)
-        }
-        DaemonRequest::Status { container_id } => {
-            execute_status(&container_id)
-        }
-        DaemonRequest::Ping => {
-            DaemonResponse::Pong
-        }
-        DaemonRequest::Shutdown => {
-            DaemonResponse::Ok { message: "Shutting down".to_string() }
-        }
+        DaemonRequest::Run { spec } => execute_run(&spec, events, start_sem),
+        DaemonRequest::Stop { container_id } => execute_stop(&container_id, events),
+        DaemonRequest::List { all } => execute_list(all),
+        DaemonRequest::Status { container_id } => execute_status(&container_id),
+        DaemonRequest::Ping => DaemonResponse::Pong,
+        DaemonRequest::Shutdown => DaemonResponse::Ok {
+            message: "Shutting down".to_string(),
+        },
     };
 
     // Send response
@@ -529,7 +568,7 @@ fn handle_client(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn execute_run(
     spec: &ContainerSpec,
     events: Option<&EventLog>,
@@ -545,7 +584,12 @@ fn execute_run(
         Err(_) => {
             tracing::warn!("rejected start of {}: at concurrency cap", spec.name);
             if let Some(log) = events {
-                let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some("admission: start-concurrency cap"));
+                let _ = log.record(
+                    &spec.name,
+                    &spec.name,
+                    EventType::Failed,
+                    Some("admission: start-concurrency cap"),
+                );
             }
             return DaemonResponse::Error {
                 message: "daemon at start-concurrency cap; retry shortly".to_string(),
@@ -591,7 +635,12 @@ fn execute_run(
         Ok(m) => m,
         Err(e) => {
             if let Some(log) = events {
-                let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some(&format!("manager init: {}", e)));
+                let _ = log.record(
+                    &spec.name,
+                    &spec.name,
+                    EventType::Failed,
+                    Some(&format!("manager init: {}", e)),
+                );
             }
             return DaemonResponse::Error {
                 message: format!("Failed to open state dir: {}", e),
@@ -601,7 +650,12 @@ fn execute_run(
 
     if manager.exists(&spec.name) {
         if let Some(log) = events {
-            let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some("name already in use"));
+            let _ = log.record(
+                &spec.name,
+                &spec.name,
+                EventType::Failed,
+                Some("name already in use"),
+            );
         }
         return DaemonResponse::Error {
             message: format!("Container name already in use: {}", spec.name),
@@ -614,7 +668,12 @@ fn execute_run(
     // silently inside Container::new with a confusing rootfs error.
     if let Err(e) = ensure_image_rootfs(&spec.image) {
         if let Some(log) = events {
-            let _ = log.record(&spec.name, &spec.name, EventType::Failed, Some(&format!("image pull: {}", e)));
+            let _ = log.record(
+                &spec.name,
+                &spec.name,
+                EventType::Failed,
+                Some(&format!("image pull: {}", e)),
+            );
         }
         return DaemonResponse::Error {
             message: format!("Failed to prepare image '{}': {}", spec.image, e),
@@ -636,7 +695,12 @@ fn execute_run(
         Ok(c) => c,
         Err(e) => {
             if let Some(log) = events {
-                let _ = log.record(&pre_id, &spec.name, EventType::Failed, Some(&format!("Container::new: {}", e)));
+                let _ = log.record(
+                    &pre_id,
+                    &spec.name,
+                    EventType::Failed,
+                    Some(&format!("Container::new: {}", e)),
+                );
             }
             return DaemonResponse::Error {
                 message: format!("Failed to create container: {}", e),
@@ -646,7 +710,12 @@ fn execute_run(
 
     if let Err(e) = container.start() {
         if let Some(log) = events {
-            let _ = log.record(&pre_id, &spec.name, EventType::Failed, Some(&format!("Container::start: {}", e)));
+            let _ = log.record(
+                &pre_id,
+                &spec.name,
+                EventType::Failed,
+                Some(&format!("Container::start: {}", e)),
+            );
         }
         return DaemonResponse::Error {
             message: format!("Failed to start container: {}", e),
@@ -662,9 +731,18 @@ fn execute_run(
     if let Err(e) = manager.save(&metadata) {
         // Container is running but metadata failed to persist — log and continue.
         // The reconciler will adopt the orphan via cgroup-based detection.
-        tracing::warn!("Container {} started but metadata save failed: {}", spec.name, e);
+        tracing::warn!(
+            "Container {} started but metadata save failed: {}",
+            spec.name,
+            e
+        );
         if let Some(log) = events {
-            let _ = log.record(&id, &spec.name, EventType::Failed, Some(&format!("metadata save: {}", e)));
+            let _ = log.record(
+                &id,
+                &spec.name,
+                EventType::Failed,
+                Some(&format!("metadata save: {}", e)),
+            );
         }
     }
 
@@ -678,7 +756,7 @@ fn execute_run(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn execute_stop(container_id: &str, events: Option<&EventLog>) -> DaemonResponse {
     let manager = match ContainerManager::new() {
         Ok(m) => m,
@@ -705,7 +783,10 @@ fn execute_stop(container_id: &str, events: Option<&EventLog>) -> DaemonResponse
 
     if !metadata.is_running() {
         return DaemonResponse::Ok {
-            message: format!("Container {} is not running (status: {})", metadata.name, metadata.status),
+            message: format!(
+                "Container {} is not running (status: {})",
+                metadata.name, metadata.status
+            ),
         };
     }
 
@@ -742,7 +823,11 @@ fn execute_stop(container_id: &str, events: Option<&EventLog>) -> DaemonResponse
     }
 
     if let Some(log) = events {
-        let detail = if killed_hard { Some("sigkill") } else { Some("sigterm") };
+        let detail = if killed_hard {
+            Some("sigkill")
+        } else {
+            Some("sigterm")
+        };
         let _ = log.record(&metadata.id, &metadata.name, EventType::Killed, detail);
     }
 
@@ -751,7 +836,7 @@ fn execute_stop(container_id: &str, events: Option<&EventLog>) -> DaemonResponse
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn execute_list(all: bool) -> DaemonResponse {
     let manager = match ContainerManager::new() {
         Ok(m) => m,
@@ -780,8 +865,11 @@ fn execute_list(all: bool) -> DaemonResponse {
         containers.retain(|c| c.is_running());
     }
 
-    let json_containers: Vec<ContainerJson> = containers.into_iter().map(ContainerJson::from).collect();
-    let payload = ContainerListJson { containers: json_containers };
+    let json_containers: Vec<ContainerJson> =
+        containers.into_iter().map(ContainerJson::from).collect();
+    let payload = ContainerListJson {
+        containers: json_containers,
+    };
 
     match serde_json::to_string(&payload) {
         Ok(s) => DaemonResponse::List { containers: s },
@@ -791,7 +879,7 @@ fn execute_list(all: bool) -> DaemonResponse {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn execute_status(container_id: &str) -> DaemonResponse {
     let manager = match ContainerManager::new() {
         Ok(m) => m,
@@ -830,7 +918,7 @@ fn execute_status(container_id: &str) -> DaemonResponse {
 /// Without the `registry` feature, this still verifies the rootfs is present
 /// locally and returns a clear error if not — which is strictly better than
 /// the current silent failure inside `Container::new`.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn ensure_image_rootfs(image: &str) -> Result<()> {
     use exo_image::ImageManager;
 
@@ -842,8 +930,7 @@ fn ensure_image_rootfs(image: &str) -> Result<()> {
     let image_ref = manager.parse_image_reference(image)?;
 
     // Where the runtime looks for the prepared rootfs.
-    let link_path = PathBuf::from("/tmp/exo-images/rootfs")
-        .join(image.replace(['/', ':'], "_"));
+    let link_path = PathBuf::from("/tmp/exo-images/rootfs").join(image.replace(['/', ':'], "_"));
 
     // Fast path: symlink already in place from a previous run.
     if link_path.exists() && link_path.join("bin").exists() {
@@ -865,7 +952,9 @@ fn ensure_image_rootfs(image: &str) -> Result<()> {
             // same image both racing to create the symlink. Anything else
             // is a real error.
             if e.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(e).map_err(|e| anyhow::anyhow!("symlink {:?} -> {:?}: {}", link_path, actual, e))?;
+                return Err(e).map_err(|e| {
+                    anyhow::anyhow!("symlink {:?} -> {:?}: {}", link_path, actual, e)
+                })?;
             }
         }
         tracing::info!("Prepared image rootfs: {:?} -> {:?}", link_path, actual);
@@ -874,7 +963,7 @@ fn ensure_image_rootfs(image: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn send_signal(pid: u32, signal: libc::c_int) -> Result<()> {
     let rc = unsafe { libc::kill(pid as i32, signal) };
     if rc != 0 {
@@ -887,7 +976,7 @@ fn send_signal(pid: u32, signal: libc::c_int) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     let proc_path = format!("/proc/{}", pid);

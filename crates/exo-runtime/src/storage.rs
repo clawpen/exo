@@ -21,7 +21,7 @@
 //! ```
 
 use anyhow::{Context, Result};
-use std::fs::{self, create_dir_all, File, remove_dir_all};
+use std::fs::{self, create_dir_all, remove_dir_all, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -178,8 +178,12 @@ impl OverlayfsDriver {
 
         #[cfg(target_os = "linux")]
         {
-            symlink(&target_path, &link_path)
-                .with_context(|| format!("Failed to create symlink: {:?} -> {}", link_path, target_path))?;
+            symlink(&target_path, &link_path).with_context(|| {
+                format!(
+                    "Failed to create symlink: {:?} -> {}",
+                    link_path, target_path
+                )
+            })?;
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -273,7 +277,9 @@ impl OverlayfsDriver {
 
         // Build lower directory string
         // Lower layers are specified with the first layer being the topmost
-        let lower_str = overlay.lowers.iter()
+        let lower_str = overlay
+            .lowers
+            .iter()
             .map(|id| {
                 if let Some(link_id) = self.read_link_id(id) {
                     self.layer_diff_path_by_link(&link_id)
@@ -294,15 +300,16 @@ impl OverlayfsDriver {
         );
 
         // Mount overlayfs
-        let options_cstr = std::ffi::CString::new(options.as_str())
-            .context("Invalid mount options")?;
+        let options_cstr =
+            std::ffi::CString::new(options.as_str()).context("Invalid mount options")?;
         mount(
             Some("overlay"),
             overlay.merged.as_path(),
             Some("overlay"),
             MsFlags::MS_NOATIME,
             Some(options_cstr.as_c_str()),
-        ).context("Failed to mount overlayfs")?;
+        )
+        .context("Failed to mount overlayfs")?;
 
         // Track the mount
         let mount_info = MountInfo {
@@ -313,11 +320,14 @@ impl OverlayfsDriver {
             work: overlay.work.clone(),
         };
 
-        let mut mounts = self.mounts.write()
-            .expect("mounts lock poisoned");
+        let mut mounts = self.mounts.write().expect("mounts lock poisoned");
         mounts.push(mount_info);
 
-        tracing::info!("Mounted overlayfs for container {} at {:?}", overlay.container_id, overlay.merged);
+        tracing::info!(
+            "Mounted overlayfs for container {} at {:?}",
+            overlay.container_id,
+            overlay.merged
+        );
 
         Ok(())
     }
@@ -329,22 +339,24 @@ impl OverlayfsDriver {
 
         // Find and remove mount info
         let mount_info = {
-            let mut mounts = self.mounts.write()
-                .expect("mounts lock poisoned");
-            mounts.iter()
+            let mut mounts = self.mounts.write().expect("mounts lock poisoned");
+            mounts
+                .iter()
                 .position(|m| m.id == container_id)
                 .map(|pos| mounts.remove(pos))
         };
 
         if let Some(info) = mount_info {
-            umount(&info.target)
-                .with_context(|| format!("Failed to unmount {:?}", info.target))?;
+            umount(&info.target).with_context(|| format!("Failed to unmount {:?}", info.target))?;
 
             tracing::info!("Unmounted overlayfs for container {}", container_id);
 
             Ok(())
         } else {
-            Err(anyhow::anyhow!("No mount found for container {}", container_id))
+            Err(anyhow::anyhow!(
+                "No mount found for container {}",
+                container_id
+            ))
         }
     }
 
@@ -353,8 +365,9 @@ impl OverlayfsDriver {
         let container_dir = self.root.join(container_id);
 
         if container_dir.exists() {
-            remove_dir_all(&container_dir)
-                .with_context(|| format!("Failed to remove container directory: {:?}", container_dir))?;
+            remove_dir_all(&container_dir).with_context(|| {
+                format!("Failed to remove container directory: {:?}", container_dir)
+            })?;
 
             tracing::debug!("Removed container overlay for {}", container_id);
         }
@@ -398,9 +411,7 @@ impl OverlayfsDriver {
                 continue;
             }
 
-            let name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
             // Skip special directories
             if name == DIFF_DIR || name == LINK_DIR {
@@ -439,7 +450,11 @@ impl OverlayfsDriver {
             length = (length + 1).min(MAX_LINK_ID_LENGTH);
             if length > layer_id.len() {
                 // Use full ID with suffix
-                link_id = format!("{}_{}", layer_id, Uuid::new_v4().to_string()[..8].to_string());
+                link_id = format!(
+                    "{}_{}",
+                    layer_id,
+                    Uuid::new_v4().to_string()[..8].to_string()
+                );
                 break;
             }
             link_id = layer_id[..length].to_string();
@@ -453,7 +468,9 @@ impl OverlayfsDriver {
         let link_ref_path = self.root.join(layer_id).join("link");
 
         if link_ref_path.exists() {
-            fs::read_to_string(&link_ref_path).ok().map(|s| s.trim().to_string())
+            fs::read_to_string(&link_ref_path)
+                .ok()
+                .map(|s| s.trim().to_string())
         } else {
             None
         }
@@ -465,9 +482,9 @@ impl OverlayfsDriver {
         let link_path = self.layer_link_path(link_id);
 
         if link_path.exists() {
-            fs::read_link(&link_path).ok().and_then(|p| {
-                p.to_str().map(|s| s.to_string())
-            })
+            fs::read_link(&link_path)
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string()))
         } else {
             None
         }
@@ -553,9 +570,8 @@ mod tests {
 
     #[test]
     fn test_overlayfs_driver_new() {
-        let driver = OverlayfsDriver::with_root(
-            std::env::temp_dir().join("overlay2_test")
-        ).unwrap();
+        let driver =
+            OverlayfsDriver::with_root(std::env::temp_dir().join("overlay2_test")).unwrap();
 
         assert!(driver.root().exists());
         assert!(driver.root().join(DIFF_DIR).exists());
@@ -564,9 +580,8 @@ mod tests {
 
     #[test]
     fn test_add_and_get_layer() {
-        let driver = OverlayfsDriver::with_root(
-            std::env::temp_dir().join("overlay2_test2")
-        ).unwrap();
+        let driver =
+            OverlayfsDriver::with_root(std::env::temp_dir().join("overlay2_test2")).unwrap();
 
         // Use a layer ID that works on both Linux and Windows
         // (colons in directory names aren't supported on Windows)
@@ -589,14 +604,15 @@ mod tests {
 
     #[test]
     fn test_create_container_overlay() {
-        let driver = OverlayfsDriver::with_root(
-            std::env::temp_dir().join("overlay2_test3")
-        ).unwrap();
+        let driver =
+            OverlayfsDriver::with_root(std::env::temp_dir().join("overlay2_test3")).unwrap();
 
-        let overlay = driver.create_container_overlay(
-            "test-container",
-            vec!["layer1".to_string(), "layer2".to_string()]
-        ).unwrap();
+        let overlay = driver
+            .create_container_overlay(
+                "test-container",
+                vec!["layer1".to_string(), "layer2".to_string()],
+            )
+            .unwrap();
 
         assert!(overlay.merged.exists());
         assert!(overlay.upper.exists());

@@ -1,14 +1,23 @@
 //! CLI command implementations
 
-pub mod run;
-pub mod list;
-pub mod stop;
-pub mod start;
-pub mod remove;
-pub mod logs;
+pub mod backend;
+pub mod daemon;
+pub mod doctor;
+pub mod events;
 pub mod exec;
-pub mod pull;
+pub mod gpu;
 pub mod images;
 pub mod import;
-pub mod daemon;
-pub mod events;
+pub mod list;
+pub mod logs;
+pub mod pull;
+pub mod remove;
+pub mod run;
+pub mod secret;
+pub mod start;
+pub mod stop;
+pub mod vm;
+pub mod volume;
+
+#[cfg(target_os = "macos")]
+pub mod mac;

@@ -36,30 +36,28 @@ impl ImageStore {
         let manifest_path = self.manifest_path(reference);
         manifest_path.exists()
     }
-    
+
     /// Get the path to an image's manifest.
     pub fn manifest_path(&self, reference: &ImageReference) -> PathBuf {
-        self.root_path
-            .join("manifests")
-            .join(format!("{}_{}.json", 
-                reference.repository.replace('/', "_"),
-                reference.tag))
+        self.root_path.join("manifests").join(format!(
+            "{}_{}.json",
+            reference.repository.replace('/', "_"),
+            reference.tag
+        ))
     }
-    
+
     /// Get the path to an image's extracted rootfs.
     pub fn rootfs_path(&self, reference: &ImageReference) -> PathBuf {
-        self.root_path
-            .join("rootfs")
-            .join(reference.fs_name())
+        self.root_path.join("rootfs").join(reference.fs_name())
     }
-    
+
     /// Get the path to a blob.
     pub fn blob_path(&self, digest: &str) -> PathBuf {
         // digest is like "sha256:abc123..."
         let digest = digest.replace(':', "_");
         self.root_path.join("blobs").join(&digest)
     }
-    
+
     /// Check if a blob exists.
     pub fn has_blob(&self, digest: &str) -> bool {
         self.blob_path(digest).exists()
@@ -88,7 +86,7 @@ impl ImageStore {
 
         Ok(images)
     }
-    
+
     /// Save a manifest for an image.
     pub fn save_manifest(&self, reference: &ImageReference, manifest: &[u8]) -> Result<()> {
         let path = self.manifest_path(reference);
@@ -97,42 +95,44 @@ impl ImageStore {
         debug!("Saved manifest for {} to {:?}", reference, path);
         Ok(())
     }
-    
+
     /// Save an OCI manifest for an image.
-    pub fn save_oci_manifest(&self, reference: &ImageReference, manifest: &oci_spec::image::ImageManifest) -> Result<()> {
+    pub fn save_oci_manifest(
+        &self,
+        reference: &ImageReference,
+        manifest: &oci_spec::image::ImageManifest,
+    ) -> Result<()> {
         let path = self.manifest_path(reference);
-        let json = serde_json::to_vec_pretty(manifest)
-            .context("Failed to serialize manifest")?;
+        let json = serde_json::to_vec_pretty(manifest).context("Failed to serialize manifest")?;
         std::fs::write(&path, &json)
             .with_context(|| format!("Failed to save manifest to {:?}", path))?;
         debug!("Saved OCI manifest for {} to {:?}", reference, path);
         Ok(())
     }
-    
+
     /// Load a manifest for an image.
     pub fn load_manifest(&self, reference: &ImageReference) -> Result<Vec<u8>> {
         let path = self.manifest_path(reference);
-        std::fs::read(&path)
-            .with_context(|| format!("Failed to load manifest from {:?}", path))
+        std::fs::read(&path).with_context(|| format!("Failed to load manifest from {:?}", path))
     }
-    
+
     /// Remove an image from the store.
     pub fn remove_image(&self, reference: &ImageReference) -> Result<()> {
         let manifest = self.manifest_path(reference);
         let rootfs = self.rootfs_path(reference);
-        
+
         if manifest.exists() {
             std::fs::remove_file(&manifest)?;
         }
-        
+
         if rootfs.exists() {
             std::fs::remove_dir_all(&rootfs)?;
         }
-        
+
         debug!("Removed image {}", reference);
         Ok(())
     }
-    
+
     /// Clean up a container overlay (if any).
     pub fn remove_container_overlay(&self, _container_id: &str) -> Result<()> {
         // This is handled by the storage layer, not the image store

@@ -86,7 +86,10 @@ impl WslGpuDetector {
 
         // Try nvidia-smi on Windows
         if let Ok(output) = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"])
+            .args([
+                "--query-gpu=name,memory.total,driver_version",
+                "--format=csv,noheader",
+            ])
             .output()
         {
             if output.status.success() {
@@ -94,7 +97,8 @@ impl WslGpuDetector {
                 for line in stdout.lines() {
                     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
                     if parts.len() >= 2 {
-                        let memory_mb = parts[1].split_whitespace()
+                        let memory_mb = parts[1]
+                            .split_whitespace()
                             .next()
                             .and_then(|s| s.parse::<u64>().ok());
 
@@ -133,7 +137,8 @@ impl WslGpuDetector {
 
         if let Some(line) = first_line {
             let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-            let memory_mb = parts.get(1)
+            let memory_mb = parts
+                .get(1)
                 .and_then(|s| s.split_whitespace().next())
                 .and_then(|s| s.parse::<u64>().ok());
 

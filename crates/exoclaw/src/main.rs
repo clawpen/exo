@@ -1,7 +1,12 @@
 //! # exoClaw CLI - Secure Local Agent Harness
 
 use clap::{Parser, Subcommand};
-use exoclaw::{ToolRegistry, DateTimeTool, LlmConfig, OpenAiCompatibleProvider, into_provider, Agent};
+use exoclaw::{
+    default_agent_roles, into_provider, new_run_id, run_to_completion, Agent, BuiltinExecutor,
+    CommandAgentExecutor, DateTimeTool, ExoAgentExecutor, LlmConfig, OpenAiCompatibleProvider,
+    Orchestrator, OrchestratorDecision, PrimeDirective, RunRecord, RunStore, ToolRegistry,
+};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -37,6 +42,155 @@ enum Commands {
         #[arg(short, long, default_value_t = 3847)]
         port: u16,
     },
+
+    /// Create a lightweight multi-agent orchestration plan
+    Orchestrate {
+        /// Prime directive/objective
+        directive: String,
+
+        /// Success criterion (repeatable)
+        #[arg(short = 's', long = "success")]
+        success: Vec<String>,
+
+        /// Constraint (repeatable)
+        #[arg(short, long = "constraint")]
+        constraint: Vec<String>,
+
+        /// Print JSON state
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run a prime directive through the lightweight multi-agent coordinator
+    OrchestrateRun {
+        /// Prime directive/objective
+        directive: Option<String>,
+
+        /// Success criterion (repeatable)
+        #[arg(short = 's', long = "success")]
+        success: Vec<String>,
+
+        /// Constraint (repeatable)
+        #[arg(short, long = "constraint")]
+        constraint: Vec<String>,
+
+        /// Command used for every agent. Receives AgentPrompt JSON on stdin and
+        /// should print AgentReport JSON on stdout.
+        #[arg(long)]
+        agent_cmd: Option<String>,
+
+        /// Use `exo run` as the agent executor
+        #[arg(long)]
+        use_exo: bool,
+
+        /// Exo binary path for --use-exo
+        #[arg(long, default_value = "exo")]
+        exo_bin: String,
+
+        /// Exo backend for --use-exo
+        #[arg(long, default_value = "native")]
+        exo_backend: String,
+
+        /// Exo image for --use-exo
+        #[arg(long, default_value = "host")]
+        exo_image: String,
+
+        /// Agent command for --use-exo
+        #[arg(long, default_value = "cat")]
+        exo_agent_cmd: String,
+
+        /// Volume mount for --use-exo (SRC:DEST), repeatable
+        #[arg(long = "volume")]
+        volumes: Vec<String>,
+
+        /// Secret to pass to exo run for --use-exo, repeatable
+        #[arg(long = "secret")]
+        secrets: Vec<String>,
+
+        /// Sandbox mode for --use-exo (auto/off/required)
+        #[arg(long)]
+        sandbox: Option<String>,
+
+        /// Output final orchestration state as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Read stable JSON input from a file
+        #[arg(long)]
+        json_input: Option<std::path::PathBuf>,
+
+        /// Persist orchestration state under this directory
+        #[arg(long)]
+        state_dir: Option<std::path::PathBuf>,
+
+        /// Explicit run id; generated if omitted
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrchestrateRunInput {
+    pub objective: String,
+    #[serde(default)]
+    pub success_criteria: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub executor: ExecutorConfig,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ExecutorConfig {
+    Builtin,
+    Command {
+        command: String,
+    },
+    Exo {
+        #[serde(default = "default_exo_bin")]
+        exo_bin: String,
+        #[serde(default = "default_exo_backend")]
+        backend: String,
+        #[serde(default = "default_exo_image")]
+        image: String,
+        #[serde(default = "default_exo_agent_cmd")]
+        agent_command: String,
+        #[serde(default)]
+        volumes: Vec<String>,
+        #[serde(default)]
+        secrets: Vec<String>,
+        sandbox: Option<String>,
+    },
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        ExecutorConfig::Builtin
+    }
+}
+
+fn default_exo_bin() -> String {
+    "exo".to_string()
+}
+fn default_exo_backend() -> String {
+    "native".to_string()
+}
+fn default_exo_image() -> String {
+    "host".to_string()
+}
+fn default_exo_agent_cmd() -> String {
+    "cat".to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct OrchestrateRunOutput<'a> {
+    pub run_id: &'a str,
+    pub outcome: &'a exoclaw::RunOutcome,
+    pub state_path: String,
+    pub events_path: String,
+    pub state: &'a exoclaw::OrchestrationState,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -53,6 +207,47 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Run { task } => run_task(task),
         Commands::Serve { port } => start_gateway(port),
+        Commands::Orchestrate {
+            directive,
+            success,
+            constraint,
+            json,
+        } => orchestrate(directive, success, constraint, json),
+        Commands::OrchestrateRun {
+            directive,
+            success,
+            constraint,
+            agent_cmd,
+            use_exo,
+            exo_bin,
+            exo_backend,
+            exo_image,
+            exo_agent_cmd,
+            volumes,
+            secrets,
+            sandbox,
+            json,
+            json_input,
+            state_dir,
+            run_id,
+        } => orchestrate_run(OrchestrateRunArgs {
+            objective: directive,
+            success_criteria: success,
+            constraints: constraint,
+            agent_cmd,
+            use_exo,
+            exo_bin,
+            exo_backend,
+            exo_image,
+            exo_agent_cmd,
+            volumes,
+            secrets,
+            sandbox,
+            json,
+            json_input,
+            state_dir,
+            run_id,
+        }),
     }
 }
 
@@ -77,9 +272,11 @@ fn list_tools(verbose: bool) {
     println!("Available Tools:");
     println!();
 
-    let tools = vec![
-        ("get_datetime", "Get current date and time", "None - Always available"),
-    ];
+    let tools = vec![(
+        "get_datetime",
+        "Get current date and time",
+        "None - Always available",
+    )];
 
     for (name, description, permission) in tools {
         if verbose {
@@ -134,10 +331,205 @@ fn start_gateway(port: u16) -> anyhow::Result<()> {
 
     // For now, just print status
     println!();
-    println!("exoClaw web UI would be available at http://localhost:{}", port);
+    println!(
+        "exoClaw web UI would be available at http://localhost:{}",
+        port
+    );
     println!();
 
     // TODO: Start actual web server when async runtime is fully set up
 
     Ok(())
+}
+
+fn orchestrate(
+    objective: String,
+    success_criteria: Vec<String>,
+    constraints: Vec<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let directive = PrimeDirective {
+        objective,
+        success_criteria,
+        constraints,
+        max_rounds: 12,
+    };
+    let mut orchestrator = Orchestrator::new(directive, default_agent_roles());
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(orchestrator.state())?);
+        return Ok(());
+    }
+
+    println!("Prime directive:");
+    println!("{}", orchestrator.state().directive.objective);
+    println!();
+    println!("Initial agent prompts:");
+    loop {
+        match orchestrator.next() {
+            OrchestratorDecision::PromptAgent { task } => {
+                println!("--- {} -> {} ---", task.id, task.agent_id);
+                println!("{}", task.prompt);
+                println!();
+            }
+            OrchestratorDecision::Succeeded { summary } => {
+                println!("Succeeded: {}", summary);
+                break;
+            }
+            OrchestratorDecision::Blocked { reason } => {
+                // Dry-run stops once all initial prompts are emitted.
+                println!("Coordinator waiting for agent reports: {}", reason);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct OrchestrateRunArgs {
+    objective: Option<String>,
+    success_criteria: Vec<String>,
+    constraints: Vec<String>,
+    agent_cmd: Option<String>,
+    use_exo: bool,
+    exo_bin: String,
+    exo_backend: String,
+    exo_image: String,
+    exo_agent_cmd: String,
+    volumes: Vec<String>,
+    secrets: Vec<String>,
+    sandbox: Option<String>,
+    json: bool,
+    json_input: Option<std::path::PathBuf>,
+    state_dir: Option<std::path::PathBuf>,
+    run_id: Option<String>,
+}
+
+fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
+    let input = if let Some(path) = args.json_input {
+        let bytes = std::fs::read(&path)?;
+        serde_json::from_slice::<OrchestrateRunInput>(&bytes)?
+    } else {
+        OrchestrateRunInput {
+            objective: args.objective.ok_or_else(|| {
+                anyhow::anyhow!("directive is required unless --json-input is used")
+            })?,
+            success_criteria: args.success_criteria,
+            constraints: args.constraints,
+            executor: if args.use_exo {
+                ExecutorConfig::Exo {
+                    exo_bin: args.exo_bin,
+                    backend: args.exo_backend,
+                    image: args.exo_image,
+                    agent_command: args.exo_agent_cmd,
+                    volumes: args.volumes,
+                    secrets: args.secrets,
+                    sandbox: args.sandbox,
+                }
+            } else if let Some(cmd) = args.agent_cmd {
+                ExecutorConfig::Command { command: cmd }
+            } else {
+                ExecutorConfig::Builtin
+            },
+            run_id: args.run_id,
+        }
+    };
+
+    let directive = PrimeDirective {
+        objective: input.objective,
+        success_criteria: input.success_criteria,
+        constraints: input.constraints,
+        max_rounds: 24,
+    };
+    let mut orchestrator = Orchestrator::new(directive, default_agent_roles());
+    let run_id = input.run_id.unwrap_or_else(new_run_id);
+    let store = if let Some(dir) = args.state_dir {
+        RunStore::new(dir)?
+    } else {
+        RunStore::new_default()?
+    };
+
+    store.save(&RunRecord {
+        run_id: run_id.clone(),
+        state: orchestrator.state().clone(),
+        outcome: None,
+    })?;
+    store.append_event(&run_id, "started", "orchestration run started")?;
+
+    let outcome = match input.executor {
+        ExecutorConfig::Exo {
+            exo_bin,
+            backend,
+            image,
+            agent_command,
+            volumes,
+            secrets,
+            sandbox,
+        } => {
+            let mut executor =
+                ExoAgentExecutor::new(vec!["sh".to_string(), "-c".to_string(), agent_command]);
+            executor.exo_bin = exo_bin;
+            executor.backend = backend;
+            executor.image = image;
+            executor.sandbox = sandbox;
+            executor.secrets = secrets;
+            executor.volumes = parse_volume_pairs(volumes)?;
+            run_to_completion(&mut orchestrator, &mut executor, 100)?
+        }
+        ExecutorConfig::Command { command } => {
+            let mut executor = CommandAgentExecutor::new(command);
+            run_to_completion(&mut orchestrator, &mut executor, 100)?
+        }
+        ExecutorConfig::Builtin => {
+            let mut executor = BuiltinExecutor::new();
+            run_to_completion(&mut orchestrator, &mut executor, 100)?
+        }
+    };
+
+    store.save(&RunRecord {
+        run_id: run_id.clone(),
+        state: orchestrator.state().clone(),
+        outcome: Some(outcome.clone()),
+    })?;
+    store.append_event(&run_id, "finished", &format!("{:?}", outcome.status))?;
+
+    if args.json {
+        let output = OrchestrateRunOutput {
+            run_id: &run_id,
+            outcome: &outcome,
+            state_path: store.state_path(&run_id).display().to_string(),
+            events_path: store.events_path(&run_id).display().to_string(),
+            state: orchestrator.state(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Run ID: {}", run_id);
+    println!("State: {}", store.state_path(&run_id).display());
+    println!("Events: {}", store.events_path(&run_id).display());
+    println!("Outcome: {:?}", outcome.status);
+    println!("Rounds: {}", outcome.rounds);
+    println!("{}", outcome.message);
+    println!();
+    println!("Reports:");
+    for report in &orchestrator.state().reports {
+        println!(
+            "- {} [{:?}]: {}",
+            report.task_id, report.status, report.summary
+        );
+    }
+    Ok(())
+}
+
+fn parse_volume_pairs(values: Vec<String>) -> anyhow::Result<Vec<(String, String)>> {
+    values
+        .into_iter()
+        .map(|value| {
+            let Some((source, target)) = value.split_once(':') else {
+                anyhow::bail!("invalid volume '{}'; expected SRC:DEST", value);
+            };
+            Ok((source.to_string(), target.to_string()))
+        })
+        .collect()
 }

@@ -15,8 +15,8 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use exo_runtime::{
-    Container, ContainerConfig, ContainerStatus, ResourceConfig, NetworkConfig,
-    CgroupManager, Capability, drop_capabilities, get_default_caps,
+    drop_capabilities, get_default_caps, Capability, CgroupManager, Container, ContainerConfig,
+    ContainerStatus, NetworkConfig, ResourceConfig,
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -98,7 +98,11 @@ fn test_cgroup_memory_tracking() {
     // Initial memory usage should be low
     let usage = mgr.get_memory_usage().expect("Failed to get usage");
     // Some memory is used by the cgroup itself
-    assert!(usage < 10 * 1024 * 1024, "Initial usage too high: {}", usage);
+    assert!(
+        usage < 10 * 1024 * 1024,
+        "Initial usage too high: {}",
+        usage
+    );
 
     // Clean up
     let _ = mgr.destroy();
@@ -173,14 +177,16 @@ fn test_cgroup_resource_comprehensive() {
 
     // All should succeed
     for (i, result) in results.into_iter().enumerate() {
-        assert!(result.is_ok(), "Resource limit {} failed: {:?}", i, result.err());
+        assert!(
+            result.is_ok(),
+            "Resource limit {} failed: {:?}",
+            i,
+            result.err()
+        );
     }
 
     // Verify values
-    assert_eq!(
-        mgr.get_memory_limit().unwrap().unwrap(),
-        256 * 1024 * 1024
-    );
+    assert_eq!(mgr.get_memory_limit().unwrap().unwrap(), 256 * 1024 * 1024);
 
     // Clean up
     mgr.destroy().expect("Failed to destroy");
@@ -273,10 +279,14 @@ fn test_seccomp_default_profile() {
 
     // Essential syscalls should be allowed (Syscall is an enum, match on Name variant)
     use exo_runtime::seccomp::Syscall;
-    let syscall_names: Vec<&str> = profile.allow.iter().filter_map(|s| match s {
-        Syscall::Name(n) => Some(n.as_str()),
-        Syscall::Number(_) => None,
-    }).collect();
+    let syscall_names: Vec<&str> = profile
+        .allow
+        .iter()
+        .filter_map(|s| match s {
+            Syscall::Name(n) => Some(n.as_str()),
+            Syscall::Number(_) => None,
+        })
+        .collect();
     assert!(syscall_names.contains(&"read"));
     assert!(syscall_names.contains(&"write"));
     assert!(syscall_names.contains(&"exit"));
@@ -285,8 +295,8 @@ fn test_seccomp_default_profile() {
 
 #[test]
 fn test_container_config_with_all_options() {
+    use exo_runtime::{ContainerConfig, MountConfig, NetworkConfig, ResourceConfig};
     use std::collections::HashMap;
-    use exo_runtime::{ContainerConfig, ResourceConfig, NetworkConfig, MountConfig};
 
     let mut env = HashMap::new();
     env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());

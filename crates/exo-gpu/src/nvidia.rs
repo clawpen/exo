@@ -31,7 +31,9 @@ pub fn detect_nvidia_gpus() -> Result<Vec<GpuInfo>> {
             Err(_) => continue,
         };
 
-        let name = device.name().unwrap_or_else(|_| "Unknown NVIDIA GPU".to_string());
+        let name = device
+            .name()
+            .unwrap_or_else(|_| "Unknown NVIDIA GPU".to_string());
         let memory = device.memory_info().ok().map(|m| m.total / 1024 / 1024);
         let pci_id = device.pci_info().ok().map(|p| p.bus_id);
 
@@ -126,7 +128,11 @@ impl NvidiaGpu {
 
     /// Get the CUDA version.
     pub fn cuda_version(&self) -> Option<u32> {
-        self.nvml.as_ref()?.sys_cuda_driver_version().ok().map(|v| v as u32)
+        self.nvml
+            .as_ref()?
+            .sys_cuda_driver_version()
+            .ok()
+            .map(|v| v as u32)
     }
 
     /// Get the driver version.
@@ -136,7 +142,10 @@ impl NvidiaGpu {
 
     /// Set compute mode for a GPU.
     pub fn set_compute_mode(&self, index: u32, mode: ComputeMode) -> Result<()> {
-        let nvml = self.nvml.as_ref().ok_or_else(|| anyhow::anyhow!("NVML not initialized"))?;
+        let nvml = self
+            .nvml
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("NVML not initialized"))?;
         let mut device = nvml.device_by_index(index)?;
         device.set_compute_mode(mode.into())?;
         Ok(())

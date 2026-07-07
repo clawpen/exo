@@ -45,7 +45,11 @@ impl PathTranslator {
             // Pattern: C:/path where chars[0] is drive letter and chars[1] is colon
             if chars.len() >= 2 && chars[0].is_ascii_alphabetic() && chars[1] == ':' {
                 let drive = chars[0].to_lowercase();
-                let rest = if normalized.len() > 2 { &normalized[2..] } else { "" };
+                let rest = if normalized.len() > 2 {
+                    &normalized[2..]
+                } else {
+                    ""
+                };
 
                 if rest.is_empty() || rest == "/" {
                     return format!("/mnt/{}", drive);
@@ -73,9 +77,18 @@ impl PathTranslator {
         if let Some(rest) = wsl_path.strip_prefix("/mnt/") {
             if let Some((drive, path)) = rest.split_once('/') {
                 // Ensure drive is a single letter
-                if drive.len() == 1 && drive.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+                if drive.len() == 1
+                    && drive
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_alphabetic())
+                {
                     let drive_upper = drive.to_uppercase();
-                    let rest_with_slash = if path.is_empty() { "\\" } else { &format!("\\{}", path.replace('/', "\\")) };
+                    let rest_with_slash = if path.is_empty() {
+                        "\\"
+                    } else {
+                        &format!("\\{}", path.replace('/', "\\"))
+                    };
                     return format!("{}:{}", drive_upper, rest_with_slash);
                 }
             }
@@ -164,7 +177,11 @@ impl PathTranslator {
 
     /// Join two path components, handling Windows/WSL differences.
     pub fn join(&self, base: &str, leaf: &str) -> String {
-        let separator = if self.is_windows_path(base) { "\\" } else { "/" };
+        let separator = if self.is_windows_path(base) {
+            "\\"
+        } else {
+            "/"
+        };
         let base_trimmed = base.trim_end_matches(&['/', '\\'][..]);
         let leaf_trimmed = leaf.trim_start_matches(&['/', '\\'][..]);
         format!("{}{}{}", base_trimmed, separator, leaf_trimmed)

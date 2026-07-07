@@ -2,13 +2,13 @@
 //!
 //! Supports NVIDIA (via NVML) and AMD (via ROCm) GPUs.
 
+mod amd;
 mod detector;
 mod nvidia;
-mod amd;
 
-pub use detector::{detect_gpus, GpuInfo, GpuType};
-pub use nvidia::{NvidiaGpu, NvidiaDevice};
 pub use amd::AmdGpu;
+pub use detector::{detect_gpus, GpuInfo, GpuType};
+pub use nvidia::{NvidiaDevice, NvidiaGpu};
 
 use anyhow::Result;
 
@@ -92,7 +92,9 @@ impl GpuConfig {
                 if self.all {
                     type_matches
                 } else {
-                    (self.devices.contains(&gpu.id.to_string()) || self.devices.iter().any(|d| d == "all")) && type_matches
+                    (self.devices.contains(&gpu.id.to_string())
+                        || self.devices.iter().any(|d| d == "all"))
+                        && type_matches
                 }
             })
             .flat_map(|gpu| gpu.device_paths.clone())
@@ -111,7 +113,10 @@ impl GpuConfig {
 
         match self.gpu_type {
             GpuType::Nvidia => {
-                if !available.iter().any(|g| matches!(g.gpu_type, GpuType::Nvidia)) {
+                if !available
+                    .iter()
+                    .any(|g| matches!(g.gpu_type, GpuType::Nvidia))
+                {
                     anyhow::bail!("NVIDIA GPU requested but no NVIDIA devices found");
                 }
             }

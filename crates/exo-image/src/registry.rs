@@ -114,8 +114,7 @@ impl RegistryClient {
     /// Load Docker config from default locations.
     fn load_docker_config() -> Result<Option<DockerConfig>> {
         let config_paths = vec![
-            dirs::home_dir()
-                .map(|h| h.join(".docker").join("config.json")),
+            dirs::home_dir().map(|h| h.join(".docker").join("config.json")),
             std::env::var("DOCKER_CONFIG")
                 .ok()
                 .map(|p| PathBuf::from(p).join("config.json")),
@@ -125,18 +124,18 @@ impl RegistryClient {
             if path.exists() {
                 debug!("Loading Docker config from {:?}", path);
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        match serde_json::from_str::<DockerConfig>(&content) {
-                            Ok(config) => {
-                                debug!("Loaded Docker config with {} registries",
-                                    config.auths.as_ref().map(|a| a.len()).unwrap_or(0));
-                                return Ok(Some(config));
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse Docker config: {}", e);
-                            }
+                    Ok(content) => match serde_json::from_str::<DockerConfig>(&content) {
+                        Ok(config) => {
+                            debug!(
+                                "Loaded Docker config with {} registries",
+                                config.auths.as_ref().map(|a| a.len()).unwrap_or(0)
+                            );
+                            return Ok(Some(config));
                         }
-                    }
+                        Err(e) => {
+                            warn!("Failed to parse Docker config: {}", e);
+                        }
+                    },
                     Err(e) => {
                         warn!("Failed to read Docker config: {}", e);
                     }
@@ -150,9 +149,7 @@ impl RegistryClient {
     /// Get the API URL for a registry.
     fn get_api_url(registry: &str) -> String {
         match registry {
-            "docker.io" | "index.docker.io" => {
-                "https://registry-1.docker.io/v2".to_string()
-            }
+            "docker.io" | "index.docker.io" => "https://registry-1.docker.io/v2".to_string(),
             _ => {
                 format!("https://{}/v2", registry)
             }
@@ -248,8 +245,10 @@ impl RegistryClient {
             let expires_in = token_resp.expires_in.unwrap_or(300);
 
             // Cache the token
-            let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(expires_in as u64);
-            self.token_cache.insert(cache_key, (token.clone(), expires_at));
+            let expires_at =
+                std::time::Instant::now() + std::time::Duration::from_secs(expires_in as u64);
+            self.token_cache
+                .insert(cache_key, (token.clone(), expires_at));
 
             return Ok(token);
         }
@@ -284,14 +283,13 @@ impl RegistryClient {
                 }
             }
 
-            let resp = request
-                .send()
-                .await
-                .context("Failed to get auth token")?;
+            let resp = request.send().await.context("Failed to get auth token")?;
 
             if !resp.status().is_success() {
                 // Try without auth for public repos
-                let resp = self.client.get(&url)
+                let resp = self
+                    .client
+                    .get(&url)
                     .send()
                     .await
                     .context("Failed to get auth token (anonymous)")?;
@@ -325,7 +323,8 @@ impl RegistryClient {
         let api_url = Self::get_api_url(registry);
         let url = format!("{}/", api_url);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .send()
             .await
@@ -352,54 +351,63 @@ impl RegistryClient {
         let token = self.get_auth_token(registry, repo).await?;
 
         // Get manifest
-        let reference_str = reference.digest.as_ref()
+        let reference_str = reference
+            .digest
+            .as_ref()
             .map(|d| d.clone())
             .unwrap_or_else(|| reference.tag.clone());
 
-        let manifest_bytes = self.get_manifest(&api_url, repo, &reference_str, &token).await?;
+        let manifest_bytes = self
+            .get_manifest(&api_url, repo, &reference_str, &token)
+            .await?;
 
         // Try to parse as an index (manifest list) first
-        let manifest: oci_spec::image::ImageManifest = 
-            if let Ok(index) = serde_json::from_slice::<oci_spec::image::ImageIndex>(&manifest_bytes) {
-                // This is a manifest list - select the appropriate platform
-                info!("Received manifest list with {} manifests", index.manifests().len());
-                
-                // Find the manifest for our platform (linux/amd64)
-                let target_manifest = index.manifests()
-                    .iter()
-                    .find(|m| {
+        let manifest: oci_spec::image::ImageManifest = if let Ok(index) =
+            serde_json::from_slice::<oci_spec::image::ImageIndex>(&manifest_bytes)
+        {
+            // This is a manifest list - select the appropriate platform
+            info!(
+                "Received manifest list with {} manifests",
+                index.manifests().len()
+            );
+
+            // Find the manifest for our platform (linux/amd64)
+            let target_manifest = index
+                .manifests()
+                .iter()
+                .find(|m| {
+                    if let Some(platform) = m.platform() {
+                        // Check for linux/amd64
+                        matches!(platform.os(), oci_spec::image::Os::Linux)
+                            && matches!(platform.architecture(), oci_spec::image::Arch::Amd64)
+                    } else {
+                        false
+                    }
+                })
+                .or_else(|| {
+                    // Fallback: try to find any linux manifest
+                    index.manifests().iter().find(|m| {
                         if let Some(platform) = m.platform() {
-                            // Check for linux/amd64
-                            matches!(platform.os(), oci_spec::image::Os::Linux) 
-                                && matches!(platform.architecture(), oci_spec::image::Arch::Amd64)
+                            matches!(platform.os(), oci_spec::image::Os::Linux)
                         } else {
                             false
                         }
                     })
-                    .or_else(|| {
-                        // Fallback: try to find any linux manifest
-                        index.manifests().iter().find(|m| {
-                            if let Some(platform) = m.platform() {
-                                matches!(platform.os(), oci_spec::image::Os::Linux)
-                            } else {
-                                false
-                            }
-                        })
-                    })
-                    .ok_or_else(|| anyhow::anyhow!("No manifest found for linux/amd64"))?;
-                
-                let manifest_digest = target_manifest.digest();
-                info!("Selected manifest: {}", manifest_digest);
-                
-                // Fetch the actual manifest
-                let manifest_bytes = self.get_manifest(&api_url, repo, &manifest_digest.to_string(), &token).await?;
-                serde_json::from_slice(&manifest_bytes)
-                    .context("Failed to parse image manifest")?
-            } else {
-                // Not a manifest list, parse as regular manifest
-                serde_json::from_slice(&manifest_bytes)
-                    .context("Failed to parse manifest")?
-            };
+                })
+                .ok_or_else(|| anyhow::anyhow!("No manifest found for linux/amd64"))?;
+
+            let manifest_digest = target_manifest.digest();
+            info!("Selected manifest: {}", manifest_digest);
+
+            // Fetch the actual manifest
+            let manifest_bytes = self
+                .get_manifest(&api_url, repo, &manifest_digest.to_string(), &token)
+                .await?;
+            serde_json::from_slice(&manifest_bytes).context("Failed to parse image manifest")?
+        } else {
+            // Not a manifest list, parse as regular manifest
+            serde_json::from_slice(&manifest_bytes).context("Failed to parse manifest")?
+        };
 
         info!("Image has {} layers", manifest.layers().len());
 
@@ -411,7 +419,8 @@ impl RegistryClient {
         let config_path = self.store.blob_path(&config_digest);
         if !config_path.exists() {
             info!("Downloading config {}", config_digest);
-            self.download_blob(&api_url, repo, &config_digest, &config_path, &token).await?;
+            self.download_blob(&api_url, repo, &config_digest, &config_path, &token)
+                .await?;
         }
 
         // Download layers
@@ -424,7 +433,8 @@ impl RegistryClient {
                 debug!("Layer {} already exists", digest);
             } else {
                 info!("Downloading layer {}", digest);
-                self.download_blob(&api_url, repo, &digest, &blob_path, &token).await?;
+                self.download_blob(&api_url, repo, &digest, &blob_path, &token)
+                    .await?;
             }
 
             layer_digests.push(digest);
@@ -462,8 +472,14 @@ impl RegistryClient {
         // Accept both OCI and Docker manifest types
         let resp = request
             .header("Accept", "application/vnd.oci.image.manifest.v1+json")
-            .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-            .header("Accept", "application/vnd.docker.distribution.manifest.list.v2+json")
+            .header(
+                "Accept",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            )
+            .header(
+                "Accept",
+                "application/vnd.docker.distribution.manifest.list.v2+json",
+            )
             .send()
             .await
             .context("Failed to get manifest")?;
@@ -495,10 +511,7 @@ impl RegistryClient {
             request = request.header("Authorization", format!("Bearer {}", token));
         }
 
-        let resp = request
-            .send()
-            .await
-            .context("Failed to download blob")?;
+        let resp = request.send().await.context("Failed to download blob")?;
 
         if !resp.status().is_success() {
             anyhow::bail!("Failed to download blob {}: {}", digest, resp.status());

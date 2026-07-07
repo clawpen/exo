@@ -139,16 +139,12 @@ impl ImageManager {
     pub fn new() -> Result<Self> {
         let storage = OverlayfsDriver::new()?;
 
-        Ok(Self {
-            storage,
-        })
+        Ok(Self { storage })
     }
 
     /// Create an image manager with custom storage.
     pub fn with_storage(storage: OverlayfsDriver) -> Result<Self> {
-        Ok(Self {
-            storage,
-        })
+        Ok(Self { storage })
     }
 
     /// Parse an image reference string.
@@ -158,7 +154,10 @@ impl ImageManager {
 
         let (registry, repository) = if parts.len() == 1 {
             // "python:3.12" -> registry-1.docker.io/library/python
-            (DEFAULT_REGISTRY.to_string(), format!("{}/{}", DEFAULT_LIBRARY, parts[0]))
+            (
+                DEFAULT_REGISTRY.to_string(),
+                format!("{}/{}", DEFAULT_LIBRARY, parts[0]),
+            )
         } else if parts.len() == 2 && !parts[0].contains('.') && !parts[0].contains(':') {
             // "library/python:3.12" -> registry-1.docker.io/library/python
             (DEFAULT_REGISTRY.to_string(), parts.join("/"))
@@ -209,8 +208,10 @@ impl ImageManager {
         let image_id = Uuid::new_v4().to_string();
         let image_path = images_dir.join(&image_id);
 
-        let full_reference = format!("{}/{}:{}",
-            image_ref.registry, image_ref.repository,
+        let full_reference = format!(
+            "{}/{}:{}",
+            image_ref.registry,
+            image_ref.repository,
             match &image_ref.reference {
                 TagOrDigest::Tag(t) => t.clone(),
                 TagOrDigest::Digest(d) => d.clone(),
@@ -224,7 +225,9 @@ impl ImageManager {
             config_digest: manifest.config.digest.clone(),
             layers: layer_ids.to_vec(),
             size: manifest.layers.iter().map(|l| l.size as u64).sum(),
-            architecture: manifest.config.platform
+            architecture: manifest
+                .config
+                .platform
                 .as_ref()
                 .map(|p| p.architecture.clone())
                 .unwrap_or_else(|| "amd64".to_string()),
@@ -278,7 +281,8 @@ impl ImageManager {
 
     /// Remove an image.
     pub fn remove_image(&self, id: &str) -> Result<()> {
-        let image = self.get_image(id)
+        let image = self
+            .get_image(id)
             .ok_or_else(|| anyhow::anyhow!("Image not found: {}", id))?;
 
         // Remove layers if not shared
@@ -297,12 +301,15 @@ impl ImageManager {
 
     /// Get the root filesystem for an image.
     pub fn get_image_rootfs(&self, id: &str) -> Result<PathBuf> {
-        let image = self.get_image(id)
+        let image = self
+            .get_image(id)
             .ok_or_else(|| anyhow::anyhow!("Image not found: {}", id))?;
 
         // Create a temporary overlay with the image's layers
         let container_id = format!("{}_rootfs", id);
-        let overlay = self.storage.create_container_overlay(&container_id, image.layers.clone())?;
+        let overlay = self
+            .storage
+            .create_container_overlay(&container_id, image.layers.clone())?;
 
         // Mount the overlay
         #[cfg(target_os = "linux")]
@@ -342,7 +349,9 @@ mod tests {
     #[test]
     fn test_parse_docker_hub_reference() {
         let manager = ImageManager::new().unwrap();
-        let parsed = manager.parse_image_reference("docker.io/library/python:latest").unwrap();
+        let parsed = manager
+            .parse_image_reference("docker.io/library/python:latest")
+            .unwrap();
 
         assert_eq!(parsed.registry, "docker.io");
         assert_eq!(parsed.repository, "library/python");
@@ -352,15 +361,22 @@ mod tests {
     #[test]
     fn test_parse_digest_reference() {
         let manager = ImageManager::new().unwrap();
-        let parsed = manager.parse_image_reference("python@sha256:abc123").unwrap();
+        let parsed = manager
+            .parse_image_reference("python@sha256:abc123")
+            .unwrap();
 
-        assert_eq!(parsed.reference, TagOrDigest::Digest("sha256:abc123".to_string()));
+        assert_eq!(
+            parsed.reference,
+            TagOrDigest::Digest("sha256:abc123".to_string())
+        );
     }
 
     #[test]
     fn test_parse_private_registry() {
         let manager = ImageManager::new().unwrap();
-        let parsed = manager.parse_image_reference("my-registry.com/myimage:latest").unwrap();
+        let parsed = manager
+            .parse_image_reference("my-registry.com/myimage:latest")
+            .unwrap();
 
         assert_eq!(parsed.registry, "my-registry.com");
         assert_eq!(parsed.repository, "myimage");

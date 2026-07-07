@@ -1,11 +1,11 @@
 //! Common test utilities for integration tests
 
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::process::Command;
-use std::time::Duration;
-use std::thread;
 use anyhow::Result;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Test environment setup
@@ -82,9 +82,7 @@ done
     #[cfg(target_os = "linux")]
     fn copy_dependencies(binary: &Path, rootfs: &Path) -> Result<()> {
         // Use ldd to find dependencies
-        let output = Command::new("ldd")
-            .arg(binary)
-            .output()?;
+        let output = Command::new("ldd").arg(binary).output()?;
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -114,10 +112,7 @@ done
             if let Ok(content) = fs::read_to_string(&procs_file) {
                 for pid_str in content.lines() {
                     if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                        let _ = Command::new("kill")
-                            .arg("-9")
-                            .arg(pid.to_string())
-                            .output();
+                        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
                     }
                 }
             }

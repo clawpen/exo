@@ -159,7 +159,11 @@ pub fn write_uid_map(pid: Pid, uid_map: &UidMap) -> Result<()> {
     writeln!(file, "{}", uid_map.to_map_string())
         .with_context(|| format!("Failed to write UID map to {}", path))?;
 
-    tracing::debug!("Wrote UID map for PID {}: {}", pid.as_raw(), uid_map.to_map_string());
+    tracing::debug!(
+        "Wrote UID map for PID {}: {}",
+        pid.as_raw(),
+        uid_map.to_map_string()
+    );
 
     Ok(())
 }
@@ -192,7 +196,11 @@ pub fn write_gid_map(pid: Pid, gid_map: &GidMap) -> Result<()> {
     writeln!(file, "{}", gid_map.to_map_string())
         .with_context(|| format!("Failed to write GID map to {}", path))?;
 
-    tracing::debug!("Wrote GID map for PID {}: {}", pid.as_raw(), gid_map.to_map_string());
+    tracing::debug!(
+        "Wrote GID map for PID {}: {}",
+        pid.as_raw(),
+        gid_map.to_map_string()
+    );
 
     Ok(())
 }
@@ -234,7 +242,9 @@ pub fn setup_user_namespace(
     _uid_map: &UidMap,
     _gid_map: &GidMap,
 ) -> Result<()> {
-    Err(anyhow::anyhow!("User namespaces are only supported on Linux"))
+    Err(anyhow::anyhow!(
+        "User namespaces are only supported on Linux"
+    ))
 }
 
 /// Get the UID/GID maps for the current process.
@@ -268,12 +278,9 @@ fn parse_uid_maps(content: &str) -> Result<Vec<UidMap>> {
             continue;
         }
 
-        let inside: u32 = parts[0].parse()
-            .context("Invalid UID map inside UID")?;
-        let outside: u32 = parts[1].parse()
-            .context("Invalid UID map outside UID")?;
-        let count: u32 = parts[2].parse()
-            .context("Invalid UID map count")?;
+        let inside: u32 = parts[0].parse().context("Invalid UID map inside UID")?;
+        let outside: u32 = parts[1].parse().context("Invalid UID map outside UID")?;
+        let count: u32 = parts[2].parse().context("Invalid UID map count")?;
 
         maps.push(UidMap::new(inside, outside, count));
     }
@@ -297,12 +304,9 @@ fn parse_gid_maps(content: &str) -> Result<Vec<GidMap>> {
             continue;
         }
 
-        let inside: u32 = parts[0].parse()
-            .context("Invalid GID map inside GID")?;
-        let outside: u32 = parts[1].parse()
-            .context("Invalid GID map outside GID")?;
-        let count: u32 = parts[2].parse()
-            .context("Invalid GID map count")?;
+        let inside: u32 = parts[0].parse().context("Invalid GID map inside GID")?;
+        let outside: u32 = parts[1].parse().context("Invalid GID map outside GID")?;
+        let count: u32 = parts[2].parse().context("Invalid GID map count")?;
 
         maps.push(GidMap::new(inside, outside, count));
     }

@@ -106,9 +106,7 @@ impl CgroupManager {
     /// A new CgroupManager instance
     pub fn new(container_id: &str) -> Result<Self> {
         let base = get_user_cgroup_base();
-        let cgroup_path = base
-            .join(CONTAINMENT_CGROUP)
-            .join(container_id);
+        let cgroup_path = base.join(CONTAINMENT_CGROUP).join(container_id);
 
         Ok(Self {
             container_id: container_id.to_string(),
@@ -131,7 +129,11 @@ impl CgroupManager {
         let parent_cgroup = base.join(CONTAINMENT_CGROUP);
         if !parent_cgroup.exists() {
             if let Err(e) = fs::create_dir_all(&parent_cgroup) {
-                tracing::warn!("Could not create cgroup parent {:?}: {}. Running without cgroup limits.", parent_cgroup, e);
+                tracing::warn!(
+                    "Could not create cgroup parent {:?}: {}. Running without cgroup limits.",
+                    parent_cgroup,
+                    e
+                );
                 // Return Ok anyway - cgroups are optional for rootless operation
                 return Ok(());
             }
@@ -151,7 +153,11 @@ impl CgroupManager {
 
         // Create the container's cgroup directory
         if let Err(e) = fs::create_dir_all(&self.cgroup_path) {
-            tracing::warn!("Could not create cgroup {:?}: {}. Running without cgroup limits.", self.cgroup_path, e);
+            tracing::warn!(
+                "Could not create cgroup {:?}: {}. Running without cgroup limits.",
+                self.cgroup_path,
+                e
+            );
             // Return Ok anyway - cgroups are optional for rootless operation
             return Ok(());
         }
@@ -208,7 +214,7 @@ impl CgroupManager {
         let memory_swap_max = self.cgroup_path.join("memory.swap.max");
 
         let value = if bytes == 0 {
-            "0".to_string()  // Disable swap
+            "0".to_string() // Disable swap
         } else if bytes == u64::MAX {
             "max".to_string()
         } else {
@@ -389,21 +395,28 @@ impl CgroupManager {
 
         let cgroup_procs = self.cgroup_path.join("cgroup.procs");
 
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .open(&cgroup_procs)
-        {
+        let mut file = match OpenOptions::new().write(true).open(&cgroup_procs) {
             Ok(f) => f,
             Err(e) => {
-                tracing::debug!("Could not open cgroup.procs: {}. Continuing without cgroup.", e);
+                tracing::debug!(
+                    "Could not open cgroup.procs: {}. Continuing without cgroup.",
+                    e
+                );
                 return Ok(());
             }
         };
 
         if let Err(e) = writeln!(file, "{}", pid.as_raw()) {
-            tracing::debug!("Could not write PID to cgroup.procs: {}. Continuing without cgroup.", e);
+            tracing::debug!(
+                "Could not write PID to cgroup.procs: {}. Continuing without cgroup.",
+                e
+            );
         } else {
-            tracing::debug!("Added PID {} to cgroup {:?}", pid.as_raw(), self.cgroup_path);
+            tracing::debug!(
+                "Added PID {} to cgroup {:?}",
+                pid.as_raw(),
+                self.cgroup_path
+            );
         }
 
         Ok(())
@@ -424,7 +437,9 @@ impl CgroupManager {
         let content = fs::read_to_string(&memory_current)
             .with_context(|| format!("Failed to read memory.current from {:?}", memory_current))?;
 
-        let usage = content.trim().parse::<u64>()
+        let usage = content
+            .trim()
+            .parse::<u64>()
             .context("Failed to parse memory usage")?;
 
         Ok(usage)
@@ -444,7 +459,8 @@ impl CgroupManager {
         if trimmed == "max" {
             Ok(None)
         } else {
-            let limit = trimmed.parse::<u64>()
+            let limit = trimmed
+                .parse::<u64>()
                 .context("Failed to parse memory limit")?;
             Ok(Some(limit))
         }
@@ -463,8 +479,7 @@ impl CgroupManager {
         for line in content.lines() {
             if line.starts_with("usage_usec ") {
                 let us_str = line.trim_start_matches("usage_usec ");
-                let us = us_str.parse::<u64>()
-                    .context("Failed to parse CPU usage")?;
+                let us = us_str.parse::<u64>().context("Failed to parse CPU usage")?;
                 return Ok(us * 1000); // Convert microseconds to nanoseconds
             }
         }
@@ -554,8 +569,9 @@ impl CgroupManager {
 
         // Remove the cgroup directory
         if self.cgroup_path.exists() {
-            fs::remove_dir(&self.cgroup_path)
-                .with_context(|| format!("Failed to remove cgroup directory: {:?}", self.cgroup_path))?;
+            fs::remove_dir(&self.cgroup_path).with_context(|| {
+                format!("Failed to remove cgroup directory: {:?}", self.cgroup_path)
+            })?;
 
             tracing::debug!("Destroyed cgroup: {:?}", self.cgroup_path);
         }
@@ -613,7 +629,8 @@ pub fn parse_size(size: &str) -> Result<u64> {
         (&size[..], 1)
     };
 
-    let num: u64 = num_str.parse()
+    let num: u64 = num_str
+        .parse()
         .context(format!("Invalid size format: {}", size))?;
 
     Ok(num.saturating_mul(multiplier))

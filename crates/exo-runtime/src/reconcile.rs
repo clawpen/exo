@@ -155,7 +155,10 @@ impl Reconciler {
     /// (process death after the daemon was already up means the container
     /// died on its own and shouldn't auto-recover under `OnDaemonRestart`).
     pub async fn run_loop(self) {
-        tracing::info!("reconciler: starting periodic loop (interval={:?})", self.opts.interval);
+        tracing::info!(
+            "reconciler: starting periodic loop (interval={:?})",
+            self.opts.interval
+        );
         let mut ticker = tokio::time::interval(self.opts.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -186,7 +189,11 @@ impl Reconciler {
         self.shutdown.notify_one();
     }
 
-    fn reconcile_one(&self, mut metadata: ContainerMetadata, allow_restart: bool) -> ReconcileSummary {
+    fn reconcile_one(
+        &self,
+        mut metadata: ContainerMetadata,
+        allow_restart: bool,
+    ) -> ReconcileSummary {
         let mut summary = ReconcileSummary::default();
 
         // Already exited — only consider stale removal.
@@ -221,7 +228,9 @@ impl Reconciler {
             if !cg.exists() {
                 tracing::warn!(
                     "reconciler: {} pid {} alive but cgroup {:?} missing",
-                    metadata.name, pid, cg
+                    metadata.name,
+                    pid,
+                    cg
                 );
             }
             summary.healthy += 1;
@@ -249,7 +258,11 @@ impl Reconciler {
             match self.restart(&mut metadata) {
                 Ok(()) => {
                     if let Err(e) = self.manager.save(&metadata) {
-                        tracing::warn!("reconciler: restart of {} succeeded but save failed: {}", name, e);
+                        tracing::warn!(
+                            "reconciler: restart of {} succeeded but save failed: {}",
+                            name,
+                            e
+                        );
                         summary.errors += 1;
                     } else {
                         self.emit(&metadata.id, &name, EventType::Restarted, None);
@@ -271,10 +284,7 @@ impl Reconciler {
             return Ok(0);
         }
 
-        let known: HashSet<String> = self.manager.list()?
-            .into_iter()
-            .map(|m| m.name)
-            .collect();
+        let known: HashSet<String> = self.manager.list()?.into_iter().map(|m| m.name).collect();
 
         let mut count: u32 = 0;
         for entry in std::fs::read_dir(&self.opts.cgroup_root)? {
@@ -317,11 +327,17 @@ impl Reconciler {
 
     fn kill_cgroup_pids(&self, cgroup_dir: &Path) {
         let procs = cgroup_dir.join("cgroup.procs");
-        let Ok(content) = std::fs::read_to_string(&procs) else { return; };
+        let Ok(content) = std::fs::read_to_string(&procs) else {
+            return;
+        };
         for line in content.lines() {
-            let Ok(pid) = line.trim().parse::<i32>() else { continue; };
+            let Ok(pid) = line.trim().parse::<i32>() else {
+                continue;
+            };
             // SIGKILL — orphans get no grace period.
-            unsafe { libc::kill(pid, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
         }
     }
 
@@ -355,7 +371,20 @@ impl Reconciler {
 }
 
 fn proc_exists(pid: u32) -> bool {
-    Path::new(&format!("/proc/{}", pid)).exists()
+    #[cfg(target_os = "linux")]
+    {
+        return Path::new(&format!("/proc/{}", pid)).exists();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let rc = unsafe { libc::kill(pid as i32, 0) };
+        if rc == 0 {
+            return true;
+        }
+
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 #[cfg(test)]
@@ -367,9 +396,7 @@ mod tests {
     fn make_reconciler() -> (Reconciler, TempDir, TempDir) {
         let state_dir = TempDir::new().unwrap();
         let cgroup_dir = TempDir::new().unwrap();
-        let manager = Arc::new(
-            ContainerManager::with_state_dir(state_dir.path()).unwrap(),
-        );
+        let manager = Arc::new(ContainerManager::with_state_dir(state_dir.path()).unwrap());
         let events_dir = TempDir::new().unwrap();
         let events = EventLog::open(events_dir.path().join("e.db")).unwrap();
         let opts = ReconcileOptions {
@@ -459,9 +486,7 @@ mod tests {
     fn test_stale_removal_respects_age() {
         let state_dir = TempDir::new().unwrap();
         let cgroup_dir = TempDir::new().unwrap();
-        let manager = Arc::new(
-            ContainerManager::with_state_dir(state_dir.path()).unwrap(),
-        );
+        let manager = Arc::new(ContainerManager::with_state_dir(state_dir.path()).unwrap());
         let opts = ReconcileOptions {
             interval: Duration::from_secs(1),
             cgroup_root: cgroup_dir.path().to_path_buf(),
@@ -486,9 +511,7 @@ mod tests {
         // including overlay upper/, work/, rootfs/, fs/, and config/.
         let state_dir = TempDir::new().unwrap();
         let cgroup_dir = TempDir::new().unwrap();
-        let manager = Arc::new(
-            ContainerManager::with_state_dir(state_dir.path()).unwrap(),
-        );
+        let manager = Arc::new(ContainerManager::with_state_dir(state_dir.path()).unwrap());
         let opts = ReconcileOptions {
             interval: Duration::from_secs(1),
             cgroup_root: cgroup_dir.path().to_path_buf(),
@@ -526,9 +549,7 @@ mod tests {
     fn test_keeps_recently_exited() {
         let state_dir = TempDir::new().unwrap();
         let cgroup_dir = TempDir::new().unwrap();
-        let manager = Arc::new(
-            ContainerManager::with_state_dir(state_dir.path()).unwrap(),
-        );
+        let manager = Arc::new(ContainerManager::with_state_dir(state_dir.path()).unwrap());
         let opts = ReconcileOptions {
             interval: Duration::from_secs(1),
             cgroup_root: cgroup_dir.path().to_path_buf(),

@@ -38,7 +38,7 @@ impl DaemonClient {
     pub fn is_running(&self) -> bool {
         // Check if the socket file exists
         self.wsl_command(&format!("test -S {}", self.socket_path))
-            .map(|_output| true)  // Command succeeded = socket exists
+            .map(|_output| true) // Command succeeded = socket exists
             .unwrap_or(false)
     }
 
@@ -66,10 +66,13 @@ impl DaemonClient {
         }
 
         // Check if there was an error
-        let log_output = self.wsl_command("cat /tmp/exo-daemon.log 2>/dev/null || echo 'No log yet'")?;
+        let log_output =
+            self.wsl_command("cat /tmp/exo-daemon.log 2>/dev/null || echo 'No log yet'")?;
         tracing::warn!("Daemon log: {}", log_output);
 
-        Err(anyhow::anyhow!("Failed to start daemon. Check WSL2 exo-runtime installation."))
+        Err(anyhow::anyhow!(
+            "Failed to start daemon. Check WSL2 exo-runtime installation."
+        ))
     }
 
     /// Send a request to the daemon and get a response.
@@ -91,7 +94,8 @@ impl DaemonClient {
             return Ok(self.send_request_via_nc(request)?);
         }
 
-        serde_json::from_str(&output).map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))
+        serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))
     }
 
     /// Send request using nc (netcat) as fallback.
@@ -100,7 +104,11 @@ impl DaemonClient {
 
         // Write request to a temp file, then use nc
         let temp_file = format!("/tmp/exo-request-{}.json", uuid::Uuid::new_v4());
-        let write_cmd = format!("echo '{}' > {}", request_json.replace('\'', "'\\''"), temp_file);
+        let write_cmd = format!(
+            "echo '{}' > {}",
+            request_json.replace('\'', "'\\''"),
+            temp_file
+        );
         self.wsl_command(&write_cmd)?;
 
         let nc_cmd = format!("nc -U {} < {} 2>/dev/null", self.socket_path, temp_file);
@@ -109,16 +117,15 @@ impl DaemonClient {
         // Clean up temp file
         let _ = self.wsl_command(&format!("rm -f {}", temp_file));
 
-        serde_json::from_str(&output).map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))
+        serde_json::from_str(&output)
+            .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))
     }
 
     /// Run a container via the daemon.
     pub fn run_container(&self, spec: &ContainerSpec) -> Result<RunResult> {
         self.ensure_running()?;
 
-        let request = DaemonRequest::Run {
-            spec: spec.clone(),
-        };
+        let request = DaemonRequest::Run { spec: spec.clone() };
 
         match self.send_request(&request)? {
             DaemonResponse::Ok { message } => Ok(RunResult {
@@ -168,7 +175,10 @@ impl DaemonClient {
         };
 
         self.send_request(&request).and_then(|resp| match resp {
-            DaemonResponse::Status { container: _, status } => Ok(status),
+            DaemonResponse::Status {
+                container: _,
+                status,
+            } => Ok(status),
             _ => Err(anyhow::anyhow!("Unexpected response")),
         })
     }
@@ -189,14 +199,23 @@ impl DaemonClient {
     /// Execute a wsl command.
     fn wsl_command(&self, command: &str) -> Result<String> {
         let output = std::process::Command::new("wsl")
-            .args(["--distribution", "Ubuntu", "--user", "root", "--command", command])
+            .args([
+                "--distribution",
+                "Ubuntu",
+                "--user",
+                "root",
+                "--command",
+                command,
+            ])
             .output()?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            Err(anyhow::anyhow!("WSL command failed: {}",
-                String::from_utf8_lossy(&output.stderr)))
+            Err(anyhow::anyhow!(
+                "WSL command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
         }
     }
 }

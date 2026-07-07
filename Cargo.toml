@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/exo-runtime", "crates/exo", "crates/exo-gpu", "crates/exo-image", "crates/exo-wsl", "crates/exo-agent", "crates/exoclaw"]
+members = ["crates/exo-runtime", "crates/exo", "crates/exo-gpu", "crates/exo-image", "crates/exo-wsl", "crates/exo-mac", "crates/exo-vm-mac", "crates/exo-vm-mac-guest", "crates/exo-agent", "crates/exoclaw"]
 resolver = "2"
 
 [workspace.package]

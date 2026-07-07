@@ -1,11 +1,11 @@
 //! Main container implementation.
 
-use crate::config::ContainerConfig;
-use crate::process::ContainerProcess;
 use crate::cgroup::CgroupManager;
-use crate::rootfs;
+use crate::config::ContainerConfig;
 #[cfg(target_os = "linux")]
 use crate::process::enter_container_namespaces;
+use crate::process::ContainerProcess;
+use crate::rootfs;
 use anyhow::Result;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -207,7 +207,8 @@ impl Container {
 
         // CPU limit
         if let Some(ref cpu_str) = self.handle.config.resources.cpu {
-            let cpu_count: f64 = cpu_str.parse()
+            let cpu_count: f64 = cpu_str
+                .parse()
                 .or_else(|_| {
                     let s = cpu_str.trim().trim_end_matches('%');
                     s.parse::<f64>().map(|p| p / 100.0)
@@ -240,7 +241,9 @@ impl Container {
 
     /// Stop the container (send SIGTERM).
     pub fn stop(&mut self) -> Result<()> {
-        let process = self.process.as_ref()
+        let process = self
+            .process
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Container not running"))?;
 
         process.terminate()?;
@@ -260,14 +263,19 @@ impl Container {
 
         self.process = None;
 
-        tracing::info!("Container {} stopped (upper layer preserved)", self.handle.name);
+        tracing::info!(
+            "Container {} stopped (upper layer preserved)",
+            self.handle.name
+        );
 
         Ok(())
     }
 
     /// Kill the container (send SIGKILL).
     pub fn kill(&mut self) -> Result<()> {
-        let process = self.process.as_ref()
+        let process = self
+            .process
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Container not running"))?;
 
         process.kill_hard()?;
@@ -287,7 +295,10 @@ impl Container {
 
         self.process = None;
 
-        tracing::info!("Container {} killed (upper layer preserved)", self.handle.name);
+        tracing::info!(
+            "Container {} killed (upper layer preserved)",
+            self.handle.name
+        );
 
         Ok(())
     }
@@ -297,15 +308,9 @@ impl Container {
         if let Some(process) = &self.process {
             let state = process.wait()?;
             match state {
-                crate::process::ProcessState::Exited(code) => {
-                    Ok(ContainerStatus::Exited(code))
-                }
-                crate::process::ProcessState::Failed(code) => {
-                    Ok(ContainerStatus::Exited(code))
-                }
-                crate::process::ProcessState::Running => {
-                    Ok(ContainerStatus::Running)
-                }
+                crate::process::ProcessState::Exited(code) => Ok(ContainerStatus::Exited(code)),
+                crate::process::ProcessState::Failed(code) => Ok(ContainerStatus::Exited(code)),
+                crate::process::ProcessState::Running => Ok(ContainerStatus::Running),
             }
         } else {
             Ok(self.handle.status)
@@ -354,7 +359,11 @@ impl Container {
 
                 // Execute the command
                 // In a real implementation, this would fork and exec
-                tracing::info!("Executing command in container {}: {:?}", self.handle.name, command);
+                tracing::info!(
+                    "Executing command in container {}: {:?}",
+                    self.handle.name,
+                    command
+                );
             }
         }
 
@@ -380,7 +389,10 @@ impl Container {
 
         self.handle.status = ContainerStatus::Removing;
 
-        tracing::info!("Container {} removed (upper layer deleted)", self.handle.name);
+        tracing::info!(
+            "Container {} removed (upper layer deleted)",
+            self.handle.name
+        );
 
         Ok(())
     }
@@ -458,7 +470,7 @@ impl Container {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ResourceConfig, NetworkConfig, Namespaces};
+    use crate::config::{Namespaces, NetworkConfig, ResourceConfig};
 
     fn test_config() -> ContainerConfig {
         ContainerConfig {
@@ -479,6 +491,9 @@ mod tests {
             architecture: None,
             platform: None,
             restart_policy: Default::default(),
+            backend: Default::default(),
+            secrets: vec![],
+            sandbox: Default::default(),
         }
     }
 

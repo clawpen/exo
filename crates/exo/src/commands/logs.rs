@@ -8,17 +8,39 @@ pub struct LogsArgs {
 }
 
 pub async fn execute(args: LogsArgs) -> anyhow::Result<()> {
-    println!("Showing logs for container: {}", args.container);
-
-    if args.follow {
-        println!("Following logs...");
+    #[cfg(target_os = "macos")]
+    {
+        return execute_macos(args).await;
     }
 
-    if args.timestamps {
-        println!("With timestamps");
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("Showing logs for container: {}", args.container);
+
+        if args.follow {
+            println!("Following logs...");
+        }
+
+        if args.timestamps {
+            println!("With timestamps");
+        }
+
+        println!("(Last {} lines)", args.tail);
+
+        Ok(())
     }
+}
 
-    println!("(Last {} lines)", args.tail);
-
+#[cfg(target_os = "macos")]
+async fn execute_macos(args: LogsArgs) -> anyhow::Result<()> {
+    let output = super::mac::backend()?.logs(
+        &args.container,
+        exo_mac::LogOptions {
+            follow: args.follow,
+            tail: args.tail,
+            timestamps: args.timestamps,
+        },
+    )?;
+    print!("{}", output);
     Ok(())
 }

@@ -78,12 +78,10 @@ impl ImageReference {
             format!("{}/{}:{}", self.registry, self.repository, self.tag)
         }
     }
-    
+
     /// Get a filesystem-safe name for this image.
     pub fn fs_name(&self) -> String {
-        format!("{}_{}", 
-            self.repository.replace('/', "_"),
-            self.tag)
+        format!("{}_{}", self.repository.replace('/', "_"), self.tag)
     }
 }
 

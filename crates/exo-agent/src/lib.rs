@@ -17,18 +17,18 @@
 //! ```
 
 pub mod agent;
+pub mod channel;
+pub mod config;
 pub mod llm;
 pub mod memory;
 pub mod tools;
-pub mod channel;
-pub mod config;
 
-pub use agent::{ExoAgent, AgentState};
-pub use llm::{LlmClient, Message, Role, ChatCompletion, ToolCall, ToolDefinition, FunctionCall};
-pub use memory::{AgentMemory, Conversation};
-pub use tools::{ToolRegistry, ToolResult, ToolName};
-pub use channel::{StdioChannel, InputMessage, OutputMessage, ChannelConfig, ChannelMode};
+pub use agent::{AgentState, ExoAgent};
+pub use channel::{ChannelConfig, ChannelMode, InputMessage, OutputMessage, StdioChannel};
 pub use config::{AgentConfig, LlmConfig, MemoryConfig, VolumeMount};
+pub use llm::{ChatCompletion, FunctionCall, LlmClient, Message, Role, ToolCall, ToolDefinition};
+pub use memory::{AgentMemory, Conversation};
+pub use tools::{ToolName, ToolRegistry, ToolResult};
 
 /// Current version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -3,11 +3,11 @@
 //! WSL2 uses a virtual network with dynamic IPs. This module provides
 //! port forwarding from Windows to WSL2 containers using netsh.
 
-use crate::{WslCommand, WslConfig};
 use crate::networking::PortProtocol;
+use crate::{WslCommand, WslConfig};
 use anyhow::Result;
 use std::collections::HashMap;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 /// Port forwarding rule on Windows
 #[derive(Debug, Clone)]
@@ -43,7 +43,9 @@ impl WindowsPortForwarder {
         }
 
         // Get WSL IP via /etc/resolv.conf (use cut instead of awk for better shell compatibility)
-        let result = self.wsl_command.exec("grep nameserver /etc/resolv.conf | cut -d' ' -f2")?;
+        let result = self
+            .wsl_command
+            .exec("grep nameserver /etc/resolv.conf | cut -d' ' -f2")?;
 
         if result.exit_code == 0 {
             let ip = result.stdout.trim().to_string();
@@ -82,7 +84,10 @@ impl WindowsPortForwarder {
 
         if let Ok(output) = test_output {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("elevation") || stderr.contains("access is denied") || !output.status.success() {
+            if stderr.contains("elevation")
+                || stderr.contains("access is denied")
+                || !output.status.success()
+            {
                 warn!("Port forwarding requires administrator privileges. Run exo as administrator to use --publish.");
                 anyhow::bail!("Port forwarding requires administrator privileges. Please run exo as administrator.");
             }
@@ -129,10 +134,18 @@ impl WindowsPortForwarder {
         }
 
         // Store the active rule
-        let key = format!("{}_{}_{}", container_name, rule.protocol.as_str(), rule.host_port);
+        let key = format!(
+            "{}_{}_{}",
+            container_name,
+            rule.protocol.as_str(),
+            rule.host_port
+        );
         self.active_rules.lock().unwrap().insert(key, rule.clone());
 
-        info!("Port forwarding established: {}:{} -> {}", rule.host_port, rule.container_port, container_name);
+        info!(
+            "Port forwarding established: {}:{} -> {}",
+            rule.host_port, rule.container_port, container_name
+        );
 
         // Also add Windows Firewall rule
         self.add_firewall_rule(&rule)?;
@@ -165,7 +178,10 @@ impl WindowsPortForwarder {
                     .args(["/C", &netsh_cmd])
                     .output();
 
-                info!("Removed port forwarding: {}:{} (for {})", rule.host_port, rule.container_port, container_name);
+                info!(
+                    "Removed port forwarding: {}:{} (for {})",
+                    rule.host_port, rule.container_port, container_name
+                );
             }
         }
 
@@ -222,9 +238,11 @@ impl WindowsPortForwarder {
                     if let (Some(listen_part), Some(connect_part)) = (parts.get(3), parts.get(6)) {
                         if let (Some(listen_port), Some(connect_port)) = (
                             listen_part.split(':').last(),
-                            connect_part.split(':').last()
+                            connect_part.split(':').last(),
                         ) {
-                            if let (Ok(lp), Ok(cp)) = (listen_port.parse::<u16>(), connect_port.parse::<u16>()) {
+                            if let (Ok(lp), Ok(cp)) =
+                                (listen_port.parse::<u16>(), connect_port.parse::<u16>())
+                            {
                                 rules.push(PortForwardingRule {
                                     host_port: lp,
                                     container_port: cp,

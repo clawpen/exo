@@ -1,16 +1,30 @@
 //! # exoClaw - Secure Local Agent Harness
 
-pub mod protocol;
-pub mod tools;
-pub mod llm;
 pub mod agent;
 pub mod gateway;
+pub mod llm;
+pub mod orchestrator;
+pub mod protocol;
+pub mod run_store;
+pub mod runner;
+pub mod tools;
 
-pub use protocol::{ToolDefinition, ToolPermission, HostMessage, AgentMessage, AgentConfig};
-pub use tools::{Tool, ToolRegistry, DateTimeTool};
-pub use llm::{LlmProvider, LlmConfig, LlmRequest, LlmResponse, OpenAiCompatibleProvider, into_provider};
 pub use agent::{Agent, AgentResult};
-pub use gateway::{GatewayConfig, Gateway};
+pub use gateway::{Gateway, GatewayConfig};
+pub use llm::{
+    into_provider, LlmConfig, LlmProvider, LlmRequest, LlmResponse, OpenAiCompatibleProvider,
+};
+pub use orchestrator::{
+    default_agent_roles, status_counts, AgentReport, AgentRole, AgentTask, OrchestrationState,
+    OrchestrationStatus, Orchestrator, OrchestratorDecision, PrimeDirective, TaskStatus,
+};
+pub use protocol::{AgentConfig, AgentMessage, HostMessage, ToolDefinition, ToolPermission};
+pub use run_store::{new_run_id, RunEvent, RunRecord, RunStore};
+pub use runner::{
+    run_to_completion, AgentExecutor, AgentPrompt, BuiltinExecutor, CommandAgentExecutor,
+    ExoAgentExecutor, RunOutcome,
+};
+pub use tools::{DateTimeTool, Tool, ToolRegistry};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

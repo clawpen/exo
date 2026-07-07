@@ -23,7 +23,8 @@ pub fn detect_amd_gpus() -> Result<Vec<GpuInfo>> {
             let path = entry.path();
 
             // Look for card* directories (AMD GPU devices)
-            let card_name = path.file_name()
+            let card_name = path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             if !card_name.starts_with("card") || card_name.contains('-') {
@@ -64,10 +65,7 @@ pub fn detect_amd_gpus() -> Result<Vec<GpuInfo>> {
                 "/dev/kfd".to_string(),
             ];
 
-            let library_paths = vec![
-                "/opt/rocm/lib".to_string(),
-                "/opt/rocm/hip/lib".to_string(),
-            ];
+            let library_paths = vec!["/opt/rocm/lib".to_string(), "/opt/rocm/hip/lib".to_string()];
 
             gpus.push(GpuInfo {
                 gpu_type: GpuType::Amd,

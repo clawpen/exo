@@ -1,11 +1,11 @@
 //! Linux namespace operations.
 
+use anyhow::Result;
 #[cfg(target_os = "linux")]
-use nix::sched::{CloneFlags, setns, unshare};
+use nix::sched::{setns, unshare, CloneFlags};
 #[cfg(target_os = "linux")]
 use nix::unistd::Pid;
 use std::fs::File;
-use anyhow::Result;
 
 /// Process ID type (platform-specific).
 #[cfg(target_os = "linux")]
@@ -46,7 +46,9 @@ pub struct NamespaceFlags;
 
 #[cfg(not(target_os = "linux"))]
 impl NamespaceFlags {
-    pub const fn empty() -> Self { Self }
+    pub const fn empty() -> Self {
+        Self
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -197,8 +199,14 @@ mod tests {
     fn test_namespace_path() {
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(Namespace::Mount.path_for(Pid::from_raw(1234)), "/proc/1234/ns/mnt");
-            assert_eq!(Namespace::Network.path_for(Pid::from_raw(1)), "/proc/1/ns/net");
+            assert_eq!(
+                Namespace::Mount.path_for(Pid::from_raw(1234)),
+                "/proc/1234/ns/mnt"
+            );
+            assert_eq!(
+                Namespace::Network.path_for(Pid::from_raw(1)),
+                "/proc/1/ns/net"
+            );
         }
     }
 }

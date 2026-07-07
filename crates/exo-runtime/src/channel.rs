@@ -30,9 +30,9 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::io::{BufRead, Write, Read};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use uuid::Uuid;
@@ -498,13 +498,13 @@ impl ToolExecutor for DefaultToolExecutor {
         let duration = std::time::Duration::from_secs(timeout);
         let result = match wait_with_timeout(&mut child, duration) {
             Ok(Some(status)) => {
-                let output = child.wait_with_output().unwrap_or_else(|_| {
-                    std::process::Output {
+                let output = child
+                    .wait_with_output()
+                    .unwrap_or_else(|_| std::process::Output {
                         status: status,
                         stdout: Vec::new(),
                         stderr: Vec::new(),
-                    }
-                });
+                    });
 
                 ToolResponse {
                     request_id: request.id,
@@ -542,7 +542,10 @@ impl ToolExecutor for DefaultToolExecutor {
 }
 
 /// Wait for process with timeout.
-fn wait_with_timeout(child: &mut std::process::Child, duration: std::time::Duration) -> Result<Option<std::process::ExitStatus>, std::io::Error> {
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    duration: std::time::Duration,
+) -> Result<Option<std::process::ExitStatus>, std::io::Error> {
     let start = std::time::Instant::now();
 
     loop {

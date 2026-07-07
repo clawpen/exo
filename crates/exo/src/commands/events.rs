@@ -17,7 +17,12 @@ pub async fn execute(args: EventsArgs) -> Result<()> {
         return execute_windows(args).await;
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        return execute_macos(args).await;
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         return execute_linux(args).await;
     }
@@ -32,8 +37,18 @@ async fn execute_windows(_args: EventsArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+async fn execute_macos(args: EventsArgs) -> Result<()> {
+    execute_host(args).await
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 async fn execute_linux(args: EventsArgs) -> Result<()> {
+    execute_host(args).await
+}
+
+#[cfg(not(windows))]
+async fn execute_host(args: EventsArgs) -> Result<()> {
     use exo_runtime::EventLog;
 
     let log = EventLog::open_default()?;

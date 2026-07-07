@@ -107,13 +107,15 @@ impl LlmClient {
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .context("Failed to create HTTP client")?;
-        
+
         Ok(Self { client, config })
     }
-    
+
     /// Get the base URL for the provider
     fn base_url(&self) -> &str {
-        self.config.base_url.as_deref()
+        self.config
+            .base_url
+            .as_deref()
             .unwrap_or_else(|| match self.config.provider.as_str() {
                 "openai" => "https://api.openai.com/v1",
                 "anthropic" => "https://api.anthropic.com/v1",
@@ -122,17 +124,18 @@ impl LlmClient {
                 _ => "https://api.openai.com/v1",
             })
     }
-    
+
     /// Get the auth header value
     fn auth_header(&self) -> Option<String> {
-        self.config.api_key.as_ref().map(|key| {
-            match self.config.provider.as_str() {
+        self.config
+            .api_key
+            .as_ref()
+            .map(|key| match self.config.provider.as_str() {
                 "anthropic" => format!("x-api-key: {}", key),
                 _ => format!("Bearer {}", key),
-            }
-        })
+            })
     }
-    
+
     /// Get available tool definitions
     pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         vec![
@@ -227,7 +230,7 @@ impl LlmClient {
             },
         ]
     }
-    
+
     /// Complete a chat with optional tool calling
     #[instrument(skip(self, messages))]
     pub async fn complete(
@@ -238,7 +241,7 @@ impl LlmClient {
         tools: Option<Vec<ToolDefinition>>,
     ) -> Result<ChatCompletion> {
         let url = format!("{}/chat/completions", self.base_url());
-        
+
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages,
@@ -247,12 +250,11 @@ impl LlmClient {
             tools,
             stream: false,
         };
-        
+
         debug!("Sending chat request to {}", url);
-        
-        let mut req = self.client.post(&url)
-            .json(&request);
-        
+
+        let mut req = self.client.post(&url).json(&request);
+
         if let Some(auth) = self.auth_header() {
             if auth.contains(':') {
                 let parts: Vec<&str> = auth.splitn(2, ':').collect();
@@ -261,40 +263,50 @@ impl LlmClient {
                 req = req.header("Authorization", auth);
             }
         }
-        
-        let response = req.send()
+
+        let response = req
+            .send()
             .await
             .context("Failed to send request to LLM API")?;
-        
+
         let status = response.status();
         if !status.is_success() {
             let error_text = response.text().await.unwrap_or_default();
             anyhow::bail!("LLM API error ({}): {}", status, error_text);
         }
-        
-        let completion: ChatCompletion = response.json()
+
+        let completion: ChatCompletion = response
+            .json()
             .await
             .context("Failed to parse LLM response")?;
-        
-        debug!("Chat completion received: {} tokens", 
-            completion.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0));
-        
+
+        debug!(
+            "Chat completion received: {} tokens",
+            completion
+                .usage
+                .as_ref()
+                .map(|u| u.total_tokens)
+                .unwrap_or(0)
+        );
+
         Ok(completion)
     }
-    
+
     /// Simple chat helper (no tools)
     pub async fn chat(&self, system: Option<&str>, user: &str) -> Result<String> {
         let mut messages = Vec::new();
-        
+
         if let Some(system) = system {
             messages.push(Message::system(system));
         }
-        
+
         messages.push(Message::user(user));
-        
+
         let completion = self.complete(messages, None, None, None).await?;
-        
-        completion.choices.first()
+
+        completion
+            .choices
+            .first()
             .map(|c| c.message.content.clone())
             .ok_or_else(|| anyhow::anyhow!("No response from LLM"))
     }
@@ -310,7 +322,7 @@ impl Message {
             tool_call_id: None,
         }
     }
-    
+
     /// Create a user message
     pub fn user(content: impl Into<String>) -> Self {
         Self {
@@ -320,7 +332,7 @@ impl Message {
             tool_call_id: None,
         }
     }
-    
+
     /// Create an assistant message
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
@@ -330,7 +342,7 @@ impl Message {
             tool_call_id: None,
         }
     }
-    
+
     /// Create a tool result message
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {

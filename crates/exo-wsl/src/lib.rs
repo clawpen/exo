@@ -3,44 +3,49 @@
 //! This module handles all WSL2-specific operations when running on Windows.
 
 #[cfg(windows)]
-pub mod distro;
-#[cfg(windows)]
 pub mod command;
 #[cfg(windows)]
-pub mod mount;
-#[cfg(windows)]
-pub mod gpu;
-#[cfg(windows)]
-pub mod networking;
+pub mod daemon_client;
 #[cfg(windows)]
 pub mod deploy;
 #[cfg(windows)]
-pub mod paths;
+pub mod distro;
 #[cfg(windows)]
-pub mod daemon_client;
+pub mod gpu;
+#[cfg(windows)]
+pub mod mount;
+#[cfg(windows)]
+pub mod networking;
+#[cfg(windows)]
+pub mod paths;
 #[cfg(windows)]
 pub mod windows_networking;
 #[cfg(windows)]
 pub mod wsl_daemon;
 
 #[cfg(windows)]
-pub use distro::{WslDistro, WslDistroManager};
-#[cfg(windows)]
 pub use command::{WslCommand, WslResult};
 #[cfg(windows)]
-pub use mount::{WslMount, MountSpec};
-#[cfg(windows)]
-pub use gpu::{WslGpuDetector, GpuInfo, GpuVendor, WslGpuConfig};
-#[cfg(windows)]
-pub use networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, ContainerNetwork, DnsEntry, AgentNetworkConfig};
+pub use daemon_client::{
+    ContainerSpec as DaemonContainerSpec, DaemonClient, MountSpec as DaemonMountSpec, RunResult,
+};
 #[cfg(windows)]
 pub use deploy::WslDeployer;
 #[cfg(windows)]
+pub use distro::{WslDistro, WslDistroManager};
+#[cfg(windows)]
+pub use gpu::{GpuInfo, GpuVendor, WslGpuConfig, WslGpuDetector};
+#[cfg(windows)]
+pub use mount::{MountSpec, WslMount};
+#[cfg(windows)]
+pub use networking::{
+    AgentNetworkConfig, ContainerNetwork, DnsEntry, NetworkConfig, NetworkManager, NetworkMode,
+    PortMapping, PortProtocol,
+};
+#[cfg(windows)]
 pub use paths::PathTranslator;
 #[cfg(windows)]
-pub use daemon_client::{DaemonClient, ContainerSpec as DaemonContainerSpec, MountSpec as DaemonMountSpec, RunResult};
-#[cfg(windows)]
-pub use windows_networking::{WindowsPortForwarder, PortForwardingRule};
+pub use windows_networking::{PortForwardingRule, WindowsPortForwarder};
 
 #[cfg(windows)]
 use anyhow::Result;
@@ -71,7 +76,7 @@ pub struct WslConfig {
 impl Default for WslConfig {
     fn default() -> Self {
         Self {
-            distro_name: "Ubuntu".to_string(),  // Use default Ubuntu distro
+            distro_name: "Ubuntu".to_string(), // Use default Ubuntu distro
             distro_path: "%LOCALAPPDATA%\\exo\\wsl".to_string(),
             memory_limit: None,
             swap_size: Some(4),
@@ -85,9 +90,7 @@ impl Default for WslConfig {
 pub fn check_wsl_installed() -> Result<bool> {
     use std::process::Command;
 
-    let output = Command::new("wsl")
-        .args(["--status"])
-        .output()?;
+    let output = Command::new("wsl").args(["--status"]).output()?;
 
     Ok(output.status.success())
 }
@@ -103,9 +106,7 @@ pub fn check_wsl_installed() -> Result<bool> {
 pub fn get_wsl_version() -> Result<u32> {
     use std::process::Command;
 
-    let output = Command::new("wsl")
-        .args(["--status"])
-        .output()?;
+    let output = Command::new("wsl").args(["--status"]).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 

@@ -33,6 +33,10 @@ tar = "0.4"
 [target.'cfg(windows)'.dependencies]
 exo-wsl = { path = "../exo-wsl" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+exo-mac = { path = "../exo-mac" }
+exo-vm-mac = { path = "../exo-vm-mac" }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
 libc = "0.2"

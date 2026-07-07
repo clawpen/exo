@@ -117,32 +117,67 @@ pub struct ContainerManager {
 
 impl ContainerManager {
     /// Create a new container manager.
-    /// 
-    /// Tries to use the system-wide state directory first, falling back
-    /// to a user-local directory if the system directory isn't accessible.
+    ///
+    /// Resolution order:
+    ///
+    /// 1. `EXO_STATE_DIR`, when set.
+    /// 2. The system-wide state directory (`/var/lib/exo/containers`).
+    /// 3. `$XDG_DATA_HOME/exo/containers`, when set.
+    /// 4. `$HOME/.local/share/exo/containers`.
+    /// 5. A process/user temp directory as a last resort.
     pub fn new() -> Result<Self> {
+        if let Ok(state_dir) = std::env::var("EXO_STATE_DIR") {
+            return Self::with_state_dir(state_dir);
+        }
+
         // Try system directory first
         if let Ok(manager) = Self::with_state_dir(CONTAINER_STATE_DIR) {
             return Ok(manager);
         }
-        
+
+        if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
+            if let Ok(manager) =
+                Self::with_state_dir(PathBuf::from(xdg_data_home).join("exo/containers"))
+            {
+                return Ok(manager);
+            }
+        }
+
         // Fall back to user-local directory
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| ".".to_string());
-        
+
         let fallback_dir = PathBuf::from(home).join(FALLBACK_STATE_DIR);
-        Self::with_state_dir(&fallback_dir)
+        if let Ok(manager) = Self::with_state_dir(&fallback_dir) {
+            return Ok(manager);
+        }
+
+        // Last resort for restricted/managed hosts where neither system nor
+        // home state is writable. This keeps local smoke tests and sandboxed
+        // agent runs working, while EXO_STATE_DIR remains the recommended
+        // explicit fix for persistent state.
+        let temp_dir = std::env::temp_dir()
+            .join("exo")
+            .join("containers")
+            .join(format!("uid-{}", current_uid()));
+        tracing::warn!(
+            "falling back to temporary Exo state directory {}; set EXO_STATE_DIR for persistent state",
+            temp_dir.display()
+        );
+        Self::with_state_dir(temp_dir)
     }
 
     /// Create a manager with a custom state directory.
     pub fn with_state_dir(state_dir: impl AsRef<Path>) -> Result<Self> {
         let state_dir = state_dir.as_ref().to_path_buf();
-        
+
         // Ensure state directory exists
         fs::create_dir_all(&state_dir)
             .with_context(|| format!("Failed to create state directory: {:?}", state_dir))?;
-        
+        verify_writable_dir(&state_dir)
+            .with_context(|| format!("State directory is not writable: {:?}", state_dir))?;
+
         Ok(Self { state_dir })
     }
 
@@ -154,23 +189,24 @@ impl ContainerManager {
     /// Save container metadata.
     pub fn save(&self, metadata: &ContainerMetadata) -> Result<()> {
         let container_dir = self.state_dir.join(&metadata.name);
-        fs::create_dir_all(&container_dir)
-            .with_context(|| format!("Failed to create container directory: {:?}", container_dir))?;
-        
+        fs::create_dir_all(&container_dir).with_context(|| {
+            format!("Failed to create container directory: {:?}", container_dir)
+        })?;
+
         let config_path = container_dir.join("config.json");
         let json = serde_json::to_string_pretty(metadata)
             .context("Failed to serialize container metadata")?;
-        
+
         fs::write(&config_path, json)
             .with_context(|| format!("Failed to write container config: {:?}", config_path))?;
-        
+
         // Write PID file if running
         if let Some(pid) = metadata.pid {
             let pid_path = container_dir.join("pid");
             fs::write(&pid_path, pid.to_string())
                 .with_context(|| format!("Failed to write PID file: {:?}", pid_path))?;
         }
-        
+
         tracing::debug!("Saved container metadata: {}", metadata.name);
         Ok(())
     }
@@ -178,13 +214,13 @@ impl ContainerManager {
     /// Load container metadata by name.
     pub fn load(&self, name: &str) -> Result<ContainerMetadata> {
         let config_path = self.state_dir.join(name).join("config.json");
-        
+
         let json = fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read container config for: {}", name))?;
-        
+
         let metadata: ContainerMetadata = serde_json::from_str(&json)
             .with_context(|| format!("Failed to parse container config for: {}", name))?;
-        
+
         Ok(metadata)
     }
 
@@ -196,7 +232,7 @@ impl ContainerManager {
     /// List all containers.
     pub fn list(&self) -> Result<Vec<ContainerMetadata>> {
         let mut containers = Vec::new();
-        
+
         let entries = match fs::read_dir(&self.state_dir) {
             Ok(entries) => entries,
             Err(e) => {
@@ -206,11 +242,11 @@ impl ContainerManager {
                 return Err(e).context("Failed to read state directory");
             }
         };
-        
+
         for entry in entries {
             let entry = entry.context("Failed to read directory entry")?;
             let path = entry.path();
-            
+
             if path.is_dir() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     match self.load(name) {
@@ -222,10 +258,10 @@ impl ContainerManager {
                 }
             }
         }
-        
+
         // Sort by creation time, newest first
         containers.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        
+
         Ok(containers)
     }
 
@@ -238,12 +274,13 @@ impl ContainerManager {
     /// Remove container metadata.
     pub fn remove(&self, name: &str) -> Result<()> {
         let container_dir = self.state_dir.join(name);
-        
+
         if container_dir.exists() {
-            fs::remove_dir_all(&container_dir)
-                .with_context(|| format!("Failed to remove container directory: {:?}", container_dir))?;
+            fs::remove_dir_all(&container_dir).with_context(|| {
+                format!("Failed to remove container directory: {:?}", container_dir)
+            })?;
         }
-        
+
         tracing::info!("Removed container: {}", name);
         Ok(())
     }
@@ -253,7 +290,7 @@ impl ContainerManager {
         if let Some(pid) = metadata.pid {
             // Check if process is still alive
             let proc_path = PathBuf::from("/proc").join(pid.to_string());
-            
+
             if proc_path.exists() {
                 // Process is still running
                 if metadata.status != "running" {
@@ -271,7 +308,7 @@ impl ContainerManager {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -281,7 +318,7 @@ impl ContainerManager {
         if self.exists(name_or_id) {
             return Ok(Some(self.load(name_or_id)?));
         }
-        
+
         // Try ID prefix match
         let containers = self.list()?;
         for container in containers {
@@ -289,7 +326,7 @@ impl ContainerManager {
                 return Ok(Some(container));
             }
         }
-        
+
         Ok(None)
     }
 
@@ -315,7 +352,7 @@ impl ContainerManager {
         let containers = self.list()?;
         let mut removed = Vec::new();
         let cutoff = Utc::now() - chrono::Duration::hours(max_age_hours as i64);
-        
+
         for mut container in containers {
             if !container.is_running() {
                 if let Some(stopped_at) = container.stopped_at {
@@ -326,9 +363,19 @@ impl ContainerManager {
                 }
             }
         }
-        
+
         Ok(removed)
     }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
 }
 
 impl Default for ContainerManager {
@@ -369,6 +416,14 @@ impl From<ContainerMetadata> for ContainerJson {
     }
 }
 
+fn verify_writable_dir(path: &Path) -> Result<()> {
+    let probe = path.join(format!(".exo-write-test-{}", std::process::id()));
+    fs::write(&probe, b"")
+        .with_context(|| format!("Failed to write state directory probe: {:?}", probe))?;
+    let _ = fs::remove_file(probe);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,8 +431,8 @@ mod tests {
 
     fn test_manager() -> (ContainerManager, TempDir) {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let manager = ContainerManager::with_state_dir(temp_dir.path())
-            .expect("Failed to create manager");
+        let manager =
+            ContainerManager::with_state_dir(temp_dir.path()).expect("Failed to create manager");
         (manager, temp_dir)
     }
 
@@ -393,10 +448,10 @@ mod tests {
     #[test]
     fn test_create_and_save() {
         let (manager, _temp) = test_manager();
-        
+
         let config = test_config();
         let mut metadata = ContainerMetadata::new("test-container".to_string(), config);
-        
+
         assert!(manager.save(&metadata).is_ok());
         assert!(manager.exists("test-container"));
     }
@@ -404,11 +459,11 @@ mod tests {
     #[test]
     fn test_load() {
         let (manager, _temp) = test_manager();
-        
+
         let config = test_config();
         let metadata = ContainerMetadata::new("test-load".to_string(), config.clone());
         manager.save(&metadata).unwrap();
-        
+
         let loaded = manager.load("test-load").unwrap();
         assert_eq!(loaded.name, "test-load");
         assert_eq!(loaded.image, "alpine:latest");
@@ -417,15 +472,15 @@ mod tests {
     #[test]
     fn test_list() {
         let (manager, _temp) = test_manager();
-        
+
         let config = test_config();
-        
+
         let m1 = ContainerMetadata::new("container-1".to_string(), config.clone());
         let m2 = ContainerMetadata::new("container-2".to_string(), config.clone());
-        
+
         manager.save(&m1).unwrap();
         manager.save(&m2).unwrap();
-        
+
         let list = manager.list().unwrap();
         assert_eq!(list.len(), 2);
     }
@@ -433,13 +488,13 @@ mod tests {
     #[test]
     fn test_remove() {
         let (manager, _temp) = test_manager();
-        
+
         let config = test_config();
         let metadata = ContainerMetadata::new("to-remove".to_string(), config);
-        
+
         manager.save(&metadata).unwrap();
         assert!(manager.exists("to-remove"));
-        
+
         manager.remove("to-remove").unwrap();
         assert!(!manager.exists("to-remove"));
     }
@@ -447,15 +502,15 @@ mod tests {
     #[test]
     fn test_status_transitions() {
         let mut metadata = ContainerMetadata::new("test".to_string(), test_config());
-        
+
         assert_eq!(metadata.status, "created");
         assert!(!metadata.is_running());
-        
+
         metadata.set_running(1234);
         assert_eq!(metadata.status, "running");
         assert!(metadata.is_running());
         assert_eq!(metadata.pid, Some(1234));
-        
+
         metadata.set_stopped(Some(0));
         assert_eq!(metadata.status, "exited");
         assert!(!metadata.is_running());
@@ -465,21 +520,21 @@ mod tests {
     #[test]
     fn test_find_by_id_prefix() {
         let (manager, _temp) = test_manager();
-        
+
         let config = test_config();
         let metadata = ContainerMetadata::new("find-test".to_string(), config);
         let id = metadata.id.clone();
-        
+
         manager.save(&metadata).unwrap();
-        
+
         // Find by full ID
         let found = manager.find(&id).unwrap();
         assert!(found.is_some());
-        
+
         // Find by short prefix
         let found = manager.find(&id[..8]).unwrap();
         assert!(found.is_some());
-        
+
         // Find by name
         let found = manager.find("find-test").unwrap();
         assert!(found.is_some());

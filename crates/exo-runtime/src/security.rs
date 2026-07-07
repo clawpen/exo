@@ -329,10 +329,7 @@ pub fn get_default_caps() -> HashSet<Capability> {
 ///
 /// Keeps only the most essential capabilities for strict isolation.
 pub fn get_minimal_caps() -> HashSet<Capability> {
-    HashSet::from_iter(vec![
-        Capability::CAP_SETUID,
-        Capability::CAP_SETGID,
-    ])
+    HashSet::from_iter(vec![Capability::CAP_SETUID, Capability::CAP_SETGID])
 }
 
 /// Get capabilities for a web server container.
@@ -382,15 +379,13 @@ pub fn get_caps_to_drop() -> HashSet<Capability> {
 /// ```
 #[cfg(target_os = "linux")]
 pub fn drop_capabilities(keep: &[Capability]) -> Result<()> {
-    let keep_set: HashSet<CapsCapability> = keep.iter()
-        .map(|c| c.as_caps_capability())
-        .collect();
+    let keep_set: HashSet<CapsCapability> = keep.iter().map(|c| c.as_caps_capability()).collect();
 
     tracing::debug!("Keeping capabilities: {:?}", keep);
 
     // Get all capabilities currently in the effective set
-    let current = caps::read(None, CapSet::Effective)
-        .context("Failed to read current capabilities")?;
+    let current =
+        caps::read(None, CapSet::Effective).context("Failed to read current capabilities")?;
 
     tracing::debug!("Current effective capabilities: {:?}", current);
 
@@ -409,8 +404,8 @@ pub fn drop_capabilities(keep: &[Capability]) -> Result<()> {
     tracing::debug!("Effective set done, reading permitted set");
 
     // Also drop from permitted set
-    let permitted = caps::read(None, CapSet::Permitted)
-        .context("Failed to read permitted capabilities")?;
+    let permitted =
+        caps::read(None, CapSet::Permitted).context("Failed to read permitted capabilities")?;
 
     tracing::debug!("Current permitted capabilities: {:?}", permitted);
 
@@ -480,8 +475,8 @@ pub fn reset_capabilities(caps: &[Capability]) -> Result<()> {
 /// Get current capabilities for introspection.
 #[cfg(target_os = "linux")]
 pub fn get_current_caps() -> Result<HashSet<Capability>> {
-    let effective = caps::read(None, CapSet::Effective)
-        .context("Failed to read effective capabilities")?;
+    let effective =
+        caps::read(None, CapSet::Effective).context("Failed to read effective capabilities")?;
 
     let mut result = HashSet::new();
 
@@ -554,10 +549,7 @@ mod tests {
             Capability::from_str("CAP_NET_RAW"),
             Some(Capability::CAP_NET_RAW)
         );
-        assert_eq!(
-            Capability::from_str("INVALID"),
-            None
-        );
+        assert_eq!(Capability::from_str("INVALID"), None);
     }
 
     #[test]

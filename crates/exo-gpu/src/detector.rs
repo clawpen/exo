@@ -1,6 +1,6 @@
 //! GPU detection - identifies available GPUs on the system.
 
-use crate::{nvidia, amd};
+use crate::{amd, nvidia};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

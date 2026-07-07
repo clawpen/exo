@@ -21,8 +21,8 @@
 //! ```
 
 use crate::config::ContainerConfig;
-use crate::seccomp::{SeccompProfile, Syscall, SeccompAction, SeccompCompare, ArgRule};
-use crate::security::{Capability, drop_capabilities};
+use crate::seccomp::{ArgRule, SeccompAction, SeccompCompare, SeccompProfile, Syscall};
+use crate::security::{drop_capabilities, Capability};
 use anyhow::Result;
 
 /// Security profile for AI agent containers.
@@ -80,7 +80,7 @@ impl AgentProfile {
                 crate::security::Capability::CAP_SETUID,
                 crate::security::Capability::CAP_SETGID,
             ],
-            no_new_privs: false,  // Disabled for Node.js compatibility
+            no_new_privs: false, // Disabled for Node.js compatibility
             network: NetworkAccess::OutboundOnly,
             masked_paths: vec![
                 "/proc/sys".to_string(),
@@ -120,10 +120,7 @@ impl AgentProfile {
                 "/proc/net".to_string(),
                 "/sys/module".to_string(),
             ],
-            readonly_paths: vec![
-                "/proc".to_string(),
-                "/sys".to_string(),
-            ],
+            readonly_paths: vec!["/proc".to_string(), "/sys".to_string()],
         }
     }
 
@@ -175,64 +172,191 @@ impl AgentProfile {
         // Essential syscalls for basic operation
         let allowed = vec![
             // Process lifecycle
-            "execve", "execveat", "exit", "exit_group", "wait4", "waitpid",
+            "execve",
+            "execveat",
+            "exit",
+            "exit_group",
+            "wait4",
+            "waitpid",
             // File I/O
-            "read", "write", "open", "openat", "close", "stat", "fstat", "lstat",
-            "newfstatat", "readlink", "readlinkat", "getdents64", "access", "faccessat2",
+            "read",
+            "write",
+            "open",
+            "openat",
+            "close",
+            "stat",
+            "fstat",
+            "lstat",
+            "newfstatat",
+            "readlink",
+            "readlinkat",
+            "getdents64",
+            "access",
+            "faccessat2",
             // Memory
-            "mmap", "mprotect", "munmap", "brk", "mremap", "mbind", "get_mempolicy",
+            "mmap",
+            "mprotect",
+            "munmap",
+            "brk",
+            "mremap",
+            "mbind",
+            "get_mempolicy",
             // Signals
-            "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "kill", "tgkill",
+            "rt_sigaction",
+            "rt_sigprocmask",
+            "rt_sigreturn",
+            "kill",
+            "tgkill",
             // Pipes and IPC
-            "pipe", "pipe2", "eventfd2", "signalfd4",
+            "pipe",
+            "pipe2",
+            "eventfd2",
+            "signalfd4",
             // Basic time
-            "clock_gettime", "clock_nanosleep", "nanosleep", "gettimeofday",
+            "clock_gettime",
+            "clock_nanosleep",
+            "nanosleep",
+            "gettimeofday",
             // Scheduling
-            "sched_yield", "sched_getaffinity", "sched_setaffinity", "sched_getparam", "sched_setparam",
+            "sched_yield",
+            "sched_getaffinity",
+            "sched_setaffinity",
+            "sched_getparam",
+            "sched_setparam",
             // UIDs/GIDs
-            "getuid", "geteuid", "getgid", "getegid", "getresuid", "getresgid",
-            "setuid", "setgid", "setresuid", "setresgid",
-            "capget", "capset",
+            "getuid",
+            "geteuid",
+            "getgid",
+            "getegid",
+            "getresuid",
+            "getresgid",
+            "setuid",
+            "setgid",
+            "setresuid",
+            "setresgid",
+            "capget",
+            "capset",
             // Threading
-            "set_tid_address", "set_robust_list", "get_robust_list", "clone", "clone3", "fork", "vfork",
-            "futex", "getpid", "gettid", "getppid",
+            "set_tid_address",
+            "set_robust_list",
+            "get_robust_list",
+            "clone",
+            "clone3",
+            "fork",
+            "vfork",
+            "futex",
+            "getpid",
+            "gettid",
+            "getppid",
             // epoll/event
-            "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
+            "epoll_create1",
+            "epoll_ctl",
+            "epoll_wait",
+            "epoll_pwait",
             // Basic networking (TCP/UDP only)
-            "socket", "connect", "sendto", "recvfrom", "sendmsg", "recvmsg",
-            "bind", "listen", "accept", "accept4", "getsockname", "getpeername",
-            "getsockopt", "setsockopt", "shutdown", "sockopt",
+            "socket",
+            "connect",
+            "sendto",
+            "recvfrom",
+            "sendmsg",
+            "recvmsg",
+            "bind",
+            "listen",
+            "accept",
+            "accept4",
+            "getsockname",
+            "getpeername",
+            "getsockopt",
+            "setsockopt",
+            "shutdown",
+            "sockopt",
             // DNS
-            "sendmmsg", "recvmmsg",
+            "sendmmsg",
+            "recvmmsg",
             // File operations
-            "lseek", "pread64", "pwrite64", "preadv2", "pwritev2", "readv", "writev",
-            "dup", "dup2", "dup3",
-            "select", "poll", "ppoll", "pselect6",
+            "lseek",
+            "pread64",
+            "pwrite64",
+            "preadv2",
+            "pwritev2",
+            "readv",
+            "writev",
+            "dup",
+            "dup2",
+            "dup3",
+            "select",
+            "poll",
+            "ppoll",
+            "pselect6",
             // Basic misc
-            "arch_prctl", "prctl", "uname", "getrlimit", "getrusage", "times",
-            "getrandom", "gettimeofday",
+            "arch_prctl",
+            "prctl",
+            "uname",
+            "getrlimit",
+            "getrusage",
+            "times",
+            "getrandom",
+            "gettimeofday",
             // Sync
-            "sync", "syncfs", "fsync", "fdatasync", "sync_file_range",
+            "sync",
+            "syncfs",
+            "fsync",
+            "fdatasync",
+            "sync_file_range",
             // Stat variants
-            "statx", "statfs", "fstatfs",
+            "statx",
+            "statfs",
+            "fstatfs",
             // Directory operations
-            "getdents64", "mkdirat", "unlinkat", "renameat", "renameat2", "symlinkat",
-            "getcwd", "readlink", "readlinkat", "chmod", "fchmod", "fchmodat", "umask",
+            "getdents64",
+            "mkdirat",
+            "unlinkat",
+            "renameat",
+            "renameat2",
+            "symlinkat",
+            "getcwd",
+            "readlink",
+            "readlinkat",
+            "chmod",
+            "fchmod",
+            "fchmodat",
+            "umask",
             // Basic fcntl
-            "fcntl", "flock",
+            "fcntl",
+            "flock",
             // Memory operations
-            "msync", "mincore", "madvise", "mlock", "munlock", "mlockall", "munlockall",
+            "msync",
+            "mincore",
+            "madvise",
+            "mlock",
+            "munlock",
+            "mlockall",
+            "munlockall",
             // Time
-            "time", "times",
+            "time",
+            "times",
             // Signals
-            "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigaltstack", "sigreturn",
+            "rt_sigaction",
+            "rt_sigprocmask",
+            "rt_sigreturn",
+            "sigaltstack",
+            "sigreturn",
             // Pipe/splice
-            "splice", "tee", "vmsplice",
+            "splice",
+            "tee",
+            "vmsplice",
             // Files
-            "ioctl", "readahead", "sync_file_range", "fallocate",
-            "utimensat", "futimesat",
+            "ioctl",
+            "readahead",
+            "sync_file_range",
+            "fallocate",
+            "utimensat",
+            "futimesat",
             // Process
-            "prlimit64", "getpriority", "setpriority", "rseq",
+            "prlimit64",
+            "getpriority",
+            "setpriority",
+            "rseq",
             // Checksum
             "restart_syscall",
         ];
@@ -243,28 +367,49 @@ impl AgentProfile {
 
         // Explicitly block dangerous syscalls (even if somehow in allow list)
         let blocked = vec![
-            "kexec_load", "kexec_file_load",
-            "init_module", "finit_module", "delete_module",
-            "ptrace", "process_vm_readv", "process_vm_writev",
+            "kexec_load",
+            "kexec_file_load",
+            "init_module",
+            "finit_module",
+            "delete_module",
+            "ptrace",
+            "process_vm_readv",
+            "process_vm_writev",
             "reboot",
-            "swapon", "swapoff",
-            "settimeofday", "adjtimex", "clock_settime", "stime",
-            "sethostname", "setdomainname",
-            "iopl", "ioperm",
-            "ioprio_set", "ioprio_get",
+            "swapon",
+            "swapoff",
+            "settimeofday",
+            "adjtimex",
+            "clock_settime",
+            "stime",
+            "sethostname",
+            "setdomainname",
+            "iopl",
+            "ioperm",
+            "ioprio_set",
+            "ioprio_get",
             "acct",
-            "mount", "umount2", "pivot_root",
+            "mount",
+            "umount2",
+            "pivot_root",
             "chroot",
             "quotactl",
-            "add_key", "request_key", "keyctl",
+            "add_key",
+            "request_key",
+            "keyctl",
             "bpf",
             "perf_event_open",
             "userfaultfd",
-            "name_to_handle_at", "open_by_handle_at",
-            "mknod", "mknodat",
+            "name_to_handle_at",
+            "open_by_handle_at",
+            "mknod",
+            "mknodat",
             "socketcall",
-            "sysfs", "uselib", "ustat",
-            "vm86", "vm86old",
+            "sysfs",
+            "uselib",
+            "ustat",
+            "vm86",
+            "vm86old",
         ];
 
         for syscall in blocked {
@@ -274,20 +419,20 @@ impl AgentProfile {
         // Block raw sockets (argument filtering)
         profile.add_arg_rule(ArgRule {
             syscall: Syscall::Name("socket".to_string()),
-            arg_num: 1, // domain
+            arg_num: 1,                     // domain
             compare: SeccompCompare::Eq(2), // AF_INET
             action: SeccompAction::Allow,
         });
         profile.add_arg_rule(ArgRule {
             syscall: Syscall::Name("socket".to_string()),
-            arg_num: 1, // domain
+            arg_num: 1,                      // domain
             compare: SeccompCompare::Eq(10), // AF_INET6
             action: SeccompAction::Allow,
         });
         // Block AF_PACKET, AF_NETLINK, etc.
         profile.add_arg_rule(ArgRule {
             syscall: Syscall::Name("socket".to_string()),
-            arg_num: 0, // type
+            arg_num: 0,                     // type
             compare: SeccompCompare::Eq(3), // SOCK_RAW
             action: SeccompAction::Errno,
         });
@@ -301,22 +446,41 @@ impl AgentProfile {
 
         let minimal = vec![
             // Absolute minimum for code execution
-            "execve", "exit", "exit_group",
+            "execve",
+            "exit",
+            "exit_group",
             // File I/O
-            "read", "write", "open", "openat", "close",
+            "read",
+            "write",
+            "open",
+            "openat",
+            "close",
             // Memory
-            "mmap", "mprotect", "munmap", "brk",
+            "mmap",
+            "mprotect",
+            "munmap",
+            "brk",
             // Basic signals
-            "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+            "rt_sigaction",
+            "rt_sigprocmask",
+            "rt_sigreturn",
             // Basic IPC
-            "pipe", "pipe2",
+            "pipe",
+            "pipe2",
             // Time
-            "clock_gettime", "nanosleep",
+            "clock_gettime",
+            "nanosleep",
             // Process info
-            "getpid", "gettid",
+            "getpid",
+            "gettid",
             // Misc
-            "arch_prctl", "set_tid_address",
-            "readlink", "getuid", "getgid", "geteuid", "getegid",
+            "arch_prctl",
+            "set_tid_address",
+            "readlink",
+            "getuid",
+            "getgid",
+            "geteuid",
+            "getegid",
         ];
 
         for syscall in minimal {
@@ -332,8 +496,11 @@ impl AgentProfile {
 
         // Additional syscalls for compute workloads
         let compute_extra = vec![
-            "sched_setaffinity", "sched_getaffinity",
-            "mbind", "set_mempolicy", "get_mempolicy",
+            "sched_setaffinity",
+            "sched_getaffinity",
+            "mbind",
+            "set_mempolicy",
+            "get_mempolicy",
             "migrate_pages",
             "getcpu",
             "memfd_create",
@@ -384,7 +551,10 @@ impl AgentProfile {
         let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
 
         if ret != 0 {
-            anyhow::bail!("Failed to set no_new_privs: {}", std::io::Error::last_os_error());
+            anyhow::bail!(
+                "Failed to set no_new_privs: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         tracing::debug!("no_new_privs bit set");
@@ -481,7 +651,7 @@ mod tests {
     fn test_agent_profile_default() {
         let profile = AgentProfile::default();
         assert_eq!(profile.name, "agent-default");
-        assert!(!profile.no_new_privs);  // Disabled for Node.js compatibility
+        assert!(!profile.no_new_privs); // Disabled for Node.js compatibility
         assert_eq!(profile.network, NetworkAccess::OutboundOnly);
     }
 

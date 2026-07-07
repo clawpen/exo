@@ -1,10 +1,15 @@
 //! Run command implementation
 
-#[cfg(windows)]
-use exo_wsl::{WslCommand, WslMount, WslDistroManager, NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, WslGpuDetector, WslConfig, WslDeployer};
-use exo_runtime::config::ContainerConfig;
-use exo_runtime::{ContainerManager, ContainerMetadata};
+#[cfg(all(not(windows), not(target_os = "macos")))]
 use exo_image::ImageManager;
+use exo_runtime::config::{BackendSelection, ContainerConfig, SandboxMode};
+#[cfg(all(not(windows), not(target_os = "macos")))]
+use exo_runtime::{ContainerManager, ContainerMetadata};
+#[cfg(windows)]
+use exo_wsl::{
+    AgentNetworkConfig, NetworkConfig, NetworkManager, NetworkMode, PortMapping, PortProtocol,
+    WslCommand, WslConfig, WslDeployer, WslDistroManager, WslGpuDetector, WslMount,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -16,6 +21,7 @@ pub struct RunArgs {
     pub workdir: Option<String>,
     pub volume: Vec<String>,
     pub env: Vec<String>,
+    pub secret: Vec<String>,
     pub gpu: bool,
     pub gpu_type: Option<String>,
     pub memory: Option<String>,
@@ -26,6 +32,8 @@ pub struct RunArgs {
     pub interactive: bool,
     pub tty: bool,
     pub detach: bool,
+    pub backend: String,
+    pub sandbox: String,
 }
 
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
@@ -47,7 +55,13 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
         execute_windows(config, detach, rm, name).await
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS path: use backend selection (native today; Linux microVM later).
+        execute_macos(config, detach, rm, name).await
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         // Linux path: Use native runtime with new features
         execute_linux(config, detach, rm, name).await
@@ -55,12 +69,27 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
+async fn execute_windows(
+    config: ContainerConfig,
+    detach: bool,
+    rm: bool,
+    name: Option<String>,
+) -> anyhow::Result<()> {
     use exo_wsl::command::{ContainerSpec, MountSpec};
-    use exo_wsl::networking::{NetworkManager, NetworkConfig, NetworkMode, PortMapping, PortProtocol, AgentNetworkConfig, DnsEntry};
-    use exo_wsl::deploy::WslDeployer;
     use exo_wsl::daemon_client::DaemonClient;
-    use tracing::{info, debug};
+    use exo_wsl::deploy::WslDeployer;
+    use exo_wsl::networking::{
+        AgentNetworkConfig, DnsEntry, NetworkConfig, NetworkManager, NetworkMode, PortMapping,
+        PortProtocol,
+    };
+    use tracing::{debug, info};
+
+    if config.backend == BackendSelection::Native {
+        anyhow::bail!("native backend is only available on macOS; use '--backend linux' or '--backend auto' on Windows");
+    }
+    if !config.secrets.is_empty() {
+        anyhow::bail!("--secret injection is currently supported only by the macOS native backend");
+    }
 
     info!("Running container via WSL2 backend");
 
@@ -113,7 +142,8 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
     // Convert Windows paths to WSL paths for mounts
     let wsl_mount = WslMount::new(wsl_config.clone());
 
-    let mounts: Vec<MountSpec> = config.mounts
+    let mounts: Vec<MountSpec> = config
+        .mounts
         .iter()
         .map(|m| {
             let source = if m.source.contains(':') {
@@ -132,7 +162,9 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
         .collect();
 
     // Set up port mappings
-    let port_mappings: Vec<PortMapping> = config.network.port_mappings
+    let port_mappings: Vec<PortMapping> = config
+        .network
+        .port_mappings
         .iter()
         .map(|p| PortMapping {
             host_port: p.host_port,
@@ -163,7 +195,9 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
     dns_entry.write_to_container(&state_dir)?;
 
     // Check GPU support
-    let gpu_enabled = config.gpu.as_ref()
+    let gpu_enabled = config
+        .gpu
+        .as_ref()
         .map(|g| !g.devices.is_empty())
         .unwrap_or(false);
 
@@ -187,12 +221,17 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
         image: config.image.clone(),
         command: config.command.clone(),
         workdir: config.workdir.to_string_lossy().to_string(),
-        env: config.env.iter()
+        env: config
+            .env
+            .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect(),
         mounts,
         gpu: gpu_enabled,
-        memory_mb: config.resources.memory.as_ref()
+        memory_mb: config
+            .resources
+            .memory
+            .as_ref()
             .and_then(|m| parse_memory_mb(m).ok()),
         cpu_shares: config.resources.cpu_shares,
     };
@@ -211,7 +250,7 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
 
         // Set up Windows port forwarding for published ports
         if !config.network.port_mappings.is_empty() {
-            use exo_wsl::{WindowsPortForwarder, PortForwardingRule, PortProtocol};
+            use exo_wsl::{PortForwardingRule, PortProtocol, WindowsPortForwarder};
 
             let forwarder = WindowsPortForwarder::new(WslConfig::default());
 
@@ -229,7 +268,10 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
 
                 match forwarder.add_port_forward(&config.name, rule) {
                     Ok(()) => {
-                        println!("Port forwarding: {}:{} -> {}", port_mapping.host_port, port_mapping.container_port, config.name);
+                        println!(
+                            "Port forwarding: {}:{} -> {}",
+                            port_mapping.host_port, port_mapping.container_port, config.name
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("Failed to set up port forwarding: {}", e);
@@ -239,7 +281,10 @@ async fn execute_windows(config: ContainerConfig, detach: bool, rm: bool, name: 
         }
 
         println!("Container running in background: {}", container_id);
-        println!("Agent reachable at {}:{}", container_network.ip, config.name);
+        println!(
+            "Agent reachable at {}:{}",
+            container_network.ip, config.name
+        );
         return Ok(());
     }
 
@@ -268,14 +313,15 @@ async fn execute_with_daemon(
     name: Option<String>,
     daemon_client: exo_wsl::DaemonClient,
 ) -> anyhow::Result<()> {
-    use tracing::info;
     use exo_wsl::mount::WslMount;
     use exo_wsl::WslConfig;
+    use tracing::info;
 
     // Convert Windows paths to WSL paths for mounts
     let wsl_mount = WslMount::new(WslConfig::default());
 
-    let mounts: Vec<exo_wsl::DaemonMountSpec> = config.mounts
+    let mounts: Vec<exo_wsl::DaemonMountSpec> = config
+        .mounts
         .iter()
         .map(|m| {
             let source = if m.source.contains(':') {
@@ -292,7 +338,9 @@ async fn execute_with_daemon(
         })
         .collect();
 
-    let env: Vec<String> = config.env.iter()
+    let env: Vec<String> = config
+        .env
+        .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
@@ -306,7 +354,10 @@ async fn execute_with_daemon(
         env,
         mounts,
         gpu: config.gpu.is_some(),
-        memory_mb: config.resources.memory.as_ref()
+        memory_mb: config
+            .resources
+            .memory
+            .as_ref()
             .and_then(|m| parse_memory_mb(m).ok()),
         cpu_shares: config.resources.cpu_shares,
     };
@@ -336,10 +387,67 @@ async fn execute_with_daemon(
     Ok(())
 }
 
-#[cfg(not(windows))]
-async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Option<String>) -> anyhow::Result<()> {
-    use exo_runtime::{Container, ContainerStatus};
+#[cfg(target_os = "macos")]
+async fn execute_macos(
+    config: ContainerConfig,
+    detach: bool,
+    rm: bool,
+    _name: Option<String>,
+) -> anyhow::Result<()> {
+    match config.backend {
+        BackendSelection::Auto | BackendSelection::Native => {}
+        BackendSelection::Linux => {
+            use exo_runtime::ExoBackend;
+            tracing::info!("Routing container to Exo-managed macOS Linux microVM backend");
+            let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());
+            let result = backend
+                .run(config, exo_runtime::BackendRunOptions { detach, rm })
+                .await?;
+            if !result.message.is_empty() {
+                print!("{}", result.message);
+            }
+            if let Some(code) = result.exit_code {
+                if code != 0 {
+                    anyhow::bail!("Container exited with code {}", code);
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    if config.backend == BackendSelection::Auto && config.image != "host" {
+        tracing::warn!(
+            "macOS auto backend currently falls back to native host-process mode for image '{}'; pass '--backend native' to make this explicit. Linux OCI execution will require the future macOS Linux microVM backend.",
+            config.image
+        );
+    }
+
+    tracing::info!("Running container via native macOS backend");
+
+    let backend = super::mac::backend()?;
+    let output = backend.run(config, exo_mac::RunOptions { detach, rm })?;
+    if !output.is_empty() {
+        print!("{}", output);
+    }
+    Ok(())
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+async fn execute_linux(
+    config: ContainerConfig,
+    detach: bool,
+    rm: bool,
+    name: Option<String>,
+) -> anyhow::Result<()> {
     use exo_gpu::{GpuConfig, GpuType};
+    use exo_runtime::{Container, ContainerStatus};
+
+    if config.backend == BackendSelection::Native {
+        anyhow::bail!("native backend is only available on macOS; use '--backend linux' or '--backend auto' on Linux");
+    }
+    if !config.secrets.is_empty() {
+        anyhow::bail!("--secret injection is currently supported only by the macOS native backend");
+    }
 
     // If --detach and the daemon is running, delegate to it. The daemon is a
     // long-lived root supervisor — the container outlives our CLI invocation
@@ -361,7 +469,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
 
     // Initialize container manager for persistence
     let manager = ContainerManager::new()?;
-    
+
     // Check if container name is already in use
     if let Some(ref container_name) = name {
         if manager.exists(container_name) {
@@ -374,7 +482,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
 
     // Parse the image reference
     let image_ref = image_manager.parse_image_reference(&config.image)?;
-    
+
     // Check for foreign architecture
     let is_foreign = config.image.contains("arm64") || config.image.contains("armv7");
 
@@ -416,9 +524,11 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
 
     // Create container metadata for persistence
     let mut metadata = ContainerMetadata::new(config.name.clone(), config.clone());
-    
+
     // Add port mappings to metadata for display
-    metadata.ports = config.network.port_mappings
+    metadata.ports = config
+        .network
+        .port_mappings
         .iter()
         .map(|p| format!("{}:{}", p.host_port, p.container_port))
         .collect();
@@ -457,7 +567,7 @@ async fn execute_linux(config: ContainerConfig, detach: bool, rm: bool, name: Op
 
     // Wait for container to finish
     let status = container.wait()?;
-    
+
     // Update metadata with exit status
     if let ContainerStatus::Exited(code) = status {
         metadata.set_stopped(Some(code));
@@ -499,7 +609,9 @@ fn parse_memory_mb(size: &str) -> anyhow::Result<u64> {
         (&size[..], "b")
     };
 
-    let num: u64 = num.parse().map_err(|_| anyhow::anyhow!("Invalid size: {}", size))?;
+    let num: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid size: {}", size))?;
 
     Ok(match unit {
         "g" => num * 1024,
@@ -512,30 +624,64 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
     let content = std::fs::read_to_string(path)?;
     let config: toml::Value = toml::from_str(&content)?;
 
-    let name = config.get("container")
+    let name = config
+        .get("container")
         .and_then(|c| c.get("name"))
         .and_then(|n| n.as_str())
         .unwrap_or("exo-agent")
         .to_string();
 
-    let image = config.get("container")
+    let image = config
+        .get("container")
         .and_then(|c| c.get("image"))
         .and_then(|i| i.as_str())
         .unwrap_or("python:3.12-slim")
         .to_string();
 
-    let workdir = config.get("container")
+    let workdir = config
+        .get("container")
         .and_then(|c| c.get("runtime"))
         .and_then(|r| r.get("workdir"))
         .and_then(|w| w.as_str())
         .unwrap_or("/app")
         .to_string();
 
-    let command = config.get("process")
+    let command = config
+        .get("process")
         .and_then(|p| p.get("command"))
         .and_then(|c| c.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_else(|| vec!["python".to_string()]);
+
+    let backend = config
+        .get("container")
+        .and_then(|c| c.get("backend"))
+        .or_else(|| {
+            config
+                .get("container")
+                .and_then(|c| c.get("runtime"))
+                .and_then(|r| r.get("backend"))
+        })
+        .and_then(|b| b.as_str())
+        .unwrap_or("auto")
+        .parse::<BackendSelection>()?;
+
+    let sandbox = config
+        .get("container")
+        .and_then(|c| c.get("sandbox"))
+        .or_else(|| {
+            config
+                .get("container")
+                .and_then(|c| c.get("runtime"))
+                .and_then(|r| r.get("sandbox"))
+        })
+        .and_then(|b| b.as_str())
+        .unwrap_or("auto")
+        .parse::<SandboxMode>()?;
 
     let mut env = HashMap::new();
     if let Some(runtime) = config.get("container").and_then(|c| c.get("runtime")) {
@@ -550,18 +696,33 @@ fn load_config_from_file(path: &str) -> anyhow::Result<ContainerConfig> {
         }
     }
 
+    let secrets = config
+        .get("container")
+        .and_then(|c| c.get("runtime"))
+        .and_then(|r| r.get("secrets"))
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     Ok(ContainerConfig {
         name,
         image,
         workdir: PathBuf::from(workdir),
         env,
+        secrets,
         command,
+        backend,
+        sandbox,
         ..Default::default()
     })
 }
 
 fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
-    use exo_runtime::config::{ResourceConfig, NetworkConfig, MountConfig, PortMapping, GpuConfig};
+    use exo_runtime::config::{GpuConfig, MountConfig, NetworkConfig, PortMapping, ResourceConfig};
 
     let name = args.name.unwrap_or_else(|| {
         // Generate a name if not provided
@@ -583,11 +744,18 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         }
     }
 
+    let secrets = args.secret.clone();
+
     let mut mounts = vec![];
     for v in &args.volume {
         if let Some((src, target)) = v.split_once(':') {
+            let mount_type = if exo_runtime::volume::is_volume_reference(src) {
+                "volume".to_string()
+            } else {
+                "bind".to_string()
+            };
             mounts.push(MountConfig {
-                mount_type: "bind".to_string(),
+                mount_type,
                 source: src.to_string(),
                 target: target.to_string(),
                 readonly: false,
@@ -633,17 +801,23 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
         ..Default::default()
     };
 
+    let backend = args.backend.parse::<BackendSelection>()?;
+    let sandbox = args.sandbox.parse::<SandboxMode>()?;
+
     Ok(ContainerConfig {
         name,
         image: args.image.clone(),
         workdir: PathBuf::from(workdir),
         env,
+        secrets,
         user: "root".to_string(),
         command,
         resources,
         network,
         mounts,
         gpu,
+        backend,
+        sandbox,
         ..Default::default()
     })
 }
@@ -653,7 +827,7 @@ fn build_config_from_args(args: RunArgs) -> anyhow::Result<ContainerConfig> {
 /// stop/list/exec calls). Caller is responsible for checking that the
 /// socket exists; this just connects and speaks the line-delimited JSON
 /// protocol the daemon expects.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;

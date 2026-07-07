@@ -9,13 +9,13 @@ use tracing::{debug, info};
 
 pub use oci_spec::image::{ImageManifest, MediaType};
 
+mod extractor;
 mod reference;
 mod store;
-mod extractor;
 
+pub use extractor::LayerExtractor;
 pub use reference::ImageReference;
 pub use store::ImageStore;
-pub use extractor::LayerExtractor;
 
 #[cfg(feature = "registry")]
 mod registry;
@@ -24,7 +24,7 @@ mod registry;
 mod puller;
 
 #[cfg(feature = "registry")]
-pub use registry::{RegistryClient, RegistryAuth, PulledImage};
+pub use registry::{PulledImage, RegistryAuth, RegistryClient};
 
 #[cfg(feature = "registry")]
 pub use puller::ImagePuller;
@@ -53,45 +53,46 @@ pub fn is_rootfs_ready(image_name: &str) -> bool {
 /// Extract a single layer to the rootfs, handling whiteouts.
 pub fn extract_layer(layer_tar: &Path, dest: &Path) -> Result<()> {
     debug!("Extracting layer {:?} to {:?}", layer_tar, dest);
-    
+
     let file = std::fs::File::open(layer_tar)
         .with_context(|| format!("Failed to open layer: {:?}", layer_tar))?;
-    
+
     // OCI/Docker layers are typically gzipped, but may not have .gz extension
     // Try to detect gzip magic bytes
     let mut reader = std::io::BufReader::new(file);
     let mut magic = [0u8; 2];
     let bytes_read = reader.read(&mut magic)?;
-    
+
     // Reset reader position by reopening the file
     let file = std::fs::File::open(layer_tar)?;
-    
+
     let is_gzipped = bytes_read >= 2 && magic[0] == 0x1f && magic[1] == 0x8b;
-    
+
     let reader: Box<dyn std::io::Read> = if is_gzipped {
         debug!("Detected gzip compression for layer");
         Box::new(flate2::read::GzDecoder::new(file))
     } else {
         Box::new(file)
     };
-    
+
     let mut archive = tar::Archive::new(reader);
-    
+
     // First pass: collect whiteouts
     let mut whiteouts: Vec<PathBuf> = Vec::new();
     let mut opaque_dirs: Vec<PathBuf> = Vec::new();
-    
+
     // We need to collect paths first, then re-open for extraction
     // Store entry paths and metadata
     let mut entry_paths: Vec<(PathBuf, bool)> = Vec::new(); // (path, is_whiteout)
-    
+
     for entry in archive.entries()? {
         let entry = entry?;
         let path = entry.path()?.to_path_buf();
-        let file_name = path.file_name()
+        let file_name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        
+
         if file_name.starts_with(".wh.") {
             if file_name == ".wh..wh..opq" {
                 opaque_dirs.push(path.parent().unwrap().to_path_buf());
@@ -105,7 +106,7 @@ pub fn extract_layer(layer_tar: &Path, dest: &Path) -> Result<()> {
             entry_paths.push((path, false));
         }
     }
-    
+
     // Handle opaque directories (clear existing content)
     for opaque_dir in &opaque_dirs {
         let full_path = dest.join(opaque_dir);
@@ -115,7 +116,7 @@ pub fn extract_layer(layer_tar: &Path, dest: &Path) -> Result<()> {
             std::fs::create_dir_all(&full_path)?;
         }
     }
-    
+
     // Handle whiteouts (delete files/dirs)
     for whiteout in &whiteouts {
         let full_path = dest.join(whiteout);
@@ -128,7 +129,7 @@ pub fn extract_layer(layer_tar: &Path, dest: &Path) -> Result<()> {
             }
         }
     }
-    
+
     // Re-open archive for extraction
     let file = std::fs::File::open(layer_tar)?;
     let reader: Box<dyn std::io::Read> = if is_gzipped {
@@ -136,33 +137,34 @@ pub fn extract_layer(layer_tar: &Path, dest: &Path) -> Result<()> {
     } else {
         Box::new(file)
     };
-    
+
     let mut archive = tar::Archive::new(reader);
-    
+
     // Second pass: extract files (skip whiteout files)
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
-        let file_name = path.file_name()
+        let file_name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        
+
         // Skip whiteout files
         if file_name.starts_with(".wh.") {
             continue;
         }
-        
+
         let dest_path = dest.join(&path);
-        
+
         // Create parent directories
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         // Extract the file - use unpack_in to handle hard links properly
         entry.unpack_in(dest)?;
     }
-    
+
     Ok(())
 }
 
@@ -174,36 +176,36 @@ pub async fn prepare_alpine_rootfs(dest: &Path) -> Result<()> {
         debug!("Alpine rootfs already exists at {:?}", dest);
         return Ok(());
     }
-    
+
     info!("Downloading Alpine minirootfs...");
-    
+
     let url = "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.0-x86_64.tar.gz";
-    
+
     let response = reqwest::get(url).await?;
-    
+
     if !response.status().is_success() {
         anyhow::bail!("Failed to download Alpine rootfs: {}", response.status());
     }
-    
+
     let bytes = response.bytes().await?;
-    
+
     // Save to temp file
     let temp_tar = dest.parent().unwrap().join("alpine-minirootfs.tar.gz");
     std::fs::create_dir_all(temp_tar.parent().unwrap())?;
     std::fs::write(&temp_tar, &bytes)?;
-    
+
     info!("Extracting Alpine rootfs to {:?}", dest);
     std::fs::create_dir_all(dest)?;
-    
+
     // Extract
     let file = std::fs::File::open(&temp_tar)?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
     archive.unpack(dest)?;
-    
+
     // Cleanup
     std::fs::remove_file(&temp_tar)?;
-    
+
     info!("Alpine rootfs ready");
     Ok(())
 }
@@ -218,54 +220,54 @@ impl ImageManager {
         let store = ImageStore::new(PathBuf::from(DEFAULT_IMAGE_ROOT));
         Ok(Self { store })
     }
-    
+
     /// Get the storage backend
     pub fn storage(&self) -> &ImageStore {
         &self.store
     }
-    
+
     /// Parse an image reference
     pub fn parse_image_reference(&self, image: &str) -> Result<ImageReference> {
         ImageReference::parse(image)
     }
-    
+
     /// Ensure an image's rootfs is ready for use.
     /// Returns the path to the rootfs.
     #[cfg(feature = "registry")]
     pub async fn ensure_rootfs(&self, image: &ImageReference) -> Result<PathBuf> {
         let rootfs = self.store.rootfs_path(image);
-        
+
         if rootfs.exists() && rootfs.join("bin").exists() {
             debug!("Rootfs already exists: {:?}", rootfs);
             return Ok(rootfs);
         }
-        
+
         // Try registry pull
         let mut client = RegistryClient::new(self.store.clone())?;
         client.pull(image).await?;
-        
+
         Ok(rootfs)
     }
-    
+
     /// Ensure an image's rootfs is ready for use (no registry support).
     /// Returns the path to the rootfs.
     #[cfg(not(feature = "registry"))]
     pub async fn ensure_rootfs(&self, image: &ImageReference) -> Result<PathBuf> {
         let image_name = format!("{}_{}", image.repository.replace('/', "_"), image.tag);
         let rootfs = get_rootfs_path(&image_name);
-        
+
         if rootfs.exists() && rootfs.join("bin").exists() {
             debug!("Rootfs already exists: {:?}", rootfs);
             return Ok(rootfs);
         }
-        
+
         anyhow::bail!(
             "Image {} not found locally and registry support not compiled in. \
              Recompile with --features registry",
             image
         );
     }
-    
+
     /// Pull an image from a registry.
     #[cfg(feature = "registry")]
     pub async fn pull(&self, image: &str) -> Result<String> {
@@ -274,16 +276,19 @@ impl ImageManager {
         let pulled = client.pull(&reference).await?;
         Ok(pulled.config_digest)
     }
-    
+
     /// List locally stored images.
     pub fn list_images(&self) -> Result<Vec<LocalImage>> {
         let images = self.store.list_images()?;
-        Ok(images.into_iter().map(|r| LocalImage {
-            reference: r.to_string(),
-            registry: r.registry.clone(),
-            repository: r.repository.clone(),
-            tag: r.tag.clone(),
-        }).collect())
+        Ok(images
+            .into_iter()
+            .map(|r| LocalImage {
+                reference: r.to_string(),
+                registry: r.registry.clone(),
+                repository: r.repository.clone(),
+                tag: r.tag.clone(),
+            })
+            .collect())
     }
 }
 
@@ -317,7 +322,7 @@ mod tests {
         assert_eq!(img.repository, "library/alpine");
         assert_eq!(img.tag, "3.19");
     }
-    
+
     #[test]
     fn test_parse_image_implicit_latest() {
         let img = parse_image("ubuntu").unwrap();
