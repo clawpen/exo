@@ -219,18 +219,96 @@ fn build_orchestration_user_prompt(prompt: &AgentPrompt) -> String {
 }
 
 fn report_from_agent_output(task_id: &str, output: &str) -> Option<AgentReport> {
+    if let Some(report) = parse_report_candidate(task_id, output.trim()) {
+        return Some(report);
+    }
+
     for line in output
         .lines()
         .rev()
         .map(str::trim)
         .filter(|line| line.starts_with('{'))
     {
-        if let Ok(mut report) = serde_json::from_str::<AgentReport>(line) {
-            report.task_id = task_id.to_string();
+        if let Some(report) = parse_report_candidate(task_id, line) {
+            return Some(report);
+        }
+    }
+
+    for block in fenced_code_blocks(output) {
+        if let Some(report) = parse_report_candidate(task_id, block.trim()) {
+            return Some(report);
+        }
+    }
+
+    for object in json_object_candidates(output).into_iter().rev() {
+        if let Some(report) = parse_report_candidate(task_id, object.trim()) {
             return Some(report);
         }
     }
     None
+}
+
+fn parse_report_candidate(task_id: &str, candidate: &str) -> Option<AgentReport> {
+    let mut report = serde_json::from_str::<AgentReport>(candidate).ok()?;
+    report.task_id = task_id.to_string();
+    Some(report)
+}
+
+fn fenced_code_blocks(output: &str) -> Vec<&str> {
+    let mut blocks = vec![];
+    let mut rest = output;
+    while let Some(start) = rest.find("```") {
+        let after_start = &rest[start + 3..];
+        let content_start = after_start.find('\n').map(|idx| idx + 1).unwrap_or(0);
+        let content = &after_start[content_start..];
+        let Some(end) = content.find("```") else {
+            break;
+        };
+        blocks.push(&content[..end]);
+        rest = &content[end + 3..];
+    }
+    blocks
+}
+
+fn json_object_candidates(output: &str) -> Vec<&str> {
+    let mut candidates = vec![];
+    let mut start: Option<usize> = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in output.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start_idx) = start.take() {
+                        candidates.push(&output[start_idx..idx + ch.len_utf8()]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -248,6 +326,47 @@ thinking...
         assert_eq!(report.status, "succeeded");
         assert_eq!(report.summary, "builder completed");
         assert_eq!(report.artifacts, vec!["a"]);
+    }
+
+    #[test]
+    fn parses_kimi_style_fenced_json_report() {
+        let output = r#"
+```json
+{
+  "task_id": "task-live-1",
+  "status": "succeeded",
+  "summary": "planner completed live Kimi integration check",
+  "artifacts": [],
+  "followups": []
+}
+```
+"#;
+        let report = report_from_agent_output("task-live-1", output).unwrap();
+        assert_eq!(report.task_id, "task-live-1");
+        assert_eq!(report.status, "succeeded");
+        assert_eq!(
+            report.summary,
+            "planner completed live Kimi integration check"
+        );
+    }
+
+    #[test]
+    fn parses_multiline_json_embedded_in_text() {
+        let output = r#"
+Here is the report:
+{
+  "task_id": "",
+  "status": "succeeded",
+  "summary": "verifier completed with braces {ok}",
+  "artifacts": ["report.json"],
+  "followups": ["builder should review"]
+}
+Done.
+"#;
+        let report = report_from_agent_output("task-3", output).unwrap();
+        assert_eq!(report.task_id, "task-3");
+        assert_eq!(report.summary, "verifier completed with braces {ok}");
+        assert_eq!(report.followups, vec!["builder should review"]);
     }
 
     #[test]

@@ -260,9 +260,31 @@ EXO_AGENT_MOCK=1 exo-agent run-once
 
 With a real LLM, configure `exo-agent` via `--config`, environment variables, or
 its default config. The one-shot worker wraps plain text model output into a
-`succeeded` `AgentReport`; if the model itself prints an `AgentReport` JSON line,
-that structured report is used instead. If the LLM/tool path fails, the worker
-returns a `failed` `AgentReport` instead of crashing the coordinator.
+`succeeded` `AgentReport`; if the model itself prints an `AgentReport` JSON line
+or fenced/multiline JSON block, that structured report is used instead. If the
+LLM/tool path fails, the worker returns a `failed` `AgentReport` instead of
+crashing the coordinator.
+
+### Kimi for Coding note
+
+The live Kimi coding endpoint worked as an OpenAI-compatible endpoint with:
+
+```toml
+[llm]
+provider = "openai"
+base_url = "https://api.kimi.com/coding/v1"
+model = "kimi-for-coding"
+```
+
+`kimi-for-coding` currently requires:
+
+```toml
+temperature = 1.0
+```
+
+Using a lower value returned a provider error (`invalid temperature: only 1 is
+allowed for this model`). Keep Kimi keys in environment/secrets and avoid
+committing config files that contain API keys.
 
 ## Sleep/resume model
 

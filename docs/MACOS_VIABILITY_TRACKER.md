@@ -181,7 +181,11 @@ Status: **implemented / needs Orchestre hardening**
 - [x] Persist orchestration state to disk (`state.json`, `events.jsonl`, `artifacts/`).
 - [x] `exo-agent run-once` speaks AgentPrompt -> AgentReport and can run via
       command or Exo executors.
-- [ ] Live-provider validation for real `exo-agent` LLM workers as Exo processes.
+- [x] `exo-agent run-once` extracts fenced/multiline AgentReport JSON from
+      live model output.
+- [x] Live-provider validation for real `exo-agent` LLM workers as Exo processes
+      using Kimi for Coding.
+- [ ] Harden success detection beyond naive keyword coverage.
 - [x] Agent-to-agent durable mailbox/event log (`mailbox.jsonl`, `exoclaw event-log`).
 - [x] Locked mailbox appends with persistent sequence counter (`mailbox.seq`).
 - [x] Mechanical resume after failure/restart (`exoclaw orchestrate-resume`).
