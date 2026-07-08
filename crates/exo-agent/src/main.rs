@@ -82,6 +82,8 @@ struct AgentReport {
     pub artifacts: Vec<String>,
     #[serde(default)]
     pub followups: Vec<String>,
+    #[serde(default)]
+    pub satisfied_criteria: Vec<String>,
 }
 
 #[tokio::main]
@@ -145,17 +147,19 @@ async fn run_once(args: Args, mock: bool) -> Result<()> {
     let prompt = read_agent_prompt()?;
     let mock = mock || std::env::var("EXO_AGENT_MOCK").ok().as_deref() == Some("1");
 
-    let report = if mock {
+    let mut report = if mock {
         AgentReport {
             task_id: prompt.task_id,
             status: "succeeded".to_string(),
             summary: format!("{} completed", prompt.agent_id),
             artifacts: vec![],
             followups: vec![],
+            satisfied_criteria: vec![format!("{} completed", prompt.agent_id)],
         }
     } else {
         run_once_real(args, prompt).await?
     };
+    normalize_report_status(&mut report);
 
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -193,6 +197,7 @@ async fn run_once_real(args: Args, prompt: AgentPrompt) -> Result<AgentReport> {
                 summary: output.trim().to_string(),
                 artifacts: vec![],
                 followups: vec![],
+                satisfied_criteria: vec![],
             }),
         ),
         Err(e) => Ok(AgentReport {
@@ -201,6 +206,7 @@ async fn run_once_real(args: Args, prompt: AgentPrompt) -> Result<AgentReport> {
             summary: format!("{} failed: {}", agent_id, e),
             artifacts: vec![],
             followups: vec![],
+            satisfied_criteria: vec![],
         }),
     }
 }
@@ -213,7 +219,7 @@ fn read_agent_prompt() -> Result<AgentPrompt> {
 
 fn build_orchestration_user_prompt(prompt: &AgentPrompt) -> String {
     format!(
-        "{}\n\nYou are agent `{}` working on task `{}`.\nReturn either plain text summary or an AgentReport JSON object with fields: task_id, status, summary, artifacts, followups.",
+        "{}\n\nYou are agent `{}` working on task `{}`.\nReturn either plain text summary or an AgentReport JSON object with fields: task_id, status, summary, artifacts, followups, satisfied_criteria. In satisfied_criteria, include only success criteria that your work actually completed.",
         prompt.prompt, prompt.agent_id, prompt.task_id
     )
 }
@@ -251,7 +257,19 @@ fn report_from_agent_output(task_id: &str, output: &str) -> Option<AgentReport> 
 fn parse_report_candidate(task_id: &str, candidate: &str) -> Option<AgentReport> {
     let mut report = serde_json::from_str::<AgentReport>(candidate).ok()?;
     report.task_id = task_id.to_string();
+    normalize_report_status(&mut report);
     Some(report)
+}
+
+fn normalize_report_status(report: &mut AgentReport) {
+    let lower = report.status.trim().to_ascii_lowercase();
+    let normalized = match lower.as_str() {
+        "success" | "complete" | "completed" | "done" | "ok" => "succeeded".to_string(),
+        "error" | "errored" => "failed".to_string(),
+        "blocked" | "failed" | "succeeded" => lower,
+        _ => report.status.trim().to_string(),
+    };
+    report.status = normalized;
 }
 
 fn fenced_code_blocks(output: &str) -> Vec<&str> {
@@ -337,7 +355,8 @@ thinking...
   "status": "succeeded",
   "summary": "planner completed live Kimi integration check",
   "artifacts": [],
-  "followups": []
+  "followups": [],
+  "satisfied_criteria": ["planner completed"]
 }
 ```
 "#;
@@ -348,6 +367,14 @@ thinking...
             report.summary,
             "planner completed live Kimi integration check"
         );
+        assert_eq!(report.satisfied_criteria, vec!["planner completed"]);
+    }
+
+    #[test]
+    fn normalizes_common_model_status_values() {
+        let output = r#"{"task_id":"","status":"completed","summary":"builder completed","artifacts":[],"followups":[]}"#;
+        let report = report_from_agent_output("task-2", output).unwrap();
+        assert_eq!(report.status, "succeeded");
     }
 
     #[test]

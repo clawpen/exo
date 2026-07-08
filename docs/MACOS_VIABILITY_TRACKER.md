@@ -185,7 +185,8 @@ Status: **implemented / needs Orchestre hardening**
       live model output.
 - [x] Live-provider validation for real `exo-agent` LLM workers as Exo processes
       using Kimi for Coding.
-- [ ] Harden success detection beyond naive keyword coverage.
+- [x] Harden success detection beyond naive keyword coverage by requiring
+      explicit `satisfied_criteria` or contiguous per-report phrase matches.
 - [x] Agent-to-agent durable mailbox/event log (`mailbox.jsonl`, `exoclaw event-log`).
 - [x] Locked mailbox appends with persistent sequence counter (`mailbox.seq`).
 - [x] Mechanical resume after failure/restart (`exoclaw orchestrate-resume`).

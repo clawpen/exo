@@ -66,9 +66,12 @@ Fields:
 | `run_id` | string/null | no | Durable run id. If omitted, Exo generates `orch-<uuid>`. |
 | `max_rounds` | number | no | Coordinator prompt budget before blocking. Defaults to `24`. |
 
-Success matching is deliberately simple for now: each success criterion is split
-into alphanumeric words, words of length `<= 3` are ignored, and every remaining
-word must appear in the combined summaries of succeeded reports.
+Success matching is intentionally conservative. A success criterion is satisfied
+only when a single succeeded report either explicitly lists it in
+`satisfied_criteria`, or contains the normalized criterion phrase contiguously in
+its summary. The coordinator no longer combines scattered words across multiple
+reports, which avoids one planning summary accidentally satisfying builder and
+verifier criteria.
 
 ## Executor configs
 
@@ -166,7 +169,8 @@ long as the final JSON report is on a line beginning with `{`.
   "status": "succeeded",
   "summary": "planner completed the implementation plan",
   "artifacts": ["docs/plan.md"],
-  "followups": ["implementation should add mailbox event log"]
+  "followups": ["implementation should add mailbox event log"],
+  "satisfied_criteria": ["planner completed"]
 }
 ```
 
@@ -179,6 +183,7 @@ Fields:
 | `summary` | string | Human-readable result. Used for success-criteria matching. |
 | `artifacts` | string[] | Paths, URLs, or labels for produced artifacts. Defaults to `[]`. |
 | `followups` | string[] | Follow-up prompts. The coordinator assigns each to the best matching agent. Defaults to `[]`. |
+| `satisfied_criteria` | string[] | Success criteria this agent explicitly completed. Defaults to `[]`. Prefer exact strings from the directive. |
 
 If no valid report JSON is found, the command executor treats exit code `0` as a
 succeeded report with summary `<agent_id> completed (exit 0)` and a non-zero exit
@@ -263,7 +268,11 @@ its default config. The one-shot worker wraps plain text model output into a
 `succeeded` `AgentReport`; if the model itself prints an `AgentReport` JSON line
 or fenced/multiline JSON block, that structured report is used instead. If the
 LLM/tool path fails, the worker returns a `failed` `AgentReport` instead of
-crashing the coordinator.
+crashing the coordinator. For best orchestration behavior, real workers should
+populate `satisfied_criteria` only with criteria they actually completed. Common
+model status strings such as `completed`, `complete`, `done`, and `ok` are
+normalized to `succeeded` by `exo-agent run-once` before it prints the final
+report.
 
 ### Kimi for Coding note
 
@@ -386,7 +395,7 @@ Example events:
 ```jsonl
 {"sequence":1,"timestamp_ms":1783451898216,"run_id":"orch-demo-001","event_id":"evt-...","kind":"run_started","from":"coordinator","message":"orchestration run started","payload":{"objective":"..."}}
 {"sequence":2,"timestamp_ms":1783451898217,"run_id":"orch-demo-001","event_id":"evt-...","kind":"task_prompted","from":"coordinator","to":"planner","task_id":"task-1","message":"coordinator prompted planner","payload":{"prompt":"Prime directive:..."}}
-{"sequence":3,"timestamp_ms":1783451898218,"run_id":"orch-demo-001","event_id":"evt-...","kind":"agent_report","from":"planner","to":"coordinator","task_id":"task-1","message":"planner reported Succeeded","payload":{"summary":"planner completed"}}
+{"sequence":3,"timestamp_ms":1783451898218,"run_id":"orch-demo-001","event_id":"evt-...","kind":"agent_report","from":"planner","to":"coordinator","task_id":"task-1","message":"planner reported Succeeded","payload":{"summary":"planner completed","satisfied_criteria":["planner completed"]}}
 ```
 
 Built-in runner event kinds today:

@@ -118,6 +118,7 @@ pub fn run_to_completion_with_observer(
                         summary: format!("executor error: {}", e),
                         artifacts: vec![],
                         followups: vec![],
+                        satisfied_criteria: vec![],
                     },
                 };
                 orchestrator.record_report(report.clone());
@@ -170,6 +171,7 @@ impl AgentExecutor for BuiltinExecutor {
             summary,
             artifacts: vec![],
             followups: vec![],
+            satisfied_criteria: vec![format!("{} completed", task.agent_id)],
         })
     }
 }
@@ -283,6 +285,7 @@ impl AgentExecutor for CommandAgentExecutor {
             },
             artifacts: vec![],
             followups: vec![],
+            satisfied_criteria: vec![],
         })
     }
 }
@@ -399,6 +402,7 @@ mod tests {
                     summary: "transient".to_string(),
                     artifacts: vec![],
                     followups: vec![],
+                    satisfied_criteria: vec![],
                 });
             }
             Ok(AgentReport {
@@ -407,6 +411,7 @@ mod tests {
                 summary: format!("{} complete", task.agent_id),
                 artifacts: vec![],
                 followups: vec![],
+                satisfied_criteria: vec![format!("{} complete", task.agent_id)],
             })
         }
     }

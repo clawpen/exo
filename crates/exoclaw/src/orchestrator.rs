@@ -64,6 +64,13 @@ pub struct AgentReport {
     pub artifacts: Vec<String>,
     #[serde(default)]
     pub followups: Vec<String>,
+    /// Success criteria this agent explicitly claims to have satisfied.
+    ///
+    /// This is the strongest completion signal: when present, the coordinator
+    /// matches these against the directive's `success_criteria` instead of
+    /// guessing from the free-text summary.
+    #[serde(default)]
+    pub satisfied_criteria: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -281,30 +288,47 @@ impl Orchestrator {
                 .all(|task| task.status == TaskStatus::Succeeded);
         }
 
-        let report_text = self
-            .state
-            .reports
-            .iter()
-            .filter(|r| r.status == TaskStatus::Succeeded)
-            .map(|r| r.summary.to_lowercase())
-            .collect::<Vec<_>>()
-            .join("\n");
         self.state
             .directive
             .success_criteria
             .iter()
-            .all(|criterion| {
-                let words: Vec<String> = criterion
-                    .split_whitespace()
-                    .map(|word| {
-                        word.trim_matches(|c: char| !c.is_ascii_alphanumeric())
-                            .to_lowercase()
-                    })
-                    .filter(|word| word.len() > 3)
-                    .collect();
-                !words.is_empty() && words.iter().all(|word| report_text.contains(word))
-            })
+            .all(|criterion| criterion_satisfied_by_reports(criterion, &self.state.reports))
     }
+}
+
+fn criterion_satisfied_by_reports(criterion: &str, reports: &[AgentReport]) -> bool {
+    let normalized_criterion = normalize_text(criterion);
+    if normalized_criterion.is_empty() {
+        return false;
+    }
+
+    reports
+        .iter()
+        .filter(|report| report.status == TaskStatus::Succeeded)
+        .any(|report| {
+            report
+                .satisfied_criteria
+                .iter()
+                .any(|claimed| criteria_equivalent(&normalized_criterion, claimed))
+                || normalize_text(&report.summary).contains(&normalized_criterion)
+        })
+}
+
+fn criteria_equivalent(normalized_criterion: &str, claimed: &str) -> bool {
+    let normalized_claim = normalize_text(claimed);
+    !normalized_claim.is_empty()
+        && (normalized_claim == normalized_criterion
+            || normalized_claim.contains(normalized_criterion)
+            || normalized_criterion.contains(&normalized_claim))
+}
+
+fn normalize_text(value: &str) -> String {
+    value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn dependencies_satisfied(task: &AgentTask, reports: &[AgentReport]) -> bool {
@@ -432,8 +456,57 @@ mod tests {
                 summary: summary.to_string(),
                 artifacts: vec![],
                 followups: vec![],
+                satisfied_criteria: vec![],
             });
         }
+        assert!(matches!(
+            orch.next(),
+            OrchestratorDecision::Succeeded { .. }
+        ));
+    }
+
+    #[test]
+    fn summary_mentions_do_not_cross_satisfy_other_criteria() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task.id,
+            _ => panic!("expected prompt"),
+        };
+        orch.record_report(AgentReport {
+            task_id,
+            status: TaskStatus::Succeeded,
+            summary: "planning complete; builder will handle implementation and verifier will handle verification".to_string(),
+            artifacts: vec![],
+            followups: vec![],
+            satisfied_criteria: vec![],
+        });
+
+        assert!(!matches!(
+            orch.next(),
+            OrchestratorDecision::Succeeded { .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_satisfied_criteria_can_complete_goal() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task.id,
+            _ => panic!("expected prompt"),
+        };
+        orch.record_report(AgentReport {
+            task_id,
+            status: TaskStatus::Succeeded,
+            summary: "I completed the whole checklist.".to_string(),
+            artifacts: vec![],
+            followups: vec![],
+            satisfied_criteria: vec![
+                "planning complete".to_string(),
+                "implementation complete".to_string(),
+                "verification complete".to_string(),
+            ],
+        });
+
         assert!(matches!(
             orch.next(),
             OrchestratorDecision::Succeeded { .. }
@@ -453,6 +526,7 @@ mod tests {
             summary: "temporary failure".to_string(),
             artifacts: vec![],
             followups: vec![],
+            satisfied_criteria: vec![],
         });
         let retry_id = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task.id,
@@ -474,6 +548,7 @@ mod tests {
             summary: "planning complete".to_string(),
             artifacts: vec![],
             followups: vec!["implementation should add IPC".to_string()],
+            satisfied_criteria: vec![],
         });
         assert!(orch.state().tasks.iter().any(|task| {
             task.depends_on == vec![task_id.clone()] && task.prompt.contains("Follow-up requested")
@@ -493,6 +568,7 @@ mod tests {
             summary: "planning complete".to_string(),
             artifacts: vec![],
             followups: vec![],
+            satisfied_criteria: vec![],
         });
         let second = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task,

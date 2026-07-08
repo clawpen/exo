@@ -711,6 +711,7 @@ impl RunObserver for StoreRunObserver {
                 "summary": &report.summary,
                 "artifacts": &report.artifacts,
                 "followups": &report.followups,
+                "satisfied_criteria": &report.satisfied_criteria,
             })),
         )?;
 
