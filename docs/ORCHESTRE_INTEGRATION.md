@@ -221,6 +221,49 @@ Outcome fields:
 The embedded `state` is the same object persisted in `state.json` inside a
 `RunRecord` wrapper.
 
+
+## Exo-agent worker mode
+
+`exo-agent` can act as a one-shot orchestration worker. It reads the same
+`AgentPrompt` JSON used by command/Exo executors and emits a final `AgentReport`
+JSON object on stdout. Tracing/logs are written to stderr so stdout remains
+machine-readable.
+
+Direct command executor:
+
+```json
+{
+  "type": "command",
+  "command": "/absolute/path/to/exo-agent run-once"
+}
+```
+
+Exo-backed native worker:
+
+```json
+{
+  "type": "exo",
+  "exo_bin": "/absolute/path/to/exo",
+  "backend": "native",
+  "image": "host",
+  "agent_command": "/absolute/path/to/exo-agent run-once",
+  "sandbox": "off"
+}
+```
+
+For deterministic smoke tests without an LLM/API key, use either:
+
+```bash
+exo-agent run-once --mock
+EXO_AGENT_MOCK=1 exo-agent run-once
+```
+
+With a real LLM, configure `exo-agent` via `--config`, environment variables, or
+its default config. The one-shot worker wraps plain text model output into a
+`succeeded` `AgentReport`; if the model itself prints an `AgentReport` JSON line,
+that structured report is used instead. If the LLM/tool path fails, the worker
+returns a `failed` `AgentReport` instead of crashing the coordinator.
+
 ## Sleep/resume model
 
 The mailbox/event log is what lets agents sleep and come back to their work.

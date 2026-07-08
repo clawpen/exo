@@ -4,9 +4,10 @@
 //! Provides LLM integration, memory, tools, and stdio communication.
 
 use anyhow::Result;
-use clap::Parser;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
+use std::io::Read;
+use tracing::info;
 
 mod agent;
 mod channel;
@@ -21,6 +22,9 @@ use config::AgentConfig;
 #[derive(Parser)]
 #[command(name = "exo-agent", author, version, about = "Exo Agent")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Configuration file path
     #[arg(short, long)]
     config: Option<String>,
@@ -42,10 +46,49 @@ struct Args {
     debug: bool,
 }
 
+#[derive(Subcommand)]
+enum Commands {
+    /// Run one orchestration prompt: AgentPrompt JSON stdin -> AgentReport JSON stdout
+    RunOnce {
+        /// Accept AgentPrompt JSON on stdin (default; kept explicit for scripts)
+        #[arg(long)]
+        stdin_json: bool,
+
+        /// Emit AgentReport JSON on stdout (default; kept explicit for scripts)
+        #[arg(long)]
+        stdout_json: bool,
+
+        /// Do not call an LLM; emit a deterministic succeeded report
+        #[arg(long)]
+        mock: bool,
+    },
+}
+
+/// Orchestration prompt from exoclaw.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentPrompt {
+    pub task_id: String,
+    pub agent_id: String,
+    pub prompt: String,
+}
+
+/// Orchestration report expected by exoclaw.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentReport {
+    pub task_id: String,
+    pub status: String,
+    pub summary: String,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub followups: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .init();
 
@@ -53,6 +96,15 @@ async fn main() -> Result<()> {
 
     // Parse arguments
     let args = Args::parse();
+
+    if let Some(Commands::RunOnce {
+        stdin_json: _,
+        stdout_json: _,
+        mock,
+    }) = args.command
+    {
+        return run_once(args, mock).await;
+    }
 
     // Load configuration
     let mut config = if let Some(path) = &args.config {
@@ -87,4 +139,128 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_once(args: Args, mock: bool) -> Result<()> {
+    let prompt = read_agent_prompt()?;
+    let mock = mock || std::env::var("EXO_AGENT_MOCK").ok().as_deref() == Some("1");
+
+    let report = if mock {
+        AgentReport {
+            task_id: prompt.task_id,
+            status: "succeeded".to_string(),
+            summary: format!("{} completed", prompt.agent_id),
+            artifacts: vec![],
+            followups: vec![],
+        }
+    } else {
+        run_once_real(args, prompt).await?
+    };
+
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+async fn run_once_real(args: Args, prompt: AgentPrompt) -> Result<AgentReport> {
+    let mut config = if let Some(path) = &args.config {
+        AgentConfig::from_file(std::path::Path::new(path))?
+    } else {
+        AgentConfig::from_env()?
+    };
+
+    if let Some(name) = args.name {
+        config.name = name;
+    }
+    if let Some(model) = args.model {
+        config.llm.model = model;
+    }
+    if let Some(system) = args.system {
+        config.system_prompt = Some(system);
+    }
+
+    let task_id = prompt.task_id.clone();
+    let agent_id = prompt.agent_id.clone();
+    let mut agent = ExoAgent::new(config).await?;
+
+    match agent
+        .run_once(&build_orchestration_user_prompt(&prompt))
+        .await
+    {
+        Ok(output) => Ok(
+            report_from_agent_output(&task_id, &output).unwrap_or_else(|| AgentReport {
+                task_id,
+                status: "succeeded".to_string(),
+                summary: output.trim().to_string(),
+                artifacts: vec![],
+                followups: vec![],
+            }),
+        ),
+        Err(e) => Ok(AgentReport {
+            task_id,
+            status: "failed".to_string(),
+            summary: format!("{} failed: {}", agent_id, e),
+            artifacts: vec![],
+            followups: vec![],
+        }),
+    }
+}
+
+fn read_agent_prompt() -> Result<AgentPrompt> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    Ok(serde_json::from_str(input.trim())?)
+}
+
+fn build_orchestration_user_prompt(prompt: &AgentPrompt) -> String {
+    format!(
+        "{}\n\nYou are agent `{}` working on task `{}`.\nReturn either plain text summary or an AgentReport JSON object with fields: task_id, status, summary, artifacts, followups.",
+        prompt.prompt, prompt.agent_id, prompt.task_id
+    )
+}
+
+fn report_from_agent_output(task_id: &str, output: &str) -> Option<AgentReport> {
+    for line in output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| line.starts_with('{'))
+    {
+        if let Ok(mut report) = serde_json::from_str::<AgentReport>(line) {
+            report.task_id = task_id.to_string();
+            return Some(report);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_last_agent_report_json_line() {
+        let output = r#"
+thinking...
+{"task_id":"","status":"succeeded","summary":"builder completed","artifacts":["a"],"followups":[]}
+"#;
+        let report = report_from_agent_output("task-9", output).unwrap();
+        assert_eq!(report.task_id, "task-9");
+        assert_eq!(report.status, "succeeded");
+        assert_eq!(report.summary, "builder completed");
+        assert_eq!(report.artifacts, vec!["a"]);
+    }
+
+    #[test]
+    fn builds_orchestration_prompt_with_ids() {
+        let prompt = AgentPrompt {
+            task_id: "task-1".to_string(),
+            agent_id: "planner".to_string(),
+            prompt: "Prime directive: ship".to_string(),
+        };
+        let text = build_orchestration_user_prompt(&prompt);
+        assert!(text.contains("Prime directive: ship"));
+        assert!(text.contains("planner"));
+        assert!(text.contains("task-1"));
+        assert!(text.contains("AgentReport JSON"));
+    }
 }

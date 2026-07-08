@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 /// Tool execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]

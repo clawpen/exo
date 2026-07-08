@@ -179,7 +179,9 @@ Status: **implemented / needs Orchestre hardening**
 - [x] Run inspection commands (`exoclaw orchestrate-list`,
       `exoclaw orchestrate-status`).
 - [x] Persist orchestration state to disk (`state.json`, `events.jsonl`, `artifacts/`).
-- [ ] Spawn real `exo-agent` LLM workers as Exo processes.
+- [x] `exo-agent run-once` speaks AgentPrompt -> AgentReport and can run via
+      command or Exo executors.
+- [ ] Live-provider validation for real `exo-agent` LLM workers as Exo processes.
 - [x] Agent-to-agent durable mailbox/event log (`mailbox.jsonl`, `exoclaw event-log`).
 - [x] Locked mailbox appends with persistent sequence counter (`mailbox.seq`).
 - [x] Mechanical resume after failure/restart (`exoclaw orchestrate-resume`).
@@ -226,4 +228,33 @@ exoclaw orchestrate-list --state-dir "$tmpdir/state" --json
 exoclaw orchestrate-status orch-smoke-json --state-dir "$tmpdir/state" \
   --include-mailbox --json
 exoclaw orchestrate-resume orch-smoke-json --state-dir "$tmpdir/state" --json
+cat > "$tmpdir/input-agent-command.json" <<JSON
+{
+  "objective": "Confirm exo-agent run-once command worker",
+  "success_criteria": ["planner completed", "builder completed", "verifier completed"],
+  "executor": { "type": "command", "command": "$(pwd)/target/debug/exo-agent run-once --mock" },
+  "run_id": "orch-agent-command-smoke",
+  "max_rounds": 24
+}
+JSON
+exoclaw orchestrate-run --json-input "$tmpdir/input-agent-command.json" \
+  --state-dir "$tmpdir/agent-state" --json
+cat > "$tmpdir/input-agent-exo.json" <<JSON
+{
+  "objective": "Confirm exo-agent run-once Exo worker",
+  "success_criteria": ["planner completed", "builder completed", "verifier completed"],
+  "executor": {
+    "type": "exo",
+    "exo_bin": "$(pwd)/target/debug/exo",
+    "backend": "native",
+    "image": "host",
+    "agent_command": "$(pwd)/target/debug/exo-agent run-once --mock",
+    "sandbox": "off"
+  },
+  "run_id": "orch-agent-exo-smoke",
+  "max_rounds": 24
+}
+JSON
+exoclaw orchestrate-run --json-input "$tmpdir/input-agent-exo.json" \
+  --state-dir "$tmpdir/exo-agent-state" --json
 ```

@@ -2,7 +2,7 @@
 
 use crate::channel::{InputMessage, OutputMessage, StdioChannel};
 use crate::config::AgentConfig;
-use crate::llm::{ChatCompletion, LlmClient, Message, ToolCall};
+use crate::llm::{LlmClient, ToolCall};
 use crate::memory::AgentMemory;
 use crate::tools::ToolRegistry;
 use anyhow::{Context, Result};
@@ -79,9 +79,31 @@ impl ExoAgent {
     #[instrument(skip(self))]
     async fn handle_message(&mut self, input: InputMessage) -> Result<()> {
         debug!("Handling message: {:?}", input);
+        let (content, done) = self.process_content(&input.content).await?;
 
+        // Send response
+        let output = OutputMessage {
+            content,
+            tool_calls: None,
+            done: Some(done),
+        };
+        self.channel.send(&output).await?;
+
+        debug!("Response sent: {} chars", output.content.len());
+        Ok(())
+    }
+
+    /// Process one prompt and return the final assistant content.
+    pub async fn run_once(&mut self, content: &str) -> Result<String> {
+        let (content, _done) = self.process_content(content).await?;
+        Ok(content)
+    }
+
+    /// Process one message with autonomous tool calling.
+    #[instrument(skip(self, content))]
+    async fn process_content(&mut self, content: &str) -> Result<(String, bool)> {
         // Add user message to memory
-        self.memory.add("user", &input.content).await?;
+        self.memory.add("user", content).await?;
         self.state.messages_processed += 1;
 
         // Get available tools
@@ -152,33 +174,21 @@ impl ExoAgent {
             // Add to memory
             self.memory.add("assistant", &assistant_msg.content).await?;
 
-            // Send response
-            let output = OutputMessage {
-                content: assistant_msg.content,
-                tool_calls: None,
-                done: Some(true),
-            };
-            self.channel.send(&output).await?;
-
             debug!(
-                "Response sent: {} chars (iteration {})",
-                output.content.len(),
+                "Response generated: {} chars (iteration {})",
+                assistant_msg.content.len(),
                 iteration
             );
-            return Ok(());
+            return Ok((assistant_msg.content, true));
         }
 
         // Hit max iterations - send what we have
         warn!("Hit max iterations ({})", max_iterations);
 
-        let output = OutputMessage {
-            content: "I've completed the available actions but may need more iterations to finish. Please continue if needed.".to_string(),
-            tool_calls: None,
-            done: Some(false),
-        };
-        self.channel.send(&output).await?;
-
-        Ok(())
+        Ok((
+            "I've completed the available actions but may need more iterations to finish. Please continue if needed.".to_string(),
+            false,
+        ))
     }
 
     /// Execute a tool call from the LLM
