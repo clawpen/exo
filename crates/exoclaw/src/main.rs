@@ -747,6 +747,9 @@ impl RunObserver for StoreRunObserver {
                 "message": &outcome.message,
             })),
         )?;
+        if let Err(e) = self.store.save_usage(&self.run_id, &outcome.usage) {
+            tracing::warn!("Failed to save usage for {}: {}", self.run_id, e);
+        }
         Ok(())
     }
 }

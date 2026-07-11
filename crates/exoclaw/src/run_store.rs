@@ -137,6 +137,22 @@ impl RunStore {
         self.run_dir(run_id).join("state.json")
     }
 
+    pub fn usage_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("usage.json")
+    }
+
+    pub fn save_usage(
+        &self,
+        run_id: &str,
+        usage: &crate::orchestrator::TokenUsage,
+    ) -> Result<()> {
+        let dir = self.run_dir(run_id);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(self.usage_path(run_id), serde_json::to_vec_pretty(usage)?)
+            .with_context(|| format!("write run usage {}", run_id))?;
+        Ok(())
+    }
+
     pub fn events_path(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("events.jsonl")
     }

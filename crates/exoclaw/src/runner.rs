@@ -51,6 +51,9 @@ pub struct RunOutcome {
     pub status: OrchestrationStatus,
     pub rounds: u32,
     pub message: String,
+    /// Aggregated token usage across all agent reports that reported usage.
+    #[serde(default)]
+    pub usage: crate::orchestrator::TokenUsage,
 }
 
 /// Drive the orchestrator to a terminal state.
@@ -81,6 +84,7 @@ pub fn run_to_completion_with_observer(
                     status: OrchestrationStatus::Succeeded,
                     rounds: orchestrator.state().round,
                     message: summary,
+                    usage: aggregate_usage(orchestrator.state().reports.iter().filter_map(|r| r.usage)),
                 };
                 observer.on_run_finished(&outcome)?;
                 return Ok(outcome);
@@ -90,6 +94,7 @@ pub fn run_to_completion_with_observer(
                     status: orchestrator.state().status,
                     rounds: orchestrator.state().round,
                     message: reason,
+                    usage: aggregate_usage(orchestrator.state().reports.iter().filter_map(|r| r.usage)),
                 };
                 observer.on_run_finished(&outcome)?;
                 return Ok(outcome);
@@ -101,6 +106,7 @@ pub fn run_to_completion_with_observer(
                         status: OrchestrationStatus::Blocked,
                         rounds: orchestrator.state().round,
                         message: format!("runner exceeded max steps ({})", max_steps),
+                        usage: aggregate_usage(orchestrator.state().reports.iter().filter_map(|r| r.usage)),
                     };
                     observer.on_run_finished(&outcome)?;
                     return Ok(outcome);
@@ -119,6 +125,7 @@ pub fn run_to_completion_with_observer(
                         artifacts: vec![],
                         followups: vec![],
                         satisfied_criteria: vec![],
+                        usage: None,
                     },
                 };
                 orchestrator.record_report(report.clone());
@@ -126,6 +133,10 @@ pub fn run_to_completion_with_observer(
             }
         }
     }
+}
+
+fn aggregate_usage(usages: impl Iterator<Item = crate::orchestrator::TokenUsage>) -> crate::orchestrator::TokenUsage {
+    usages.fold(crate::orchestrator::TokenUsage::default(), |acc, u| acc + u)
 }
 
 /// Built-in executor that marks each task succeeded with a synthetic summary.
@@ -172,6 +183,7 @@ impl AgentExecutor for BuiltinExecutor {
             artifacts: vec![],
             followups: vec![],
             satisfied_criteria: vec![format!("{} completed", task.agent_id)],
+            usage: None,
         })
     }
 }
@@ -286,6 +298,7 @@ impl AgentExecutor for CommandAgentExecutor {
             artifacts: vec![],
             followups: vec![],
             satisfied_criteria: vec![],
+            usage: None,
         })
     }
 }
@@ -403,6 +416,7 @@ mod tests {
                     artifacts: vec![],
                     followups: vec![],
                     satisfied_criteria: vec![],
+                    usage: None,
                 });
             }
             Ok(AgentReport {
@@ -412,6 +426,7 @@ mod tests {
                 artifacts: vec![],
                 followups: vec![],
                 satisfied_criteria: vec![format!("{} complete", task.agent_id)],
+                usage: None,
             })
         }
     }

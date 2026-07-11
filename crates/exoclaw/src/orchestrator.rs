@@ -71,6 +71,38 @@ pub struct AgentReport {
     /// guessing from the free-text summary.
     #[serde(default)]
     pub satisfied_criteria: Vec<String>,
+    /// Optional token usage reported by the agent's LLM worker.
+    #[serde(default)]
+    pub usage: Option<TokenUsage>,
+}
+
+/// Token usage for a single agent prompt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+impl std::ops::Add for TokenUsage {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens + rhs.input_tokens,
+            output_tokens: self.output_tokens + rhs.output_tokens,
+        }
+    }
+}
+
+impl std::iter::Sum for TokenUsage {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |a, b| a + b)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -227,6 +259,8 @@ impl Orchestrator {
         }
 
         let followups = report.followups.clone();
+        // Keep only the latest report for each task so retries don't leave stale failures in the log.
+        self.state.reports.retain(|r| r.task_id != report.task_id);
         self.state.reports.push(report.clone());
 
         if report.status == TaskStatus::Failed && !self.retry_existing(&report.task_id) {
@@ -369,6 +403,11 @@ fn build_agent_prompt(
         }
     }
     prompt.push_str(
+        "\n\nWhen you produce code or structured output, write each file in its own \
+         markdown code block preceded by a header line `### path/to/file.ext`. \
+         You may create multiple files. Put a brief summary after the files.",
+    );
+    prompt.push_str(
         "\nReturn a concise report with: status, what you did, artifacts, blockers, and follow-up prompts for other agents if needed.",
     );
     prompt
@@ -457,6 +496,7 @@ mod tests {
                 artifacts: vec![],
                 followups: vec![],
                 satisfied_criteria: vec![],
+                usage: None,
             });
         }
         assert!(matches!(
@@ -479,6 +519,7 @@ mod tests {
             artifacts: vec![],
             followups: vec![],
             satisfied_criteria: vec![],
+            usage: None,
         });
 
         assert!(!matches!(
@@ -505,6 +546,7 @@ mod tests {
                 "implementation complete".to_string(),
                 "verification complete".to_string(),
             ],
+            usage: None,
         });
 
         assert!(matches!(
@@ -527,6 +569,7 @@ mod tests {
             artifacts: vec![],
             followups: vec![],
             satisfied_criteria: vec![],
+            usage: None,
         });
         let retry_id = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task.id,
@@ -549,6 +592,7 @@ mod tests {
             artifacts: vec![],
             followups: vec!["implementation should add IPC".to_string()],
             satisfied_criteria: vec![],
+            usage: None,
         });
         assert!(orch.state().tasks.iter().any(|task| {
             task.depends_on == vec![task_id.clone()] && task.prompt.contains("Follow-up requested")
@@ -569,6 +613,7 @@ mod tests {
             artifacts: vec![],
             followups: vec![],
             satisfied_criteria: vec![],
+            usage: None,
         });
         let second = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task,
