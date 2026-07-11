@@ -225,14 +225,78 @@ fn trigger_power_off() {
 fn main() {
     eprintln!("exo-vm-guest-init started");
 
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut stdout = stdout.lock();
+    // RPC travels over the dedicated virtio-console port (hvc1). hvc0 is the
+    // console/log port that the kernel wires to this process's stdio, so reading
+    // RPC from stdin would listen on the wrong channel (the host drives hvc1) and
+    // every request would time out. Open /dev/hvc1 explicitly for request/response;
+    // logging stays on stderr (hvc0 → console log). Fall back to stdin/stdout if
+    // the port is unavailable, so a misconfigured guest still limps rather than
+    // silently hangs.
     let started = Instant::now();
 
-    eprintln!("Listening on serial console for JSON RPC");
+    // Try the dedicated RPC port first; on any failure, fall back to stdio so a
+    // misconfigured guest limps instead of silently hanging.
+    let mut reader: Box<dyn BufRead>;
+    let mut writer: Box<dyn Write>;
+    match open_rpc_port() {
+        Some((r, w)) => {
+            eprintln!("Listening on /dev/hvc1 for JSON RPC");
+            reader = r;
+            writer = w;
+        }
+        None => {
+            eprintln!("Falling back to stdin/stdout for JSON RPC");
+            reader = Box::new(BufReader::new(std::io::stdin()));
+            writer = Box::new(std::io::stdout());
+        }
+    }
 
+    run_rpc_loop(&mut *reader, &mut *writer, started);
+}
+
+/// Open the dedicated virtio-console RPC port (`/dev/hvc1`) for read and write.
+/// Returns a buffered reader and a writer over independent handles to the same
+/// port, or `None` if the port cannot be opened/cloned.
+fn open_rpc_port() -> Option<(Box<dyn BufRead>, Box<dyn Write>)> {
+    let port = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/hvc1")
+        .map_err(|e| eprintln!("Could not open /dev/hvc1: {e}"))
+        .ok()?;
+
+    // /dev/hvc1 is a virtio-console TTY that defaults to canonical mode with echo
+    // enabled. Echo would reflect each host request back over the same port, and
+    // the host would parse its own `{"method":...}` line as our response ("missing
+    // field `status`"). Put the port in raw mode so only agent-written bytes flow
+    // back to the host.
+    make_raw(&port);
+
+    let read_side = port
+        .try_clone()
+        .map_err(|e| eprintln!("Could not clone /dev/hvc1: {e}"))
+        .ok()?;
+    Some((Box::new(BufReader::new(read_side)), Box::new(port)))
+}
+
+/// Put a TTY file descriptor into raw mode (no echo, no canonical line editing,
+/// no output translation) so a line-delimited binary-safe protocol works over it.
+/// Best-effort: a non-TTY or a failed ioctl is ignored.
+fn make_raw(port: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    let fd = port.as_raw_fd();
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut termios) != 0 {
+            return;
+        }
+        libc::cfmakeraw(&mut termios);
+        let _ = libc::tcsetattr(fd, libc::TCSANOW, &mut termios);
+    }
+}
+
+/// Serve JSON-RPC requests line-by-line until the transport closes for good.
+fn run_rpc_loop(reader: &mut dyn BufRead, stdout: &mut dyn Write, started: Instant) {
     let mut line = String::new();
     loop {
         line.clear();

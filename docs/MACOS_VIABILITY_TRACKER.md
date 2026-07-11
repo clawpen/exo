@@ -86,7 +86,18 @@ Status: **scaffolded / not production-ready**
 - [x] `ImportImage` guest RPC + `exo vm import-image` command.
 - [x] `exo vm install-guest-agent PATH` installs a built guest agent binary for
       embedding into the initrd with `exo vm init --force`.
-- [ ] Host-to-guest RPC is reliable on real macOS Virtualization.framework.
+- [x] Host-to-guest RPC is reliable on real macOS Virtualization.framework.
+      (2026-07-11: VM boots and guest RPC is reachable/stable. Required three
+      fixes: (a) the `exo` binary must be codesigned with the
+      `com.apple.security.virtualization` entitlement or `VZVirtualMachine`
+      `canStart` stays false — `codesign --sign - --entitlements
+      crates/exo-vm-mac/entitlements.plist --force target/debug/exo`; a plain
+      `cargo build` strips it; (b) the guest agent must do RPC over `/dev/hvc1`
+      (the dedicated port), not stdin/stdout, which the kernel wires to the hvc0
+      console/log; (c) `/dev/hvc1` must be put in raw mode or the TTY echoes each
+      host request back and the host parses its own line. `exo run --backend
+      linux <cmd>` now runs the command in the guest and returns
+      stdout/stderr/exit code.)
 - [ ] VM lifecycle is covered by host integration tests.
 - [x] Guest agent can execute a command in the guest through the container RPC
       path.
