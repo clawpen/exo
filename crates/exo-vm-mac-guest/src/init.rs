@@ -55,6 +55,18 @@ enum GuestRequest {
         image: String,
         tar_path: String,
     },
+    /// Append a hex-encoded byte chunk to a guest file. Used to stream an image
+    /// tarball from the host into the guest before ImportImage, since the guest
+    /// has no network downloader.
+    WriteChunk {
+        path: String,
+        data_hex: String,
+        append: bool,
+    },
+    /// Report whether an image rootfs is already present in the guest store.
+    ImageExists {
+        image: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -200,7 +212,66 @@ fn handle_request_with_runtime(
                 },
             }
         }
+        GuestRequest::WriteChunk {
+            path,
+            data_hex,
+            append,
+        } => match write_chunk(&path, &data_hex, append) {
+            Ok(written) => GuestResponse::Ok {
+                message: format!("wrote {} bytes to {}", written, path),
+            },
+            Err(e) => GuestResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        GuestRequest::ImageExists { image } => {
+            // Always Ok so "absent" isn't treated as a transport error; the host
+            // distinguishes on the message.
+            let present = runtime.image_rootfs_dir(&image).exists();
+            GuestResponse::Ok {
+                message: if present { "present" } else { "absent" }.to_string(),
+            }
+        }
     }
+}
+
+/// Decode a hex string and append (or truncate-write) it to a guest file.
+fn write_chunk(path: &str, data_hex: &str, append: bool) -> std::io::Result<usize> {
+    use std::io::Write;
+    let bytes = decode_hex(data_hex)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad hex chunk"))?;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)?;
+    file.write_all(&bytes)?;
+    Ok(bytes.len())
+}
+
+/// Minimal hex decoder (avoids pulling in a crate for the guest).
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    let s = s.as_bytes();
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    fn nib(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for pair in s.chunks(2) {
+        out.push((nib(pair[0])? << 4) | nib(pair[1])?);
+    }
+    Some(out)
 }
 
 fn trigger_power_off() {

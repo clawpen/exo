@@ -94,6 +94,16 @@ pub enum GuestRequest {
         image: String,
         tar_path: String,
     },
+    /// Append a hex-encoded byte chunk to a guest file (image tarball transfer).
+    WriteChunk {
+        path: String,
+        data_hex: String,
+        append: bool,
+    },
+    /// Ask whether an image rootfs is already present in the guest store.
+    ImageExists {
+        image: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

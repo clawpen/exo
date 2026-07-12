@@ -103,8 +103,10 @@ Status: **scaffolded / not production-ready**
       path.
 - [ ] Guest agent can execute an Exo runtime command with OCI image
       pull/extract/rootfs/isolation.
-- [ ] Host-to-guest image transfer/sharing (so `import-image` has a guest-side
-      archive without manual copying).
+- [x] Host-to-guest image transfer/sharing (so `import-image` has a guest-side
+      archive without manual copying). Done via the `WriteChunk` RPC: the host
+      streams the tarball in hex-encoded chunks (~2 KiB to stay under the serial
+      socketpair buffer) to a guest path, then calls `ImportImage`.
 - [ ] VM image artifacts have a build/update/distribution story.
 
 Acceptance command set:
@@ -118,13 +120,30 @@ exo vm stop
 
 ## Gate 4: Linux Containers on macOS
 
-Status: **not implemented**
+Status: **MVP working — runs isolated in an image rootfs** (2026-07-11).
+`exo run --backend linux alpine cat /etc/os-release` returns Alpine's own
+os-release; `ls /` inside shows the Alpine root (no guest init/initrd), apk
+present. Remaining hardening: overlay (kernel lacks overlayfs, falls back to the
+image rootfs directly), full namespace/cgroup/seccomp isolation, and lifecycle
+bridging.
 
-- [ ] `exo run --backend linux alpine echo hello`.
-- [ ] OCI image pull/extract inside guest, or host pull + guest transfer.
-- [ ] Overlayfs-backed rootfs inside guest.
-- [ ] Namespace/cgroup/seccomp isolation inside guest.
-- [ ] Logs and exit codes streamed back to host.
+- [x] `exo run --backend linux alpine echo hello`. (also `cat /etc/os-release`,
+      `ls /`, `apk` — chroot into the image rootfs.)
+- [x] OCI image pull/extract inside guest, or host pull + guest transfer.
+      (Host downloads the alpine minirootfs and streams it into the guest over
+      the RPC channel in hex chunks via the new `WriteChunk` op — the guest has
+      no TLS/network downloader — then `ImportImage` extracts it. `ImageExists`
+      skips re-transfer when already present in-guest. Currently only the
+      `alpine` minirootfs is mapped; not yet real OCI registry pull.)
+- [ ] Overlayfs-backed rootfs inside guest. (Attempted first; the minimal guest
+      kernel returns ENODEV, so the run falls back to chroot directly into the
+      image rootfs — writes are not yet per-container isolated. Needs a kernel
+      with overlayfs or a copy-up.)
+- [ ] Namespace/cgroup/seccomp isolation inside guest. (Currently chroot only =
+      filesystem isolation; no PID/net/user namespaces yet. The guest runtime has
+      the primitives — wire `unshare`/cgroups into the run path.)
+- [x] Logs and exit codes streamed back to host. (stdout/stderr/exit code
+      returned via RunResult.)
 - [ ] `list`, `stop`, `remove`, `exec`, `logs` bridged to guest.
 
 Acceptance command set:

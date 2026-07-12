@@ -98,6 +98,82 @@ impl MacLinuxBackend {
             other => anyhow::bail!("unexpected guest response to ImportImage: {:?}", other),
         }
     }
+
+    /// Rootfs tarball URL for images we know how to auto-provision. Others return
+    /// `None` and fall back to raw guest exec.
+    fn image_rootfs_url(image: &str) -> Option<&'static str> {
+        match image {
+            "alpine" | "alpine:latest" | "alpine:3" | "alpine:3.20" => Some(
+                "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Ensure an image rootfs exists in the guest. The guest has no TLS/network
+    /// downloader, so the host fetches the tarball (cached) and streams it in over
+    /// the RPC channel in hex-encoded chunks, then asks the guest to extract it.
+    /// No-op for images we don't know how to provision or that are already present.
+    pub async fn ensure_image(&self, image: &str) -> anyhow::Result<()> {
+        let Some(url) = Self::image_rootfs_url(image) else {
+            return Ok(());
+        };
+        if let Ok(GuestResponse::Ok { message }) = self.client()?.guest_request(GuestRequest::ImageExists {
+            image: image.to_string(),
+        }) {
+            if message == "present" {
+                return Ok(());
+            }
+        }
+
+        let safe: String = image
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let cache = crate::paths::exo_vm_dir()?.join("images");
+        std::fs::create_dir_all(&cache)?;
+        let host_tar = cache.join(format!("{}.tar.gz", safe));
+        crate::image::download_file_if_missing(url, &host_tar).await?;
+
+        let bytes = std::fs::read(&host_tar)?;
+        let guest_tar = format!("/tmp/exo-image-{}.tar.gz", safe);
+        // Keep each hex-encoded line well under the serial socketpair's send
+        // buffer (~8 KiB on macOS) so a WriteChunk never blocks past the RPC
+        // timeout. 2 KiB raw -> ~4 KiB hex.
+        const CHUNK: usize = 2 * 1024;
+        let client = self.client()?;
+        tracing::info!(
+            "Provisioning image '{}' into guest ({} bytes, {} chunks)",
+            image,
+            bytes.len(),
+            bytes.len().div_ceil(CHUNK)
+        );
+        for (i, chunk) in bytes.chunks(CHUNK).enumerate() {
+            match client.guest_request(GuestRequest::WriteChunk {
+                path: guest_tar.clone(),
+                data_hex: to_hex(chunk),
+                append: i > 0,
+            })? {
+                GuestResponse::Ok { .. } => {}
+                GuestResponse::Error { message } => anyhow::bail!("WriteChunk failed: {}", message),
+                other => anyhow::bail!("unexpected response to WriteChunk: {:?}", other),
+            }
+        }
+        self.import_image_from_guest_path(image, &guest_tar)?;
+        tracing::info!("Image '{}' provisioned into guest", image);
+        Ok(())
+    }
+}
+
+/// Lowercase hex-encode bytes for line-delimited JSON transport.
+fn to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
 }
 
 #[async_trait]
@@ -107,6 +183,10 @@ impl ExoBackend for MacLinuxBackend {
         config: ContainerConfig,
         _opts: BackendRunOptions,
     ) -> anyhow::Result<RunResult> {
+        // Provision the image rootfs into the guest so the run is isolated in
+        // that rootfs rather than exec'd raw in the guest.
+        self.ensure_image(&config.image).await?;
+
         let spec = Self::container_spec(&config);
         match self.client()?.guest_request(GuestRequest::RunContainer {
             spec,

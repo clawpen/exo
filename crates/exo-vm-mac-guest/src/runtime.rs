@@ -240,9 +240,20 @@ impl GuestRuntime {
         let runtime_rootfs = if image_rootfs.exists() {
             #[cfg(target_os = "linux")]
             {
+                // Prefer an overlay so per-container writes stay isolated, but the
+                // minimal guest kernel may lack overlayfs (ENODEV). Fall back to
+                // running directly in the image rootfs so the container still runs
+                // isolated in its own filesystem.
                 let layout = self.overlay_layout(&record.name, &spec.image);
-                self.mount_overlay(&layout)?;
-                layout.merged
+                match self.mount_overlay(&layout) {
+                    Ok(()) => layout.merged,
+                    Err(e) => {
+                        eprintln!(
+                            "overlay unavailable ({e}); running directly in image rootfs"
+                        );
+                        image_rootfs.clone()
+                    }
+                }
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -630,27 +641,50 @@ fn command_in_guest(spec: &ContainerSpec) -> Result<Command> {
 fn command_in_rootfs(rootfs: &Path, spec: &ContainerSpec) -> Result<Command> {
     #[cfg(target_os = "linux")]
     {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::process::CommandExt;
+
         let (program, args) = spec
             .command
             .split_first()
             .ok_or_else(|| anyhow::anyhow!("no command specified"))?;
-        let mut cmd = Command::new("chroot");
-        cmd.arg(rootfs);
-        if !spec.workdir.is_empty() && spec.workdir != "/" {
-            cmd.args(["/bin/sh", "-lc"]);
-            let shell = format!(
-                "cd {} && exec {}",
-                shell_quote(&spec.workdir),
-                std::iter::once(program.as_str())
-                    .chain(args.iter().map(String::as_str))
-                    .map(shell_quote)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            cmd.arg(shell);
+
+        // chroot(2) into the image rootfs from the child right before exec, rather
+        // than depending on a `chroot` binary existing in the guest. The target
+        // program is then resolved by execvp inside the new root, so set a sane
+        // in-container PATH.
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        cmd.env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
+
+        let root_c = CString::new(rootfs.as_os_str().as_bytes())
+            .context("rootfs path contains NUL")?;
+        let workdir = if spec.workdir.is_empty() || spec.workdir == "/" {
+            "/".to_string()
         } else {
-            cmd.arg(program);
-            cmd.args(args);
+            spec.workdir.clone()
+        };
+        let workdir_c = CString::new(workdir).context("workdir contains NUL")?;
+
+        // SAFETY: only async-signal-safe libc calls in the pre_exec hook; the
+        // CStrings are allocated before the fork and moved in.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::chroot(root_c.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::chdir(workdir_c.as_ptr()) != 0 {
+                    // Fall back to root of the new filesystem.
+                    if libc::chdir(b"/\0".as_ptr() as *const libc::c_char) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
         }
         Ok(cmd)
     }
