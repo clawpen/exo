@@ -1072,7 +1072,8 @@ fn run_with_executor_config_value(
             run_to_completion_with_observer(orchestrator, &mut executor, 100, observer)
         }
         ExecutorConfig::Builtin => {
-            let mut executor = BuiltinExecutor::new();
+            let mut executor = BuiltinExecutor::new()
+                .with_criteria(orchestrator.state().directive.success_criteria.clone());
             run_to_completion_with_observer(orchestrator, &mut executor, 100, observer)
         }
     }

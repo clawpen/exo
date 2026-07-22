@@ -15,8 +15,10 @@ pub use llm::{
     into_provider, LlmConfig, LlmProvider, LlmRequest, LlmResponse, OpenAiCompatibleProvider,
 };
 pub use orchestrator::{
-    default_agent_roles, status_counts, AgentReport, AgentRole, AgentTask, OrchestrationState,
-    OrchestrationStatus, Orchestrator, OrchestratorDecision, PrimeDirective, TaskStatus,
+    default_agent_roles, status_counts, AgentReport, AgentRole, AgentTask, CriterionAssessment,
+    InspectionVerdict, OrchestrationState, OrchestrationStatus, Orchestrator,
+    OrchestratorDecision, PrimeDirective, TaskStatus, Verdict, VerdictConfidence,
+    VerdictRouteHint,
 };
 pub use protocol::{AgentConfig, AgentMessage, HostMessage, ToolDefinition, ToolPermission};
 pub use run_store::{new_run_id, MailboxEvent, RunEvent, RunRecord, RunStore};

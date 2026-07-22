@@ -52,6 +52,12 @@ pub enum TaskStatus {
     Succeeded,
     Failed,
     Blocked,
+    /// The agent ran out of turns/tokens before finishing.
+    ///
+    /// Distinct from both `Succeeded` (it did NOT finish) and `Failed` (its work
+    /// so far is real and worth keeping). The caller should resume it with a
+    /// bigger budget rather than accept it or throw the work away.
+    Incomplete,
 }
 
 /// Report produced by an agent after receiving a prompt.
@@ -74,6 +80,74 @@ pub struct AgentReport {
     /// Optional token usage reported by the agent's LLM worker.
     #[serde(default)]
     pub usage: Option<TokenUsage>,
+    /// Structured verdict, required from the inspector (verifier) role.
+    ///
+    /// The inspector also writes `verdict.json` to the workspace as the
+    /// human-facing artifact; this field carries the same object through the
+    /// report channel so the coordinator can validate and record it without
+    /// knowing where the workspace lives.
+    #[serde(default)]
+    pub verdict: Option<InspectionVerdict>,
+}
+
+/// The inspector's verdict on worker output. Serialized kebab-case to match
+/// the `verdict.json` contract ("pass", "fail-fixable", "fail-escalate").
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    /// Output meets contract; route to the conductor for integration.
+    Pass,
+    /// Specific, fixable defects; retry the same worker with the diagnosis.
+    FailFixable,
+    /// The task was mis-specced or beyond the worker tier; the conductor
+    /// must re-decompose rather than retry.
+    FailEscalate,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerdictConfidence {
+    High,
+    /// The inspector could not verify everything. Treated as fail-escalate
+    /// by the conductor regardless of the verdict field.
+    Low,
+}
+
+/// Assessment of one success criterion. `criterion` must be copied verbatim
+/// from the directive; `evidence` must cite something checkable (a command run
+/// and its result, or a file path and what was verified in it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CriterionAssessment {
+    pub criterion: String,
+    pub met: bool,
+    #[serde(default)]
+    pub evidence: String,
+}
+
+/// Where the verdict says the work should go next.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VerdictRouteHint {
+    /// For fail-fixable: the diagnosis restated as an actionable worker task.
+    #[serde(default)]
+    pub retry_task: Option<String>,
+    /// For fail-escalate: what the original spec got wrong.
+    #[serde(default)]
+    pub respec: Option<String>,
+}
+
+/// Structured verdict returned by the inspector role (see `verdict.json`
+/// contract in Orchestre's docs/INSPECTOR-PROTOCOL.md).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InspectionVerdict {
+    pub verdict: Verdict,
+    #[serde(default)]
+    pub criteria: Vec<CriterionAssessment>,
+    #[serde(default)]
+    pub diagnosis: Option<String>,
+    #[serde(default)]
+    pub route_hint: Option<VerdictRouteHint>,
+    #[serde(default)]
+    pub confidence: Option<VerdictConfidence>,
 }
 
 /// Token usage for a single agent prompt.
@@ -113,6 +187,9 @@ pub struct OrchestrationState {
     pub reports: Vec<AgentReport>,
     pub round: u32,
     pub status: OrchestrationStatus,
+    /// Latest validated inspector verdict, if the verifier role has produced one.
+    #[serde(default)]
+    pub verdict: Option<InspectionVerdict>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +240,7 @@ impl Orchestrator {
                 reports: vec![],
                 round: 0,
                 status: OrchestrationStatus::Running,
+                verdict: None,
             },
             ready_queue,
         }
@@ -190,6 +268,13 @@ impl Orchestrator {
                 if task.attempts > 0 {
                     task.attempts -= 1;
                 }
+            }
+            // An Incomplete task ran out of budget mid-flight. It is always worth
+            // resuming (unlike Failed/Blocked, which only requeue when the previous
+            // run ended badly), because its partial work is real and the only thing
+            // it needs is more turns.
+            if task.status == TaskStatus::Incomplete {
+                task.status = TaskStatus::Pending;
             }
             if should_retry_terminal_tasks
                 && matches!(task.status, TaskStatus::Failed | TaskStatus::Blocked)
@@ -253,7 +338,50 @@ impl Orchestrator {
     }
 
     /// Record an agent report and schedule follow-up prompts if needed.
-    pub fn record_report(&mut self, report: AgentReport) {
+    pub fn record_report(&mut self, mut report: AgentReport) {
+        // An agent that claims success but produced no summary, no artifacts, and
+        // no satisfied criteria did nothing. Recording that as success is the most
+        // dishonest thing this coordinator can do: it hides the failure, poisons
+        // goal evaluation, and sends the caller hunting for a bug that isn't there.
+        // Call it what it is and let the retry path deal with it.
+        if is_empty_report(&report) {
+            report.status = TaskStatus::Failed;
+            report.summary = format!(
+                "agent returned an empty report (no summary, artifacts, or satisfied criteria) \
+                 - it most likely did nothing; check the agent's stdout/stderr logs"
+            );
+        } else if is_truncated_report(&report) {
+            // The agent stopped because it ran out of turns, not because it was done.
+            // Reporting that as success is how a half-finished job gets accepted.
+            report.status = TaskStatus::Incomplete;
+        } else if report.status == TaskStatus::Succeeded && self.is_inspector_task(&report.task_id) {
+            // Inspector enforcement. A verification that claims success but carries
+            // no structured verdict — or a verdict that violates the contract —
+            // is the soft-review failure mode: it rubber-stamps work and teaches
+            // the conductor to trust it. Same rule as the empty-report gate:
+            // record it as the failure it is and let the retry path deal with it.
+            match &report.verdict {
+                Some(verdict) => match validate_verdict(verdict, &self.state.directive) {
+                    Ok(()) => self.state.verdict = Some(verdict.clone()),
+                    Err(reason) => {
+                        report.status = TaskStatus::Failed;
+                        report.summary = format!(
+                            "inspector verdict invalid: {}. The verdict must follow the \
+                             verdict.json contract (see the inspector prompt).",
+                            reason
+                        );
+                    }
+                },
+                None => {
+                    report.status = TaskStatus::Failed;
+                    report.summary =
+                        "inspector produced no verdict: a successful verification must return \
+                         a structured verdict object (and write verdict.json to the workspace)"
+                            .to_string();
+                }
+            }
+        }
+
         if let Some(task) = self.task_mut(&report.task_id) {
             task.status = report.status;
         }
@@ -292,6 +420,19 @@ impl Orchestrator {
         self.state.tasks.iter_mut().find(|task| task.id == id)
     }
 
+    /// Is this task assigned to the inspector (verifier) role?
+    fn is_inspector_task(&self, task_id: &str) -> bool {
+        let Some(task) = self.state.tasks.iter().find(|t| t.id == task_id) else {
+            return false;
+        };
+        self.state
+            .agents
+            .iter()
+            .find(|a| a.id == task.agent_id)
+            .map(is_inspector_role)
+            .unwrap_or(false)
+    }
+
     fn retry_existing(&mut self, task_id: &str) -> bool {
         let Some(task) = self.task_mut(task_id) else {
             return false;
@@ -328,6 +469,116 @@ impl Orchestrator {
             .iter()
             .all(|criterion| criterion_satisfied_by_reports(criterion, &self.state.reports))
     }
+}
+
+/// The inspector role: the cold-context verifier. Identified by id or specialty
+/// so custom role sets keep working as long as one role owns "verification".
+fn is_inspector_role(agent: &AgentRole) -> bool {
+    agent.id == "verifier" || agent.specialty == "verification"
+}
+
+/// Check a verdict against the contract. Returns why it's invalid, for the
+/// failure summary the coordinator records.
+fn validate_verdict(verdict: &InspectionVerdict, directive: &PrimeDirective) -> Result<(), String> {
+    match verdict.verdict {
+        Verdict::Pass => {
+            if directive.success_criteria.is_empty() {
+                // No criteria to cross-check; a pass needs at least one evidenced
+                // assessment to mean anything.
+                if verdict.criteria.iter().all(|c| c.evidence.trim().is_empty()) {
+                    return Err(
+                        "pass verdict carries no evidence for any assessed criterion".to_string()
+                    );
+                }
+                return Ok(());
+            }
+            for criterion in &directive.success_criteria {
+                let normalized = normalize_text(criterion);
+                let assessment = verdict
+                    .criteria
+                    .iter()
+                    .find(|a| criteria_equivalent(&normalized, &a.criterion));
+                match assessment {
+                    None => {
+                        return Err(format!(
+                            "pass verdict does not assess criterion: {}",
+                            criterion
+                        ))
+                    }
+                    Some(a) if !a.met => {
+                        return Err(format!(
+                            "pass verdict marks criterion unmet: {}",
+                            criterion
+                        ))
+                    }
+                    Some(a) if a.evidence.trim().is_empty() => {
+                        return Err(format!(
+                            "criterion assessed without evidence: {}",
+                            criterion
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        Verdict::FailFixable => {
+            let actionable = verdict
+                .route_hint
+                .as_ref()
+                .and_then(|h| h.retry_task.as_ref())
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
+            if actionable {
+                Ok(())
+            } else {
+                Err("fail-fixable verdict requires route_hint.retry_task".to_string())
+            }
+        }
+        Verdict::FailEscalate => {
+            let explained = verdict
+                .route_hint
+                .as_ref()
+                .and_then(|h| h.respec.as_ref())
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
+            if explained {
+                Ok(())
+            } else {
+                Err("fail-escalate verdict requires route_hint.respec".to_string())
+            }
+        }
+    }
+}
+
+/// A report that claims success while carrying no evidence of work.
+///
+/// This is the signature of an agent that never ran, never reached the model, or
+/// silently gave up. It must never be treated as success.
+fn is_empty_report(report: &AgentReport) -> bool {    report.status == TaskStatus::Succeeded
+        && report.summary.trim().is_empty()
+        && report.artifacts.is_empty()
+        && report.satisfied_criteria.is_empty()
+}
+
+/// A report from an agent that stopped on its turn/token budget rather than finishing.
+///
+/// Agents signal this in prose rather than structurally, so we match on the phrasing
+/// they actually use. A false positive here is cheap (the caller resumes work that was
+/// already done); a false negative is expensive (a half-finished job is accepted as
+/// complete), so lean towards catching it.
+fn is_truncated_report(report: &AgentReport) -> bool {
+    if report.status != TaskStatus::Succeeded {
+        return false;
+    }
+    let s = report.summary.to_lowercase();
+    const CAP_HIT_PHRASES: [&str; 4] = [
+        "may need more iterations",
+        "need more iterations",
+        "please continue if needed",
+        "ran out of turns",
+    ];
+    CAP_HIT_PHRASES.iter().any(|p| s.contains(p))
 }
 
 fn criterion_satisfied_by_reports(criterion: &str, reports: &[AgentReport]) -> bool {
@@ -378,6 +629,10 @@ fn build_agent_prompt(
     agent: &AgentRole,
     extra_context: &[String],
 ) -> String {
+    if is_inspector_role(agent) {
+        return build_inspector_prompt(directive, agent, extra_context);
+    }
+
     let mut prompt = String::new();
     prompt.push_str("Prime directive:\n");
     prompt.push_str(&directive.objective);
@@ -413,6 +668,111 @@ fn build_agent_prompt(
     prompt
 }
 
+/// Prompt template for the inspector role.
+///
+/// The inspector is the system's lie detector: a cold-context agent that
+/// verifies worker output against the original intent and returns a structured
+/// verdict, never vibes. Three properties are load-bearing and must survive any
+/// edit of this template:
+///
+/// 1. Cold context is stated explicitly — the inspector has not seen the work
+///    or any discussion of it, and must trust nothing except its own checks.
+/// 2. Intent is injected verbatim (objective, criteria, constraints) — never a
+///    paraphrase, so no information is lost at the handoff.
+/// 3. Grading is evidence-gated — the inspector runs builds/tests/reads and
+///    cites what it checked; "looks good" is not evidence.
+fn build_inspector_prompt(
+    directive: &PrimeDirective,
+    agent: &AgentRole,
+    extra_context: &[String],
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are the Inspector. You did NOT do the work under review and have not seen \
+         any prior discussion of it. You receive only the original objective, the success \
+         criteria, the constraints, and the workspace containing the workers' artifacts. \
+         Trust nothing in the worker reports except as pointers to evidence you check \
+         yourself.\n",
+    );
+
+    prompt.push_str("\nObjective (verbatim):\n");
+    prompt.push_str(&directive.objective);
+    prompt.push('\n');
+
+    if !directive.success_criteria.is_empty() {
+        prompt.push_str(
+            "\nSuccess criteria (verbatim — assess each one exactly as written; \
+             do not paraphrase):\n",
+        );
+        for item in &directive.success_criteria {
+            prompt.push_str(&format!("- {}\n", item));
+        }
+    }
+    if !directive.constraints.is_empty() {
+        prompt.push_str("\nConstraints (verbatim):\n");
+        for item in &directive.constraints {
+            prompt.push_str(&format!("- {}\n", item));
+        }
+    }
+    if !extra_context.is_empty() {
+        prompt.push_str("\nContext:\n");
+        for item in extra_context {
+            prompt.push_str(&format!("- {}\n", item));
+        }
+    }
+
+    prompt.push_str(
+        "\nMethod:\n\
+         - Verify with evidence, not vibes. Use your tools: run the build, run the tests, \
+         read the files. Each criterion needs checkable evidence: a command you ran and \
+         its result, or a file path and what you verified in it.\n\
+         - \"Looks good\" is not evidence. If you cannot verify a criterion, mark it \
+         unmet and set confidence to \"low\".\n",
+    );
+
+    prompt.push_str(
+        "\nVerdicts:\n\
+         - \"pass\": every criterion met with evidence. The work is ready to integrate.\n\
+         - \"fail-fixable\": the work is wrong in specific, fixable ways. Attach a \
+         diagnosis and restate it as an actionable task for the worker \
+         (route_hint.retry_task).\n\
+         - \"fail-escalate\": the task itself was mis-specified, ambiguous, or missing \
+         context — retrying the same worker will not help. Explain what the spec got \
+         wrong (route_hint.respec).\n\
+         Choose fail-escalate over fail-fixable when the failure is the spec's fault, \
+         not the worker's.\n",
+    );
+
+    prompt.push_str(&format!(
+        "\nOutput contract:\n\
+         1. Write a file named verdict.json at the workspace root with this shape:\n\
+         {{\n\
+         \x20 \"verdict\": \"pass\" | \"fail-fixable\" | \"fail-escalate\",\n\
+         \x20 \"criteria\": [{{\"criterion\": \"<verbatim>\", \"met\": true|false, \
+         \"evidence\": \"...\"}}],\n\
+         \x20 \"diagnosis\": \"...\",\n\
+         \x20 \"route_hint\": {{\"retry_task\": \"...\", \"respec\": \"...\"}},\n\
+         \x20 \"confidence\": \"high\" | \"low\"\n\
+         }}\n\
+         \x20 - criterion strings must be copied verbatim from the success criteria above.\n\
+         \x20 - fail-fixable requires route_hint.retry_task; fail-escalate requires \
+         route_hint.respec.\n\
+         2. In your report JSON, include the same object under a \"verdict\" key, list \
+         verdict.json in \"artifacts\", and do NOT claim any satisfied_criteria unless \
+         the verdict is \"pass\" and you verified them yourself.\n\
+         3. Return a concise report with: status, your verdict in one line, what you \
+         checked, and blockers if any.\n",
+    ));
+
+    // The role line stays at the end so template changes don't bury the
+    // assignment; keep agent.name/specialty visible for custom role sets.
+    prompt.push_str(&format!(
+        "\n(Your role slot: {} — {}.)\n",
+        agent.name, agent.specialty
+    ));
+    prompt
+}
+
 /// Useful default agent set for local Exo projects.
 pub fn default_agent_roles() -> Vec<AgentRole> {
     vec![
@@ -444,6 +804,7 @@ pub fn status_counts(state: &OrchestrationState) -> HashMap<&'static str, usize>
             TaskStatus::Succeeded => "succeeded",
             TaskStatus::Failed => "failed",
             TaskStatus::Blocked => "blocked",
+            TaskStatus::Incomplete => "incomplete",
         };
         *map.entry(key).or_insert(0) += 1;
     }
@@ -475,6 +836,153 @@ mod tests {
         assert!(orch.state().tasks[0].prompt.contains("keep daemon light"));
     }
 
+    /// Regression: an agent that reports success with nothing to show did nothing.
+    /// This exact shape (succeeded + empty summary + no artifacts + no criteria) is
+    /// what silently wasted an hour of debugging, so pin it hard.
+    #[test]
+    fn empty_report_is_recorded_as_failure_not_success() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task.id,
+            _ => panic!("expected prompt"),
+        };
+
+        orch.record_report(AgentReport {
+            task_id: task_id.clone(),
+            status: TaskStatus::Succeeded, // the agent *claims* success
+            summary: String::new(),        // ...but shows no work
+            artifacts: vec![],
+            followups: vec![],
+            satisfied_criteria: vec![],
+            usage: None,
+            verdict: None,
+        });
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(
+            report.status,
+            TaskStatus::Failed,
+            "an empty report must never be recorded as success"
+        );
+        assert!(
+            report.summary.contains("empty report"),
+            "the summary must say why: {}",
+            report.summary
+        );
+
+        // The goal must not be considered satisfied off the back of it.
+        assert!(!orch.goal_satisfied());
+    }
+
+    /// Regression: an agent that stops on its turn cap has NOT finished. This is the
+    /// exact summary exo-agent emits, and it used to be recorded as `succeeded`,
+    /// silently accepting a half-written subsystem as done.
+    #[test]
+    fn cap_hit_report_is_incomplete_not_success() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task.id,
+            _ => panic!("expected prompt"),
+        };
+
+        orch.record_report(AgentReport {
+            task_id: task_id.clone(),
+            status: TaskStatus::Succeeded, // the agent claims success...
+            summary: "I've completed the available actions but may need more iterations \
+                      to finish. Please continue if needed."
+                .to_string(), // ...while saying it ran out of turns
+            artifacts: vec!["Sources/MechCore/MAHeatModel.m".to_string()],
+            followups: vec![],
+            satisfied_criteria: vec![],
+            usage: None,
+            verdict: None,
+        });
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(
+            report.status,
+            TaskStatus::Incomplete,
+            "hitting the turn cap must not be reported as success"
+        );
+        // Partial work is preserved, not discarded.
+        assert_eq!(report.artifacts.len(), 1);
+        assert!(!orch.goal_satisfied());
+    }
+
+    /// An Incomplete task must be resumable: its partial work is real, it just
+    /// needs more budget.
+    #[test]
+    fn incomplete_task_is_requeued_on_resume() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task.id,
+            _ => panic!("expected prompt"),
+        };
+        orch.record_report(AgentReport {
+            task_id: task_id.clone(),
+            status: TaskStatus::Succeeded,
+            summary: "may need more iterations".to_string(),
+            artifacts: vec![],
+            followups: vec![],
+            satisfied_criteria: vec![],
+            usage: None,
+            verdict: None,
+        });
+
+        // Resume from the persisted state, as `orchestrate-resume` would.
+        let resumed = Orchestrator::from_state(orch.state().clone());
+        let task = resumed
+            .state()
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .expect("task exists");
+        assert_eq!(
+            task.status,
+            TaskStatus::Pending,
+            "an incomplete task must be re-queued so it can finish"
+        );
+    }
+
+    /// The guard must not fire on a legitimate success that simply has no artifacts.
+    #[test]
+    fn report_with_summary_but_no_artifacts_is_still_success() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => task.id,
+            _ => panic!("expected prompt"),
+        };
+
+        orch.record_report(AgentReport {
+            task_id: task_id.clone(),
+            status: TaskStatus::Succeeded,
+            summary: "planning complete".to_string(),
+            artifacts: vec![],
+            followups: vec![],
+            satisfied_criteria: vec![],
+            usage: None,
+            verdict: None,
+        });
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Succeeded);
+    }
+
     #[test]
     fn records_reports_and_detects_success() {
         let mut orch = Orchestrator::new(directive(), default_agent_roles());
@@ -497,6 +1005,11 @@ mod tests {
                 followups: vec![],
                 satisfied_criteria: vec![],
                 usage: None,
+                verdict: if i == 3 {
+                    Some(passing_verdict_for_directive(&directive()))
+                } else {
+                    None
+                },
             });
         }
         assert!(matches!(
@@ -520,6 +1033,7 @@ mod tests {
             followups: vec![],
             satisfied_criteria: vec![],
             usage: None,
+            verdict: None,
         });
 
         assert!(!matches!(
@@ -547,6 +1061,7 @@ mod tests {
                 "verification complete".to_string(),
             ],
             usage: None,
+            verdict: None,
         });
 
         assert!(matches!(
@@ -570,6 +1085,7 @@ mod tests {
             followups: vec![],
             satisfied_criteria: vec![],
             usage: None,
+            verdict: None,
         });
         let retry_id = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task.id,
@@ -593,10 +1109,276 @@ mod tests {
             followups: vec!["implementation should add IPC".to_string()],
             satisfied_criteria: vec![],
             usage: None,
+            verdict: None,
         });
         assert!(orch.state().tasks.iter().any(|task| {
             task.depends_on == vec![task_id.clone()] && task.prompt.contains("Follow-up requested")
         }));
+    }
+
+    fn passing_verdict_for_directive(directive: &PrimeDirective) -> InspectionVerdict {
+        InspectionVerdict {
+            verdict: Verdict::Pass,
+            criteria: directive
+                .success_criteria
+                .iter()
+                .map(|c| CriterionAssessment {
+                    criterion: c.clone(),
+                    met: true,
+                    evidence: "ran the tests; all pass".to_string(),
+                })
+                .collect(),
+            diagnosis: None,
+            route_hint: None,
+            confidence: Some(VerdictConfidence::High),
+        }
+    }
+
+    /// Drive the coordinator to the verifier task and return its id.
+    fn prompt_verifier(orch: &mut Orchestrator) -> String {
+        // Complete planner and builder so the verifier task is next.
+        for summary in ["planning complete", "implementation complete"] {
+            let task_id = match orch.next() {
+                OrchestratorDecision::PromptAgent { task } => task.id,
+                other => panic!("expected prompt, got {:?}", other),
+            };
+            orch.record_report(AgentReport {
+                task_id,
+                status: TaskStatus::Succeeded,
+                summary: summary.to_string(),
+                artifacts: vec![],
+                followups: vec![],
+                satisfied_criteria: vec![],
+                usage: None,
+                verdict: None,
+            });
+        }
+        match orch.next() {
+            OrchestratorDecision::PromptAgent { task } => {
+                assert_eq!(task.agent_id, "verifier");
+                task.id
+            }
+            other => panic!("expected verifier prompt, got {:?}", other),
+        }
+    }
+
+    fn verifier_report(task_id: &str, verdict: Option<InspectionVerdict>) -> AgentReport {
+        AgentReport {
+            task_id: task_id.to_string(),
+            status: TaskStatus::Succeeded,
+            summary: "verification complete".to_string(),
+            artifacts: vec!["verdict.json".to_string()],
+            followups: vec![],
+            satisfied_criteria: vec![],
+            usage: None,
+            verdict,
+        }
+    }
+
+    /// Regression: the soft-review failure mode. A verification that claims
+    /// success without a structured verdict rubber-stamps the work and teaches
+    /// the conductor to trust it; record it as the failure it is.
+    #[test]
+    fn verifier_success_without_verdict_is_failure() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        orch.record_report(verifier_report(&task_id, None));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert!(
+            report.summary.contains("no verdict"),
+            "the summary must say why: {}",
+            report.summary
+        );
+        assert!(orch.state().verdict.is_none());
+    }
+
+    /// A pass verdict that doesn't cover every success criterion is invalid.
+    #[test]
+    fn pass_verdict_missing_a_criterion_is_failure() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        let mut verdict = passing_verdict_for_directive(&directive());
+        verdict.criteria.pop(); // drop the last criterion's assessment
+
+        orch.record_report(verifier_report(&task_id, Some(verdict)));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert!(
+            report.summary.contains("does not assess criterion"),
+            "the summary must say why: {}",
+            report.summary
+        );
+    }
+
+    /// Evidence-gated grading: a met criterion with empty evidence counts as unmet.
+    #[test]
+    fn pass_verdict_with_empty_evidence_is_failure() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        let mut verdict = passing_verdict_for_directive(&directive());
+        verdict.criteria[0].evidence = "  ".to_string();
+
+        orch.record_report(verifier_report(&task_id, Some(verdict)));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert!(
+            report.summary.contains("without evidence"),
+            "the summary must say why: {}",
+            report.summary
+        );
+    }
+
+    /// A valid pass verdict is recorded on the run state and the task succeeds.
+    #[test]
+    fn valid_pass_verdict_is_recorded_on_state() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        orch.record_report(verifier_report(
+            &task_id,
+            Some(passing_verdict_for_directive(&directive())),
+        ));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Succeeded);
+        assert_eq!(
+            orch.state().verdict.as_ref().map(|v| v.verdict),
+            Some(Verdict::Pass)
+        );
+    }
+
+    /// fail-fixable means the inspection happened and the work fell short; the
+    /// verification task itself succeeded. It must carry a retry_task.
+    #[test]
+    fn fail_fixable_verdict_succeeds_and_is_recorded() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        let verdict = InspectionVerdict {
+            verdict: Verdict::FailFixable,
+            criteria: vec![],
+            diagnosis: Some("builder skipped error handling in parser".to_string()),
+            route_hint: Some(VerdictRouteHint {
+                retry_task: Some("add error handling to parser::parse".to_string()),
+                respec: None,
+            }),
+            confidence: Some(VerdictConfidence::High),
+        };
+        orch.record_report(verifier_report(&task_id, Some(verdict)));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Succeeded);
+        assert_eq!(
+            orch.state().verdict.as_ref().map(|v| v.verdict),
+            Some(Verdict::FailFixable)
+        );
+    }
+
+    #[test]
+    fn fail_fixable_without_retry_task_is_failure() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        let verdict = InspectionVerdict {
+            verdict: Verdict::FailFixable,
+            criteria: vec![],
+            diagnosis: Some("something is wrong".to_string()),
+            route_hint: None,
+            confidence: None,
+        };
+        orch.record_report(verifier_report(&task_id, Some(verdict)));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert!(
+            report.summary.contains("retry_task"),
+            "the summary must say why: {}",
+            report.summary
+        );
+    }
+
+    #[test]
+    fn fail_escalate_without_respec_is_failure() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        let verdict = InspectionVerdict {
+            verdict: Verdict::FailEscalate,
+            criteria: vec![],
+            diagnosis: Some("task was impossible as specced".to_string()),
+            route_hint: None,
+            confidence: None,
+        };
+        orch.record_report(verifier_report(&task_id, Some(verdict)));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(report.status, TaskStatus::Failed);
+        assert!(
+            report.summary.contains("respec"),
+            "the summary must say why: {}",
+            report.summary
+        );
+    }
+
+    /// The verifier must get the inspector template (cold context, verbatim
+    /// intent, verdict contract); other roles keep the generic template.
+    #[test]
+    fn verifier_gets_inspector_prompt() {
+        let orch = Orchestrator::new(directive(), default_agent_roles());
+        let verifier_prompt = &orch.state().tasks[2].prompt;
+        assert!(verifier_prompt.contains("You are the Inspector"));
+        assert!(verifier_prompt.contains("verdict.json"));
+        assert!(verifier_prompt.contains("fail-escalate"));
+        // Intent injected verbatim.
+        assert!(verifier_prompt.contains("Ship a lightweight Exo agent workflow"));
+        assert!(verifier_prompt.contains("planning complete"));
+        assert!(verifier_prompt.contains("keep daemon light"));
+
+        let planner_prompt = &orch.state().tasks[0].prompt;
+        assert!(!planner_prompt.contains("You are the Inspector"));
+        assert!(planner_prompt.contains("Prime directive"));
     }
 
     #[test]
@@ -614,6 +1396,7 @@ mod tests {
             followups: vec![],
             satisfied_criteria: vec![],
             usage: None,
+            verdict: None,
         });
         let second = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task,

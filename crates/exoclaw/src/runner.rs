@@ -126,6 +126,7 @@ pub fn run_to_completion_with_observer(
                         followups: vec![],
                         satisfied_criteria: vec![],
                         usage: None,
+                        verdict: None,
                     },
                 };
                 orchestrator.record_report(report.clone());
@@ -147,18 +148,28 @@ fn aggregate_usage(usages: impl Iterator<Item = crate::orchestrator::TokenUsage>
 pub struct BuiltinExecutor {
     /// Optional per-agent summary overrides keyed by `agent_id`.
     pub summaries: HashMap<String, String>,
+    /// Success criteria of the directive being run. The executor needs these
+    /// to synthesize a contract-valid inspector verdict for the verifier role;
+    /// without them a dry run would always fail the verdict gate.
+    pub criteria: Vec<String>,
 }
 
 impl BuiltinExecutor {
     pub fn new() -> Self {
         Self {
             summaries: HashMap::new(),
+            criteria: vec![],
         }
     }
 
     pub fn with_summary(mut self, agent_id: &str, summary: &str) -> Self {
         self.summaries
             .insert(agent_id.to_string(), summary.to_string());
+        self
+    }
+
+    pub fn with_criteria(mut self, criteria: Vec<String>) -> Self {
+        self.criteria = criteria;
         self
     }
 }
@@ -176,6 +187,28 @@ impl AgentExecutor for BuiltinExecutor {
             .get(&task.agent_id)
             .cloned()
             .unwrap_or_else(|| format!("{} completed", task.agent_id));
+        // The verifier role must return a structured verdict or the coordinator
+        // records its report as a failure. Synthesize a passing one from the
+        // criteria this executor was configured with.
+        let verdict = if task.agent_id == "verifier" {
+            Some(crate::orchestrator::InspectionVerdict {
+                verdict: crate::orchestrator::Verdict::Pass,
+                criteria: self
+                    .criteria
+                    .iter()
+                    .map(|c| crate::orchestrator::CriterionAssessment {
+                        criterion: c.clone(),
+                        met: true,
+                        evidence: "builtin executor (dry run): no live agent".to_string(),
+                    })
+                    .collect(),
+                diagnosis: None,
+                route_hint: None,
+                confidence: Some(crate::orchestrator::VerdictConfidence::Low),
+            })
+        } else {
+            None
+        };
         Ok(AgentReport {
             task_id: task.id.clone(),
             status: TaskStatus::Succeeded,
@@ -184,6 +217,7 @@ impl AgentExecutor for BuiltinExecutor {
             followups: vec![],
             satisfied_criteria: vec![format!("{} completed", task.agent_id)],
             usage: None,
+            verdict,
         })
     }
 }
@@ -264,6 +298,10 @@ impl AgentExecutor for CommandAgentExecutor {
         }
         let status = child.wait()?;
 
+        // Persist the agent's raw output. Without this, a misbehaving agent leaves
+        // nothing to diagnose: its tool calls, API errors and reasoning are lost.
+        write_task_logs(&task.id, &stdout, &stderr);
+
         for line in stdout
             .lines()
             .rev()
@@ -299,6 +337,7 @@ impl AgentExecutor for CommandAgentExecutor {
             followups: vec![],
             satisfied_criteria: vec![],
             usage: None,
+            verdict: None,
         })
     }
 }
@@ -375,6 +414,27 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// Write an agent's raw stdout/stderr to `$EXO_RUN_LOG_DIR/<task_id>.{out,err}`.
+///
+/// Opt-in via the env var so the executor stays usable in tests and one-off runs.
+/// Best-effort: a logging failure must never fail the agent task itself.
+fn write_task_logs(task_id: &str, stdout: &str, stderr: &str) {
+    let Ok(dir) = std::env::var("EXO_RUN_LOG_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[exoclaw] could not create log dir {:?}: {}", dir, e);
+        return;
+    }
+    for (ext, contents) in [("out", stdout), ("err", stderr)] {
+        let path = dir.join(format!("{}.{}", task_id, ext));
+        if let Err(e) = std::fs::write(&path, contents) {
+            eprintln!("[exoclaw] could not write {:?}: {}", path, e);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,9 +456,26 @@ mod tests {
     #[test]
     fn builtin_executor_runs_to_success() {
         let mut orch = Orchestrator::new(directive(), default_agent_roles());
-        let mut exec = BuiltinExecutor::new();
+        let mut exec = BuiltinExecutor::new().with_criteria(directive().success_criteria);
         let outcome = run_to_completion(&mut orch, &mut exec, 50).unwrap();
         assert_eq!(outcome.status, OrchestrationStatus::Succeeded);
+    }
+
+    fn passing_verdict(criteria: &[String]) -> crate::orchestrator::InspectionVerdict {
+        crate::orchestrator::InspectionVerdict {
+            verdict: crate::orchestrator::Verdict::Pass,
+            criteria: criteria
+                .iter()
+                .map(|c| crate::orchestrator::CriterionAssessment {
+                    criterion: c.clone(),
+                    met: true,
+                    evidence: "checked".to_string(),
+                })
+                .collect(),
+            diagnosis: None,
+            route_hint: None,
+            confidence: Some(crate::orchestrator::VerdictConfidence::High),
+        }
     }
 
     struct FlakyExecutor {
@@ -417,6 +494,7 @@ mod tests {
                     followups: vec![],
                     satisfied_criteria: vec![],
                     usage: None,
+                    verdict: None,
                 });
             }
             Ok(AgentReport {
@@ -427,6 +505,11 @@ mod tests {
                 followups: vec![],
                 satisfied_criteria: vec![format!("{} complete", task.agent_id)],
                 usage: None,
+                verdict: if task.agent_id == "verifier" {
+                    Some(passing_verdict(&directive().success_criteria))
+                } else {
+                    None
+                },
             })
         }
     }
@@ -442,11 +525,16 @@ mod tests {
     #[test]
     fn command_executor_reads_report_json() {
         let mut orch = Orchestrator::new(directive(), default_agent_roles());
-        // Each agent echoes a success report with a matching summary keyword.
-        let template = r#"printf '{"task_id":"","status":"succeeded","summary":"%s complete","artifacts":[],"followups":[]}\n' "$EXO_AGENT_ID""#;
+        // Each agent echoes a success report with a matching summary keyword; the
+        // verifier additionally returns a contract-valid structured verdict.
+        let template = r#"if [ "$EXO_AGENT_ID" = verifier ]; then printf '{"task_id":"","status":"succeeded","summary":"verifier complete","artifacts":[],"followups":[],"verdict":{"verdict":"pass","criteria":[{"criterion":"planner complete","met":true,"evidence":"dry run"},{"criterion":"builder complete","met":true,"evidence":"dry run"},{"criterion":"verifier complete","met":true,"evidence":"dry run"}],"confidence":"high"}}\n'; else printf '{"task_id":"","status":"succeeded","summary":"%s complete","artifacts":[],"followups":[]}\n' "$EXO_AGENT_ID"; fi"#;
         let mut exec = CommandAgentExecutor::new(template);
         let outcome = run_to_completion(&mut orch, &mut exec, 50).unwrap();
         assert_eq!(outcome.status, OrchestrationStatus::Succeeded);
+        assert_eq!(
+            orch.state().verdict.as_ref().map(|v| v.verdict),
+            Some(crate::orchestrator::Verdict::Pass)
+        );
     }
 
     #[test]
