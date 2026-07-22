@@ -190,6 +190,12 @@ pub struct OrchestrationState {
     /// Latest validated inspector verdict, if the verifier role has produced one.
     #[serde(default)]
     pub verdict: Option<InspectionVerdict>,
+    /// Workspace directory the agents share. When set, the coordinator reads
+    /// `<workspace>/verdict.json` as a fallback verdict channel for inspector
+    /// reports that don't embed one — agents reliably write the file even when
+    /// they forget the report field. Persisted so resume keeps working.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -241,9 +247,17 @@ impl Orchestrator {
                 round: 0,
                 status: OrchestrationStatus::Running,
                 verdict: None,
+                workspace: None,
             },
             ready_queue,
         }
+    }
+
+    /// Set the shared workspace directory (enables the verdict.json fallback
+    /// channel for inspector reports). Builder-style; call right after `new`.
+    pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
+        self.state.workspace = Some(workspace.into());
+        self
     }
 
     /// Rebuild a coordinator from previously persisted state.
@@ -360,6 +374,14 @@ impl Orchestrator {
             // is the soft-review failure mode: it rubber-stamps work and teaches
             // the conductor to trust it. Same rule as the empty-report gate:
             // record it as the failure it is and let the retry path deal with it.
+            //
+            // Fallback channel: agents reliably *write* verdict.json to the
+            // workspace even when they forget to embed the verdict in their
+            // report JSON (observed in dogfooding). If the workspace is known,
+            // read the file before declaring the verdict missing.
+            if report.verdict.is_none() {
+                report.verdict = self.load_verdict_file();
+            }
             match &report.verdict {
                 Some(verdict) => match validate_verdict(verdict, &self.state.directive) {
                     Ok(()) => self.state.verdict = Some(verdict.clone()),
@@ -433,6 +455,16 @@ impl Orchestrator {
             .unwrap_or(false)
     }
 
+    /// Read and parse `<workspace>/verdict.json`, if a workspace is configured
+    /// and the file exists and parses. Missing/unparseable is None, not an
+    /// error — the caller treats it as "no verdict" and fails the report.
+    fn load_verdict_file(&self) -> Option<InspectionVerdict> {
+        let workspace = self.state.workspace.as_ref()?;
+        let path = std::path::Path::new(workspace).join("verdict.json");
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
+    }
+
     fn retry_existing(&mut self, task_id: &str) -> bool {
         let Some(task) = self.task_mut(task_id) else {
             return false;
@@ -455,6 +487,22 @@ impl Orchestrator {
     }
 
     fn goal_satisfied(&self) -> bool {
+        // When the run includes an inspector, only a validated pass verdict
+        // completes the goal. Anything less lets workers self-certify: the
+        // summary-substring fallback below is trivially satisfied by any
+        // report that merely *quotes* a criterion (observed in dogfooding: a
+        // planner's "builder should report 'code written'" completed the run
+        // before the builder and verifier ever ran). The verdict pass already
+        // cross-checks every criterion with evidence, so it subsumes the
+        // criteria-coverage check. Runs without an inspector role keep the
+        // old behavior.
+        if self.state.agents.iter().any(is_inspector_role) {
+            return matches!(
+                self.state.verdict.as_ref().map(|v| v.verdict),
+                Some(Verdict::Pass)
+            );
+        }
+
         if self.state.directive.success_criteria.is_empty() {
             return self
                 .state
@@ -1042,8 +1090,14 @@ mod tests {
         ));
     }
 
+    /// Regression (dogfood run inspector-dogfood-002): the planner's summary
+    /// quoted all three criteria verbatim ("builder should report 'code
+    /// written'") and the summary-substring fallback marked the run complete
+    /// before the builder and verifier ever ran. With an inspector in the role
+    /// set, ONLY a validated pass verdict completes the goal — worker claims,
+    /// structured or not, never do.
     #[test]
-    fn explicit_satisfied_criteria_can_complete_goal() {
+    fn worker_claims_do_not_complete_goal_when_inspector_present() {
         let mut orch = Orchestrator::new(directive(), default_agent_roles());
         let task_id = match orch.next() {
             OrchestratorDecision::PromptAgent { task } => task.id,
@@ -1064,10 +1118,101 @@ mod tests {
             verdict: None,
         });
 
+        assert!(
+            !matches!(orch.next(), OrchestratorDecision::Succeeded { .. }),
+            "worker claims must not complete the goal; only the inspector's pass verdict does"
+        );
+    }
+
+    /// Regression (dogfood run inspector-dogfood-003): agents reliably WRITE
+    /// verdict.json to the workspace even when they forget to embed the verdict
+    /// in their report JSON. When the workspace is known, the file is a valid
+    /// fallback verdict channel.
+    #[test]
+    fn verdict_json_file_is_fallback_when_report_omits_verdict() {
+        let dir = std::env::temp_dir().join(format!("exoclaw-verdict-fallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let verdict = passing_verdict_for_directive(&directive());
+        std::fs::write(
+            dir.join("verdict.json"),
+            serde_json::to_string_pretty(&verdict).unwrap(),
+        )
+        .unwrap();
+
+        let mut orch = Orchestrator::new(directive(), default_agent_roles())
+            .with_workspace(dir.to_string_lossy().to_string());
+        let task_id = prompt_verifier(&mut orch);
+
+        // Report claims success, lists verdict.json as an artifact, but omits
+        // the verdict field — exactly what the Kimi worker did.
+        orch.record_report(verifier_report(&task_id, None));
+
+        let report = orch
+            .state()
+            .reports
+            .iter()
+            .find(|r| r.task_id == task_id)
+            .expect("report recorded");
+        assert_eq!(
+            report.status,
+            TaskStatus::Succeeded,
+            "the verdict.json file must satisfy the verdict requirement: {}",
+            report.summary
+        );
+        assert_eq!(
+            orch.state().verdict.as_ref().map(|v| v.verdict),
+            Some(Verdict::Pass)
+        );
         assert!(matches!(
             orch.next(),
             OrchestratorDecision::Succeeded { .. }
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The full inspector flow: workers produce, the inspector verifies, and
+    /// its pass verdict is what completes the run.
+    #[test]
+    fn inspector_pass_verdict_completes_goal() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        // Even with the inspector present, the run must not complete before
+        // the verifier has reported.
+        orch.record_report(verifier_report(
+            &task_id,
+            Some(passing_verdict_for_directive(&directive())),
+        ));
+
+        assert!(matches!(
+            orch.next(),
+            OrchestratorDecision::Succeeded { .. }
+        ));
+    }
+
+    /// A fail-fixable verdict means the run must NOT report success.
+    #[test]
+    fn fail_verdict_does_not_complete_goal() {
+        let mut orch = Orchestrator::new(directive(), default_agent_roles());
+        let task_id = prompt_verifier(&mut orch);
+
+        let verdict = InspectionVerdict {
+            verdict: Verdict::FailFixable,
+            criteria: vec![],
+            diagnosis: Some("builder skipped error handling".to_string()),
+            route_hint: Some(VerdictRouteHint {
+                retry_task: Some("add error handling".to_string()),
+                respec: None,
+            }),
+            confidence: Some(VerdictConfidence::High),
+        };
+        orch.record_report(verifier_report(&task_id, Some(verdict)));
+
+        assert!(
+            !matches!(orch.next(), OrchestratorDecision::Succeeded { .. }),
+            "a fail verdict must never complete the goal"
+        );
     }
 
     #[test]

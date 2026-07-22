@@ -305,6 +305,10 @@ struct OrchestrateRunInput {
     #[serde(default)]
     pub executor: ExecutorConfig,
     pub run_id: Option<String>,
+    /// Shared agent workspace. When set, the coordinator reads
+    /// <workspace>/verdict.json as the inspector's fallback verdict channel.
+    #[serde(default)]
+    pub workspace: Option<String>,
     #[serde(default = "default_orchestrate_run_max_rounds")]
     pub max_rounds: u32,
 }
@@ -781,6 +785,7 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
                 ExecutorConfig::Builtin
             },
             run_id: args.run_id,
+            workspace: None,
             max_rounds: args
                 .max_rounds
                 .unwrap_or_else(default_orchestrate_run_max_rounds),
@@ -801,6 +806,9 @@ fn orchestrate_run(args: OrchestrateRunArgs) -> anyhow::Result<()> {
         max_rounds,
     };
     let mut orchestrator = Orchestrator::new(directive, default_agent_roles());
+    if let Some(ref workspace) = input.workspace {
+        orchestrator = orchestrator.with_workspace(workspace.clone());
+    }
     let store = if let Some(dir) = args.state_dir {
         RunStore::new(dir)?
     } else {
