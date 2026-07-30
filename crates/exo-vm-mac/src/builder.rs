@@ -99,14 +99,10 @@ fn build_guest_initrd(base: &std::path::Path, out: &std::path::Path) -> anyhow::
     let init_script: Vec<u8>;
     let agent_path = paths::guest_agent_binary_path()?;
     if agent_path.exists() {
-        let agent_dest = temp_path
-            .join("usr")
-            .join("local")
-            .join("bin")
-            .join("exo-vm-guest-init");
-        if let Some(parent) = agent_dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let bin_dir = temp_path.join("usr").join("local").join("bin");
+        std::fs::create_dir_all(&bin_dir)?;
+
+        let agent_dest = bin_dir.join("exo-vm-guest-init");
         std::fs::copy(&agent_path, &agent_dest)?;
         #[cfg(unix)]
         {
@@ -115,6 +111,23 @@ fn build_guest_initrd(base: &std::path::Path, out: &std::path::Path) -> anyhow::
             perms.set_mode(0o755);
             std::fs::set_permissions(&agent_dest, perms)?;
         }
+
+        // Also embed exo-agent if it has been built for the guest; exoclaw runs
+        // invoke it inside the VM.
+        let exo_agent_path = paths::exo_agent_binary_path()?;
+        if exo_agent_path.exists() {
+            let exo_agent_dest = bin_dir.join("exo-agent");
+            std::fs::copy(&exo_agent_path, &exo_agent_dest)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&exo_agent_dest)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&exo_agent_dest, perms)?;
+            }
+            info!("Embedded exo-agent in initramfs");
+        }
+
         init_script = b"#!/bin/sh\nmkdir -p /proc /sys /dev /tmp\nmount -t proc proc /proc\nmount -t sysfs sysfs /sys\nmount -t devtmpfs devtmpfs /dev 2>/dev/null || true\nexec /usr/local/bin/exo-vm-guest-init\n".to_vec();
     } else {
         init_script = br#"#!/bin/sh

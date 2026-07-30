@@ -77,6 +77,10 @@ pub fn guest_agent_binary_path() -> anyhow::Result<PathBuf> {
     Ok(exo_vm_dir()?.join("guest-agent"))
 }
 
+pub fn exo_agent_binary_path() -> anyhow::Result<PathBuf> {
+    Ok(exo_vm_dir()?.join("exo-agent"))
+}
+
 pub fn control_socket_path() -> anyhow::Result<PathBuf> {
     Ok(exo_vm_dir()?.join("exo-vm.sock"))
 }

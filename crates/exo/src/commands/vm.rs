@@ -3,10 +3,15 @@
 #[cfg(target_os = "macos")]
 fn ensure_virtualization_entitlement() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
+    let exe_str = exe.to_str().unwrap_or("");
     let output = std::process::Command::new("codesign")
-        .args(["-dv", "--entitlements", "-", exe.to_str().unwrap_or("")])
+        .args(["-dv", "--entitlements", "-", exe_str])
         .output()?;
-    let text = String::from_utf8_lossy(&output.stderr);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     if !text.contains("com.apple.security.virtualization") {
         anyhow::bail!(
             "the exo binary is not signed with the virtualization entitlement. \

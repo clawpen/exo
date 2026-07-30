@@ -461,7 +461,30 @@ impl GuestRuntime {
                 .unpack(&dest)
                 .with_context(|| format!("extract {} to {}", tar_path.display(), dest.display()))?;
         }
+        self.inject_exo_agent_into_image(&dest)?;
         Ok(dest)
+    }
+
+    /// Copy the host-provided exo-agent binary into the image rootfs so that
+    /// exoclaw runs can invoke it inside the container.
+    fn inject_exo_agent_into_image(&self, image_rootfs: &Path) -> Result<()> {
+        let source = PathBuf::from("/usr/local/bin/exo-agent");
+        if !source.exists() {
+            return Ok(());
+        }
+        let target_dir = image_rootfs.join("usr").join("local").join("bin");
+        fs::create_dir_all(&target_dir)?;
+        let target = target_dir.join("exo-agent");
+        std::fs::copy(&source, &target)
+            .with_context(|| format!("copy exo-agent into {}", target.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&target)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&target, perms)?;
+        }
+        Ok(())
     }
 
     /// Overlay layout for a container run: read-only image rootfs as the lower
