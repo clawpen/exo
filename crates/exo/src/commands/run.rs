@@ -389,16 +389,22 @@ async fn execute_with_daemon(
 
 #[cfg(target_os = "macos")]
 async fn execute_macos(
-    config: ContainerConfig,
+    mut config: ContainerConfig,
     detach: bool,
     rm: bool,
     _name: Option<String>,
 ) -> anyhow::Result<()> {
     match config.backend {
-        BackendSelection::Auto | BackendSelection::Native => {}
-        BackendSelection::Linux => {
+        BackendSelection::Auto if config.image == "host" => {}
+        BackendSelection::Native => {}
+        BackendSelection::Auto | BackendSelection::Linux => {
             use exo_runtime::ExoBackend;
             tracing::info!("Routing container to Exo-managed macOS Linux microVM backend");
+            // The microVM backend has no virtual switch yet; default to isolated
+            // networking unless the user explicitly requested something else.
+            if config.network.mode == "bridge" && config.network.port_mappings.is_empty() {
+                config.network.mode = "none".to_string();
+            }
             let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());
             let result = backend
                 .run(config, exo_runtime::BackendRunOptions { detach, rm })
@@ -415,16 +421,9 @@ async fn execute_macos(
         }
     }
 
-    if config.backend == BackendSelection::Auto && config.image != "host" {
-        tracing::warn!(
-            "macOS auto backend currently falls back to native host-process mode for image '{}'; pass '--backend native' to make this explicit. Linux OCI execution will require the future macOS Linux microVM backend.",
-            config.image
-        );
-    }
-
     tracing::info!("Running container via native macOS backend");
 
-    let backend = super::mac::backend()?;
+    let backend = super::mac::native_backend()?;
     let output = backend.run(config, exo_mac::RunOptions { detach, rm })?;
     if !output.is_empty() {
         print!("{}", output);
