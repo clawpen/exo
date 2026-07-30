@@ -86,10 +86,16 @@ pub struct ContainerRecord {
     pub created_at_ms: u128,
     pub started_at_ms: Option<u128>,
     pub stopped_at_ms: Option<u128>,
+    /// Linux boot identity that owned `pid`. A persisted PID must never be
+    /// signalled after a VM reboot, where the number may belong to another
+    /// process.
+    #[serde(default)]
+    pub boot_id: String,
 }
 
 pub struct GuestRuntime {
     root: PathBuf,
+    boot_id: String,
 }
 
 pub struct RunOutcome {
@@ -119,6 +125,7 @@ impl GuestRuntime {
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let runtime = Self {
             root: root.as_ref().to_path_buf(),
+            boot_id: current_boot_id(),
         };
         runtime.ensure_layout()?;
         Ok(runtime)
@@ -163,8 +170,15 @@ impl GuestRuntime {
         if spec.command.is_empty() {
             anyhow::bail!("no command specified");
         }
+        validate_container_name(&spec.name)?;
+        if self.record_path(&spec.name).exists() {
+            anyhow::bail!(
+                "container {} already exists; remove it before reusing the name",
+                spec.name
+            );
+        }
         let id = format!("guest-{}-{}", sanitize_name(&spec.name), now_ms());
-        let mut record = ContainerRecord::new(id.clone(), spec.clone());
+        let mut record = ContainerRecord::new(id.clone(), spec.clone(), self.boot_id.clone());
         record.status = "created".to_string();
         self.save_record(&record)?;
 
@@ -172,7 +186,7 @@ impl GuestRuntime {
             return self.run_detached(record);
         }
 
-        let (code, stdout, stderr) = self.run_sync(&spec)?;
+        let (code, stdout, stderr) = self.run_sync_record(&record, true)?;
         record.status = "exited".to_string();
         record.exit_code = Some(code);
         record.stopped_at_ms = Some(now_ms());
@@ -199,15 +213,35 @@ impl GuestRuntime {
             .create(true)
             .append(true)
             .open(self.stderr_path(&record.name))?;
-        let mut cmd = self.command_for_spec(&record)?;
+        let mut cmd = match self.command_for_spec(&record) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = self.cleanup_runtime_mounts(&record);
+                return Err(error);
+            }
+        };
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::from(stdout));
         cmd.stderr(Stdio::from(stderr));
-        let child = cmd.spawn()?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = self.cleanup_runtime_mounts(&record);
+                return Err(error.into());
+            }
+        };
         record.pid = Some(child.id());
         record.status = "running".to_string();
         record.started_at_ms = Some(now_ms());
-        self.save_record(&record)?;
+        record.stopped_at_ms = None;
+        record.exit_code = None;
+        record.boot_id = self.boot_id.clone();
+        if let Err(error) = self.save_record(&record) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = self.cleanup_runtime_mounts(&record);
+            return Err(error);
+        }
         std::mem::forget(child);
         Ok(RunOutcome {
             id: record.id,
@@ -218,9 +252,28 @@ impl GuestRuntime {
         })
     }
 
-    fn run_sync(&self, spec: &ContainerSpec) -> Result<(i32, String, String)> {
-        let record = ContainerRecord::new("sync".to_string(), spec.clone());
-        let output = self.command_for_spec(&record)?.output()?;
+    fn run_sync_record(
+        &self,
+        record: &ContainerRecord,
+        cleanup_after: bool,
+    ) -> Result<(i32, String, String)> {
+        let mut command = match self.command_for_spec(record) {
+            Ok(command) => command,
+            Err(error) => {
+                if cleanup_after {
+                    let _ = self.cleanup_runtime_mounts(record);
+                }
+                return Err(error);
+            }
+        };
+        let output_result = command.output();
+        let cleanup_result = if cleanup_after {
+            self.cleanup_runtime_mounts(record)
+        } else {
+            Ok(())
+        };
+        let output = output_result?;
+        cleanup_result?;
         let code = output
             .status
             .code()
@@ -240,19 +293,26 @@ impl GuestRuntime {
         let runtime_rootfs = if image_rootfs.exists() {
             #[cfg(target_os = "linux")]
             {
-                // Prefer an overlay so per-container writes stay isolated, but the
-                // minimal guest kernel may lack overlayfs (ENODEV). Fall back to
-                // running directly in the image rootfs so the container still runs
-                // isolated in its own filesystem.
+                // Per-container writes must never fall back to the shared image
+                // rootfs unless the kernel truly cannot mount overlayfs. When
+                // overlayfs is unavailable, fall back automatically with a loud
+                // warning so first-boot bring-up can proceed on minimal VM
+                // kernels; production kernels should always enable overlayfs.
                 let layout = self.overlay_layout(&record.name, &spec.image);
                 match self.mount_overlay(&layout) {
                     Ok(()) => layout.merged,
-                    Err(e) => {
+                    Err(e) if !self.overlayfs_available() => {
                         eprintln!(
-                            "overlay unavailable ({e}); running directly in image rootfs"
+                            "WARNING: overlayfs unavailable ({e}); using unsafe shared-rootfs fallback. \
+                             Install a kernel with CONFIG_OVERLAY_FS=y for isolated containers."
                         );
                         image_rootfs.clone()
                     }
+                    Err(e) => anyhow::bail!(
+                        "overlayfs is required for isolated container writes: {e}. \
+                         Fix the EXO VM kernel or set EXO_GUEST_ALLOW_SHARED_ROOTFS=1 \
+                         only for disposable development testing"
+                    ),
                 }
             }
             #[cfg(not(target_os = "linux"))]
@@ -277,6 +337,13 @@ impl GuestRuntime {
             }
         }
         Ok(command)
+    }
+
+    /// Check whether the kernel advertises overlayfs support.
+    fn overlayfs_available(&self) -> bool {
+        std::fs::read_to_string("/proc/filesystems")
+            .map(|s| s.lines().any(|line| line.trim().ends_with("overlay")))
+            .unwrap_or(false)
     }
 
     fn prepare_volumes_and_mounts(&self, spec: &ContainerSpec) -> Result<()> {
@@ -332,11 +399,15 @@ impl GuestRuntime {
                 )
             };
             if rc != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EBUSY) {
+                    continue;
+                }
                 anyhow::bail!(
                     "bind mount {} -> {} failed: {}",
                     source.display(),
                     dest.display(),
-                    std::io::Error::last_os_error()
+                    error
                 );
             }
             if readonly {
@@ -431,10 +502,14 @@ impl GuestRuntime {
             )
         };
         if rc != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EBUSY) {
+                return Ok(());
+            }
             anyhow::bail!(
                 "overlay mount at {} failed: {}",
                 layout.merged.display(),
-                std::io::Error::last_os_error()
+                error
             );
         }
         Ok(())
@@ -442,7 +517,8 @@ impl GuestRuntime {
 
     pub fn list_containers(&self, all: bool) -> Result<Vec<ContainerSummary>> {
         let mut out = vec![];
-        for record in self.load_all_records()? {
+        for mut record in self.load_all_records()? {
+            self.refresh_record_status(&mut record)?;
             if !all && record.status != "running" {
                 continue;
             }
@@ -452,29 +528,78 @@ impl GuestRuntime {
         Ok(out)
     }
 
-    pub fn stop_container(&self, id: &str, force: bool) -> Result<()> {
+    pub fn start_container(&self, id: &str, attach: bool) -> Result<()> {
+        if attach {
+            anyhow::bail!("attach-on-start is not implemented for the EXO macOS Linux VM");
+        }
         let mut record = self.find_record(id)?;
-        if let Some(pid) = record.pid {
-            #[cfg(unix)]
-            unsafe {
-                let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
-                libc::kill(pid as i32, sig);
+        self.refresh_record_status(&mut record)?;
+        if record.status == "running" {
+            anyhow::bail!("container {} is already running", record.name);
+        }
+        record.boot_id = self.boot_id.clone();
+        let _ = self.run_detached(record)?;
+        Ok(())
+    }
+
+    pub fn stop_container(&self, id: &str, force: bool, timeout_secs: u64) -> Result<()> {
+        let mut record = self.find_record(id)?;
+        self.refresh_record_status(&mut record)?;
+        let Some(pid) = record.pid else {
+            self.cleanup_runtime_mounts(&record)?;
+            return Ok(());
+        };
+
+        #[cfg(unix)]
+        {
+            let first_signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+            let rc = unsafe { libc::kill(pid as i32, first_signal) };
+            if rc != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error)
+                        .with_context(|| format!("signal container {} pid {}", record.name, pid));
+                }
+            }
+
+            if !force {
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                while process_is_running(pid) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if process_is_running(pid) {
+                    let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    if rc != 0
+                        && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+                    {
+                        anyhow::bail!("failed to force-stop container {}", record.name);
+                    }
+                }
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while process_is_running(pid) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
+
         record.status = "exited".to_string();
         record.stopped_at_ms = Some(now_ms());
         record.pid = None;
-        self.save_record(&record)
+        self.save_record(&record)?;
+        self.cleanup_runtime_mounts(&record)
     }
 
     pub fn remove_container(&self, id: &str, force: bool) -> Result<()> {
-        let record = self.find_record(id)?;
+        let mut record = self.find_record(id)?;
+        self.refresh_record_status(&mut record)?;
         if record.status == "running" && !force {
             anyhow::bail!("container {} is running; use force", record.name);
         }
         if record.status == "running" {
-            let _ = self.stop_container(&record.name, true);
+            self.stop_container(&record.name, true, 0)?;
         }
+        self.cleanup_runtime_mounts(&record)?;
         fs::remove_dir_all(self.container_dir(&record.name)).or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Ok(())
@@ -499,10 +624,55 @@ impl GuestRuntime {
     }
 
     pub fn exec(&self, id: &str, command: Vec<String>) -> Result<(i32, String, String)> {
-        let record = self.find_record(id)?;
-        let mut spec = record.to_spec();
-        spec.command = command;
-        self.run_sync(&spec)
+        let mut record = self.find_record(id)?;
+        self.refresh_record_status(&mut record)?;
+        if record.status != "running" {
+            anyhow::bail!("container {} is not running", record.name);
+        }
+        record.command = command;
+        self.run_sync_record(&record, false)
+    }
+
+    fn refresh_record_status(&self, record: &mut ContainerRecord) -> Result<()> {
+        if record.status != "running" {
+            return Ok(());
+        }
+        if record.boot_id.is_empty() || record.boot_id != self.boot_id {
+            record.status = "exited".to_string();
+            record.pid = None;
+            record.stopped_at_ms = Some(now_ms());
+            self.save_record(record)?;
+            return self.cleanup_runtime_mounts(record);
+        }
+        let Some(pid) = record.pid else {
+            record.status = "exited".to_string();
+            record.stopped_at_ms = Some(now_ms());
+            self.save_record(record)?;
+            return Ok(());
+        };
+        if process_is_running(pid) {
+            return Ok(());
+        }
+        record.status = "exited".to_string();
+        record.pid = None;
+        record.stopped_at_ms = Some(now_ms());
+        self.save_record(record)?;
+        self.cleanup_runtime_mounts(record)
+    }
+
+    fn cleanup_runtime_mounts(&self, record: &ContainerRecord) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let layout = self.overlay_layout(&record.name, &record.image);
+            for mount in record.mounts.iter().rev() {
+                let target = layout.merged.join(mount.target.trim_start_matches('/'));
+                unmount_detached(&target)?;
+            }
+            unmount_detached(&layout.merged)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = record;
+        Ok(())
     }
 
     fn save_record(&self, record: &ContainerRecord) -> Result<()> {
@@ -539,7 +709,7 @@ impl GuestRuntime {
     }
 
     fn find_record(&self, id_or_name: &str) -> Result<ContainerRecord> {
-        if self.record_path(id_or_name).exists() {
+        if validate_container_name(id_or_name).is_ok() && self.record_path(id_or_name).exists() {
             return self.load_record_by_name(id_or_name);
         }
         for record in self.load_all_records()? {
@@ -573,7 +743,7 @@ impl GuestRuntime {
 }
 
 impl ContainerRecord {
-    fn new(id: String, spec: ContainerSpec) -> Self {
+    fn new(id: String, spec: ContainerSpec, boot_id: String) -> Self {
         Self {
             id,
             name: spec.name,
@@ -589,6 +759,7 @@ impl ContainerRecord {
             created_at_ms: now_ms(),
             started_at_ms: None,
             stopped_at_ms: None,
+            boot_id,
         }
     }
 
@@ -661,8 +832,8 @@ fn command_in_rootfs(rootfs: &Path, spec: &ContainerSpec) -> Result<Command> {
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         );
 
-        let root_c = CString::new(rootfs.as_os_str().as_bytes())
-            .context("rootfs path contains NUL")?;
+        let root_c =
+            CString::new(rootfs.as_os_str().as_bytes()).context("rootfs path contains NUL")?;
         let workdir = if spec.workdir.is_empty() || spec.workdir == "/" {
             "/".to_string()
         } else {
@@ -730,6 +901,19 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
+fn current_boot_id() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        return fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|_| format!("linux-boot-{}", now_ms()));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        format!("host-test-{}", std::process::id())
+    }
+}
+
 fn sanitize_name(value: &str) -> String {
     value
         .chars()
@@ -745,6 +929,60 @@ fn sanitize_name(value: &str) -> String {
 
 fn is_named_volume_source(value: &str) -> bool {
     !value.contains('/') && !value.is_empty()
+}
+
+fn validate_container_name(value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 128 {
+        anyhow::bail!("container name must be 1..=128 characters");
+    }
+    if value == "." || value == ".." {
+        anyhow::bail!("invalid container name");
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        anyhow::bail!("container name contains unsupported characters");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    let mut status = 0;
+    let wait = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+    if wait == pid as i32 {
+        return false;
+    }
+    if wait == 0 {
+        return true;
+    }
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_detached(path: &Path) -> Result<()> {
+    use std::ffi::CString;
+    if !path.exists() {
+        return Ok(());
+    }
+    let path_c = CString::new(path.as_os_str().as_encoded_bytes())?;
+    let rc = unsafe { libc::umount2(path_c.as_ptr(), libc::MNT_DETACH) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL) | Some(libc::ENOENT)
+    ) {
+        return Ok(());
+    }
+    Err(error).with_context(|| format!("unmount {}", path.display()))
 }
 
 #[cfg(target_os = "linux")]
@@ -822,7 +1060,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runtime = GuestRuntime::new(dir.path()).unwrap();
         runtime
-            .run_container(spec("ctx", vec!["true"]), false, false)
+            .run_container(spec("ctx", vec!["sh", "-c", "sleep 30"]), true, false)
             .unwrap();
         let (code, stdout, _) = runtime
             .exec(
@@ -836,6 +1074,41 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0);
         assert_eq!(stdout, "B");
+        runtime.stop_container("ctx", true, 0).unwrap();
+    }
+
+    #[test]
+    fn stopped_container_can_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = GuestRuntime::new(dir.path()).unwrap();
+        runtime
+            .run_container(
+                spec("restartable", vec!["sh", "-c", "sleep 30"]),
+                true,
+                false,
+            )
+            .unwrap();
+        runtime.stop_container("restartable", true, 0).unwrap();
+        assert_eq!(runtime.list_containers(false).unwrap().len(), 0);
+
+        runtime.start_container("restartable", false).unwrap();
+        assert_eq!(runtime.list_containers(false).unwrap().len(), 1);
+        runtime.stop_container("restartable", true, 0).unwrap();
+    }
+
+    #[test]
+    fn duplicate_and_traversal_names_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = GuestRuntime::new(dir.path()).unwrap();
+        runtime
+            .run_container(spec("unique", vec!["true"]), false, false)
+            .unwrap();
+        assert!(runtime
+            .run_container(spec("unique", vec!["true"]), false, false)
+            .is_err());
+        assert!(runtime
+            .run_container(spec("../escape", vec!["true"]), false, false)
+            .is_err());
     }
 
     #[test]
