@@ -1,8 +1,28 @@
 //! `exo vm` command implementation.
 
+#[cfg(target_os = "macos")]
+fn ensure_virtualization_entitlement() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let output = std::process::Command::new("codesign")
+        .args(["-dv", "--entitlements", "-", exe.to_str().unwrap_or("")])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    if !text.contains("com.apple.security.virtualization") {
+        anyhow::bail!(
+            "the exo binary is not signed with the virtualization entitlement. \
+             Run: scripts/sign-exo.sh {} \
+             (or codesign --sign - --force --entitlements crates/exo-vm-mac/entitlements.plist {})",
+            exe.display(),
+            exe.display()
+        );
+    }
+    Ok(())
+}
+
 pub async fn init(force: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
+        ensure_virtualization_entitlement()?;
         let manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::default())?;
         manager.init(force).await?;
         Ok(())
@@ -17,6 +37,7 @@ pub async fn init(force: bool) -> anyhow::Result<()> {
 pub async fn start(foreground: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
+        ensure_virtualization_entitlement()?;
         if foreground {
             let mut manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::default())?;
             manager.start(true)?;
