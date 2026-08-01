@@ -2,26 +2,7 @@
 
 #[cfg(target_os = "macos")]
 fn ensure_virtualization_entitlement() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    let exe_str = exe.to_str().unwrap_or("");
-    let output = std::process::Command::new("codesign")
-        .args(["-dv", "--entitlements", "-", exe_str])
-        .output()?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if !text.contains("com.apple.security.virtualization") {
-        anyhow::bail!(
-            "the exo binary is not signed with the virtualization entitlement. \
-             Run: scripts/sign-exo.sh {} \
-             (or codesign --sign - --force --entitlements crates/exo-vm-mac/entitlements.plist {})",
-            exe.display(),
-            exe.display()
-        );
-    }
-    Ok(())
+    exo_vm_mac::ensure_virtualization_entitlement()
 }
 
 pub async fn init(force: bool) -> anyhow::Result<()> {
@@ -153,6 +134,7 @@ pub async fn status(json: bool) -> anyhow::Result<()> {
 pub async fn serve() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
+        ensure_virtualization_entitlement()?;
         exo_vm_mac::daemon::serve_foreground(exo_vm_mac::VmConfig::default())
     }
     #[cfg(not(target_os = "macos"))]
@@ -207,8 +189,6 @@ pub async fn import_image(image: String, guest_path: String) -> anyhow::Result<(
 
 #[cfg(target_os = "macos")]
 fn start_daemon() -> anyhow::Result<()> {
-    use std::fs::OpenOptions;
-    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     let client = exo_vm_mac::VmDaemonClient::new()?;
@@ -218,31 +198,9 @@ fn start_daemon() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let exe = std::env::current_exe()?;
-    let log_path = exo_vm_mac::daemon_log_path()?;
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-
-    let child = Command::new(exe)
-        .args(["vm", "serve"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()?;
-    println!("Starting VM daemon (PID: {})", child.id());
-    println!("Log: {}", log_path.display());
-
-    // Detach from the child. The daemon keeps the VM handle alive.
-    std::mem::forget(child);
+    let pid = exo_vm_mac::daemon::spawn_detached()?;
+    println!("Starting VM daemon (PID: {})", pid);
+    println!("Log: {}", exo_vm_mac::daemon_log_path()?.display());
 
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
@@ -256,7 +214,7 @@ fn start_daemon() -> anyhow::Result<()> {
 
     anyhow::bail!(
         "timed out waiting for VM daemon to become ready; see {}",
-        log_path.display()
+        exo_vm_mac::daemon_log_path()?.display()
     )
 }
 

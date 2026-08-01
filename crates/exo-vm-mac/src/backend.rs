@@ -74,6 +74,104 @@ impl MacLinuxBackend {
         )
     }
 
+    /// Lazily bring up the microVM: initialize the VM image on first use,
+    /// auto-start the control daemon when it is not running, and wait for the
+    /// guest agent to answer. Idempotent and safe to call concurrently from
+    /// multiple processes.
+    pub async fn ensure_ready(&self) -> anyhow::Result<()> {
+        use std::time::{Duration, Instant};
+
+        if self.client().is_ok() {
+            return Ok(());
+        }
+
+        #[cfg(target_os = "macos")]
+        crate::ensure_virtualization_entitlement()?;
+
+        // First-time setup: download/build the VM image (idempotent, cached).
+        crate::builder::ensure_image(&self.config, false)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to initialize the Exo microVM image: {}", e))?;
+
+        self.spawn_daemon_if_needed()?;
+
+        // Wait for the VM to boot and the guest agent to answer.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match self.client() {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return Err(anyhow::anyhow!(
+                            "timed out waiting for the Exo microVM guest agent: {}. See {}",
+                            e,
+                            crate::paths::daemon_log_path()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+    }
+
+    /// Start the control daemon when no live daemon owns the socket. Guards
+    /// against concurrent auto-starts from parallel exo/Orchestre processes:
+    /// the first process to create the lock file spawns the daemon; the rest
+    /// wait for the socket to come up.
+    fn spawn_daemon_if_needed(&self) -> anyhow::Result<()> {
+        use std::fs::OpenOptions;
+        use std::time::{Duration, Instant};
+
+        let client = crate::VmDaemonClient::new()?;
+        if client.is_running() {
+            return Ok(());
+        }
+
+        let lock_path = crate::paths::exo_vm_dir()?.join("daemon-autostart.lock");
+        let spawned = match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(_) => match crate::daemon::spawn_detached() {
+                Ok(pid) => {
+                    tracing::info!("Auto-started Exo VM daemon (PID: {})", pid);
+                    true
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&lock_path);
+                    return Err(e);
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Another process is starting the daemon; wait below. A stale
+                // lock from a crashed spawner surfaces as a wait timeout with
+                // a pointer to the daemon log, which is acceptable.
+                tracing::info!("Another process is starting the Exo VM daemon; waiting");
+                false
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if client.is_running() {
+                if spawned {
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if spawned {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+        anyhow::bail!(
+            "timed out waiting for the Exo VM daemon to come up; see {}",
+            crate::paths::daemon_log_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        )
+    }
+
     fn client(&self) -> anyhow::Result<crate::VmDaemonClient> {
         let client = crate::VmDaemonClient::new()?;
         if !client.is_running() {
@@ -128,6 +226,7 @@ impl MacLinuxBackend {
     /// the RPC channel in hex-encoded chunks, then asks the guest to extract it.
     /// No-op for images we don't know how to provision or that are already present.
     pub async fn ensure_image(&self, image: &str) -> anyhow::Result<()> {
+        self.ensure_ready().await?;
         let image_status = self.client()?.guest_request(GuestRequest::ImageExists {
             image: image.to_string(),
         })?;

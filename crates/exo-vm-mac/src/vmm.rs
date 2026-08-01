@@ -178,6 +178,20 @@ impl VmManager {
         self.is_running()
     }
 
+    /// How long ago the VM was started, if it is running. Used by the daemon
+    /// to gate guest RPC until the guest agent has had time to boot: touching
+    /// the serial RPC port too early can wedge the Virtualization.framework
+    /// serial pump for the lifetime of the boot.
+    pub fn boot_elapsed(&self) -> Option<std::time::Duration> {
+        let started = self.state.started_at?;
+        let now = chrono::Utc::now();
+        let elapsed = now.signed_duration_since(started);
+        if elapsed.num_seconds() < 0 {
+            return Some(std::time::Duration::ZERO);
+        }
+        Some(std::time::Duration::from_secs(elapsed.num_seconds() as u64))
+    }
+
     /// Send a request to the in-guest agent over the RPC serial port.
     pub fn guest_request(&self, req: GuestRequest) -> anyhow::Result<GuestResponse> {
         if self.handle.is_null() {

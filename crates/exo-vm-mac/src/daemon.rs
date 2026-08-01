@@ -99,11 +99,65 @@ impl VmDaemonClient {
     }
 }
 
+/// Spawn `exo vm serve` as a detached background process with output appended
+/// to the daemon log. Returns immediately; callers should poll
+/// `VmDaemonClient::is_running` to wait for readiness.
+pub fn spawn_detached() -> anyhow::Result<u32> {
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
+
+    let exe = exo_cli_path()?;
+    let log_path = paths::daemon_log_path()?;
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    let child = Command::new(exe)
+        .args(["vm", "serve"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()?;
+    let pid = child.id();
+    // Detach from the child. The daemon keeps the VM handle alive.
+    std::mem::forget(child);
+    Ok(pid)
+}
+
+/// Locate an `exo` CLI binary that can run `vm serve`: the current executable
+/// when it is the CLI, `$EXO_CLI_PATH` when set, otherwise `exo` from PATH.
+fn exo_cli_path() -> anyhow::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    if exe.file_name().map(|n| n == "exo").unwrap_or(false) {
+        return Ok(exe);
+    }
+    if let Ok(path) = std::env::var("EXO_CLI_PATH") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    Ok(std::path::PathBuf::from("exo"))
+}
+
 /// Run the control daemon in the current process. This call does not return
 /// until the VM is stopped or the listener fails.
 pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
     let socket_path = paths::control_socket_path()?;
     if socket_path.exists() {
+        // Refuse to replace a live daemon: a second listener would orphan the
+        // first daemon's VM handle and double-boot the microVM.
+        if UnixStream::connect(&socket_path).is_ok() {
+            anyhow::bail!(
+                "another exo VM daemon is already running on {}",
+                socket_path.display()
+            );
+        }
         let _ = std::fs::remove_file(&socket_path);
     }
     if let Some(parent) = socket_path.parent() {
@@ -147,6 +201,21 @@ pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Minimum uptime before the daemon forwards requests to the guest agent.
+/// Writing to the serial RPC port while the guest is still booting can wedge
+/// the Virtualization.framework serial pump for the lifetime of that boot, so
+/// all clients are held off until the guest agent has had time to come up.
+/// First boots (ext4 format) take ~7s; steady-state boots ~3s.
+const GUEST_BOOT_GRACE: Duration = Duration::from_secs(15);
+
+fn guest_booting(manager: &VmManager) -> bool {
+    manager.running()
+        && manager
+            .boot_elapsed()
+            .map(|elapsed| elapsed < GUEST_BOOT_GRACE)
+            .unwrap_or(false)
+}
+
 fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<bool> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
@@ -165,12 +234,20 @@ fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<
                 },
             }
         }
-        Ok(VmDaemonRequest::Guest { request }) => match manager.guest_request(request) {
-            Ok(response) => VmDaemonResponse::Guest { response },
-            Err(e) => VmDaemonResponse::Error {
-                message: e.to_string(),
-            },
-        },
+        Ok(VmDaemonRequest::Guest { request }) => {
+            if guest_booting(manager) {
+                VmDaemonResponse::Error {
+                    message: "guest agent is still booting; retry shortly".to_string(),
+                }
+            } else {
+                match manager.guest_request(request) {
+                    Ok(response) => VmDaemonResponse::Guest { response },
+                    Err(e) => VmDaemonResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
+        }
         Err(e) => VmDaemonResponse::Error {
             message: format!("invalid VM daemon request: {}", e),
         },
@@ -188,16 +265,20 @@ fn status_response(manager: &VmManager) -> VmDaemonResponse {
     let mut guest_agent_reachable = false;
     let mut guest_agent_info = String::new();
     if running {
-        match manager.guest_request(GuestRequest::Ping) {
-            Ok(GuestResponse::Pong) => {
-                guest_agent_reachable = true;
-                guest_agent_info = "agent responded".to_string();
-            }
-            Ok(other) => {
-                guest_agent_info = format!("unexpected response: {:?}", other);
-            }
-            Err(e) => {
-                guest_agent_info = format!("agent unreachable: {}", e);
+        if guest_booting(manager) {
+            guest_agent_info = "guest agent is still booting".to_string();
+        } else {
+            match manager.guest_request(GuestRequest::Ping) {
+                Ok(GuestResponse::Pong) => {
+                    guest_agent_reachable = true;
+                    guest_agent_info = "agent responded".to_string();
+                }
+                Ok(other) => {
+                    guest_agent_info = format!("unexpected response: {:?}", other);
+                }
+                Err(e) => {
+                    guest_agent_info = format!("agent unreachable: {}", e);
+                }
             }
         }
     }
