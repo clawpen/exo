@@ -316,6 +316,7 @@ impl GuestRuntime {
                 #[cfg(target_os = "linux")]
                 {
                     self.apply_bind_mounts(rootfs, &spec)?;
+                    inject_resolv_conf(rootfs);
                     // If a workspace was staged for this container, copy it into the
                     // merged overlay workdir so the command sees the host files.
                     if let Some(ref staged) = spec.workspace {
@@ -561,6 +562,9 @@ impl GuestRuntime {
             .with_context(|| format!("create workspace archive {}", tar_path.display()))?;
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut builder = tar::Builder::new(encoder);
+        // Workspaces can contain dangling symlinks; store links as links
+        // instead of following them into ENOENT failures.
+        builder.follow_symlinks(false);
         // Append the source directory's *contents* so the host can extract
         // directly over its workspace directory.
         builder
@@ -1094,6 +1098,22 @@ fn sanitize_name(value: &str) -> String {
 
 fn is_named_volume_source(value: &str) -> bool {
     !value.contains('/') && !value.is_empty()
+}
+
+/// Copy the guest's resolver config into a container rootfs so chrooted
+/// processes can resolve DNS through the VM's NAT lease. Best-effort: a
+/// container without network needs no resolver.
+#[cfg(target_os = "linux")]
+fn inject_resolv_conf(rootfs: &Path) {
+    let source = Path::new("/etc/resolv.conf");
+    if !source.exists() {
+        return;
+    }
+    let dest_dir = rootfs.join("etc");
+    if fs::create_dir_all(&dest_dir).is_err() {
+        return;
+    }
+    let _ = fs::copy(source, dest_dir.join("resolv.conf"));
 }
 
 fn validate_container_name(value: &str) -> Result<()> {

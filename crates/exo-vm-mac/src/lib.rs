@@ -10,6 +10,7 @@ mod backend;
 mod builder;
 mod ffi;
 mod image;
+mod oci;
 mod paths;
 mod vmm;
 

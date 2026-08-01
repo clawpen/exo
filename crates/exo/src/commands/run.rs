@@ -401,10 +401,10 @@ async fn execute_macos(
         BackendSelection::Auto | BackendSelection::Linux => {
             use exo_runtime::ExoBackend;
             tracing::info!("Routing container to Exo-managed macOS Linux microVM backend");
-            // The microVM backend has no virtual switch yet; default to isolated
-            // networking unless the user explicitly requested something else.
+            // The microVM NATs outbound traffic through the host; default to
+            // that unless the user explicitly requested something else.
             if config.network.mode == "bridge" && config.network.port_mappings.is_empty() {
-                config.network.mode = "none".to_string();
+                config.network.mode = "nat".to_string();
             }
 
             // Backwards compatibility: if no explicit workspace is provided but

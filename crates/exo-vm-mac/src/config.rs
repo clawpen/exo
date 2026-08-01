@@ -23,7 +23,9 @@ impl Default for VmConfig {
             cpu_count: 2,
             memory_mb: 1024,
             vsock_port: 1024,
-            guest_agent_timeout_ms: 5000,
+            // Large guest-side operations (image extraction, workspace export)
+            // can take tens of seconds; keep the per-request timeout above them.
+            guest_agent_timeout_ms: 60_000,
         }
     }
 }

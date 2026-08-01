@@ -237,12 +237,6 @@ impl MacLinuxBackend {
             return Ok(());
         }
 
-        let Some(url) = Self::image_rootfs_url(image) else {
-            anyhow::bail!(
-                "image '{}' is not present in the EXO Linux VM and has no automatic provisioner; import it explicitly first",
-                image
-            );
-        };
         if !matches!(image_status, GuestResponse::Ok { .. }) {
             anyhow::bail!(
                 "unexpected guest response while checking image: {:?}",
@@ -257,7 +251,20 @@ impl MacLinuxBackend {
         let cache = crate::paths::exo_vm_dir()?.join("images");
         std::fs::create_dir_all(&cache)?;
         let host_tar = cache.join(format!("{}.tar.gz", safe));
-        crate::image::download_file_if_missing(url, &host_tar).await?;
+
+        if !host_tar.exists() {
+            if let Some(url) = Self::image_rootfs_url(image) {
+                crate::image::download_file_if_missing(url, &host_tar).await?;
+            } else {
+                // Generic path: pull from the OCI registry and compose the
+                // rootfs on the host.
+                crate::oci::pull_rootfs_tar(image, &host_tar)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to pull image '{}': {:#}", image, e)
+                    })?;
+            }
+        }
 
         let bytes = std::fs::read(&host_tar)?;
         let guest_tar = format!("/tmp/exo-image-{}.tar.gz", safe);
@@ -289,12 +296,15 @@ impl MacLinuxBackend {
     }
 
     fn validate_run_config(config: &ContainerConfig) -> anyhow::Result<()> {
-        if config.network.mode != "none"
+        // The guest brings up eth0 over the host's VZ NAT attachment; chrooted
+        // containers share that namespace, so "nat" gives outbound networking.
+        // Host port publishing still needs a vsock tunnel and stays rejected.
+        if !matches!(config.network.mode.as_str(), "none" | "nat" | "bridge")
             || !config.network.port_mappings.is_empty()
-            || !config.network.dns.is_empty()
         {
             anyhow::bail!(
-                "networking is not implemented for the EXO macOS Linux VM yet; rerun with --network none"
+                "network mode '{}' or port publishing is not implemented for the EXO macOS Linux VM yet; use --network nat (outbound) or --network none",
+                config.network.mode
             );
         }
         if config.resources.memory.is_some()
@@ -759,6 +769,24 @@ mod tests {
     #[test]
     fn rejects_unenforced_network_and_host_mounts() {
         let mut config = ContainerConfig::default();
+        // The default bridge mode maps to guest NAT: allowed.
+        assert!(MacLinuxBackend::validate_run_config(&config).is_ok());
+
+        // Host port publishing is not implemented yet.
+        config
+            .network
+            .port_mappings
+            .push(PortMapping {
+                host_ip: "127.0.0.1".to_string(),
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            });
+        assert!(MacLinuxBackend::validate_run_config(&config).is_err());
+        config.network.port_mappings.clear();
+
+        // An unknown mode is still rejected.
+        config.network.mode = "host".to_string();
         assert!(MacLinuxBackend::validate_run_config(&config).is_err());
 
         config.network.mode = "none".to_string();

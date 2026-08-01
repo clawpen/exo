@@ -375,6 +375,21 @@ fn embed_disk_support(
     Ok(())
 }
 
+/// Shell snippet shared by both init variants: bring up the virtio NIC with
+/// DHCP so the guest (and chrooted containers, which share its network
+/// namespace) has outbound connectivity. The VM is attached to a
+/// VZNATNetworkDeviceAttachment on the host. Failures degrade to no network.
+const NET_SETUP_SNIPPET: &str = r#"
+# Outbound network via the host's NAT attachment.
+modprobe virtio_net 2>/dev/null || true
+ip link set lo up 2>/dev/null || true
+if ip link set eth0 up 2>/dev/null; then
+    udhcpc -i eth0 -q -n 2>/dev/null \
+        && echo "exo-vm-guest: eth0 up with DHCP lease" \
+        || echo "exo-vm-guest: WARNING DHCP failed; guest has no network"
+fi
+"#;
+
 /// Shell snippet shared by both init variants: load disk modules, find the
 /// virtio block device, format it on first boot, and mount it as the guest
 /// state dir. All failures degrade to ephemeral state so the VM always boots.
@@ -453,6 +468,7 @@ fn write_init_script(temp_path: &Path) -> anyhow::Result<()> {
              mount -t proc proc /proc\n\
              mount -t sysfs sysfs /sys\n\
              mount -t devtmpfs devtmpfs /dev 2>/dev/null || true\n\
+             {NET_SETUP_SNIPPET}\n\
              {DISK_SETUP_SNIPPET}\n\
              exec /usr/local/bin/exo-vm-guest-init\n"
         )
@@ -469,6 +485,7 @@ mkdir -p /proc /sys /dev /tmp
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+{NET_SETUP_SNIPPET}
 {DISK_SETUP_SNIPPET}
 while true; do
     echo "exo-vm-guest: heartbeat"
