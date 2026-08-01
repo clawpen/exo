@@ -415,10 +415,18 @@ async fn execute_macos(
                 if let Some((ws, rest)) = extract_cd_workspace(&config.command) {
                     config.workspace = Some(std::path::PathBuf::from(ws));
                     config.command = vec!["sh".to_string(), "-c".to_string(), rest];
-                    if config.workdir.as_os_str().is_empty() || config.workdir == std::path::Path::new("/") {
-                        config.workdir = std::path::PathBuf::from("/app");
-                    }
                 }
+            }
+
+            // A workspace is staged into and exported out of the container
+            // workdir. With workdir `/` (the default) the export would archive
+            // the entire image rootfs over the host workspace, so pin the
+            // workdir to a dedicated directory whenever a workspace is set.
+            if config.workspace.is_some()
+                && (config.workdir.as_os_str().is_empty()
+                    || config.workdir == std::path::Path::new("/"))
+            {
+                config.workdir = std::path::PathBuf::from("/app");
             }
 
             let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());

@@ -376,6 +376,14 @@ impl ExoBackend for MacLinuxBackend {
         let mut spec = Self::container_spec(&config);
         let workspace_host_path = config.workspace.clone();
 
+        // The workspace is staged into and exported out of the container
+        // workdir. With workdir `/` the export would archive the entire image
+        // rootfs over the host workspace, so pin the workdir to a dedicated
+        // directory whenever a workspace is set.
+        if workspace_host_path.is_some() && (spec.workdir.is_empty() || spec.workdir == "/") {
+            spec.workdir = "/app".to_string();
+        }
+
         // Push the host workspace into the guest before the run. The tarball
         // contents are extracted into a guest staging area; the guest runtime
         // copies them into the container's workdir after mounting the overlay.

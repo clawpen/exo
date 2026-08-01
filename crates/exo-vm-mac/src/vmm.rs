@@ -64,10 +64,18 @@ impl VmManager {
 
         let kernel = CString::new(self.state.kernel_path.to_string_lossy().as_bytes())?;
         let initrd = CString::new(self.state.initrd_path.to_string_lossy().as_bytes())?;
-        let disk = CString::new(
-            // Pass an empty path to skip the block device for now.
-            "",
-        )?;
+        // Attach the persistent-state disk when it exists; the guest init
+        // degrades to ephemeral state when no block device is present.
+        let disk_arg = if self.state.disk_path.exists() {
+            self.state.disk_path.to_string_lossy().to_string()
+        } else {
+            warn!(
+                "VM disk image missing at {}; booting without persistent state",
+                self.state.disk_path.display()
+            );
+            String::new()
+        };
+        let disk = CString::new(disk_arg)?;
         let console_log = CString::new(
             crate::paths::logs_dir()?
                 .join("vm-console.log")
