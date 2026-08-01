@@ -31,6 +31,7 @@ impl MacLinuxBackend {
             image: config.image.clone(),
             command: config.command.clone(),
             workdir: config.workdir.to_string_lossy().to_string(),
+            workspace: config.workspace.as_ref().map(|p| p.to_string_lossy().to_string()),
             env: config
                 .env
                 .iter()
@@ -75,10 +76,22 @@ impl MacLinuxBackend {
 
     fn client(&self) -> anyhow::Result<crate::VmDaemonClient> {
         let client = crate::VmDaemonClient::new()?;
-        if client.is_running() {
-            Ok(client)
-        } else {
-            Err(self.not_ready())
+        if !client.is_running() {
+            return Err(self.not_ready());
+        }
+        match client.status()? {
+            crate::VmDaemonResponse::Status {
+                running: true,
+                guest_agent_reachable: true,
+                ..
+            } => Ok(client),
+            crate::VmDaemonResponse::Status {
+                guest_agent_info, ..
+            } => anyhow::bail!(
+                "EXO macOS Linux VM daemon is running, but the guest agent is not ready: {}",
+                guest_agent_info
+            ),
+            other => anyhow::bail!("unexpected EXO VM daemon status: {:?}", other),
         }
     }
 
@@ -115,15 +128,27 @@ impl MacLinuxBackend {
     /// the RPC channel in hex-encoded chunks, then asks the guest to extract it.
     /// No-op for images we don't know how to provision or that are already present.
     pub async fn ensure_image(&self, image: &str) -> anyhow::Result<()> {
-        let Some(url) = Self::image_rootfs_url(image) else {
-            return Ok(());
-        };
-        if let Ok(GuestResponse::Ok { message }) = self.client()?.guest_request(GuestRequest::ImageExists {
+        let image_status = self.client()?.guest_request(GuestRequest::ImageExists {
             image: image.to_string(),
-        }) {
-            if message == "present" {
-                return Ok(());
-            }
+        })?;
+        if matches!(
+            image_status,
+            GuestResponse::Ok { ref message } if message == "present"
+        ) {
+            return Ok(());
+        }
+
+        let Some(url) = Self::image_rootfs_url(image) else {
+            anyhow::bail!(
+                "image '{}' is not present in the EXO Linux VM and has no automatic provisioner; import it explicitly first",
+                image
+            );
+        };
+        if !matches!(image_status, GuestResponse::Ok { .. }) {
+            anyhow::bail!(
+                "unexpected guest response while checking image: {:?}",
+                image_status
+            );
         }
 
         let safe: String = image
@@ -163,6 +188,39 @@ impl MacLinuxBackend {
         tracing::info!("Image '{}' provisioned into guest", image);
         Ok(())
     }
+
+    fn validate_run_config(config: &ContainerConfig) -> anyhow::Result<()> {
+        if config.network.mode != "none"
+            || !config.network.port_mappings.is_empty()
+            || !config.network.dns.is_empty()
+        {
+            anyhow::bail!(
+                "networking is not implemented for the EXO macOS Linux VM yet; rerun with --network none"
+            );
+        }
+        if config.resources.memory.is_some()
+            || config.resources.cpu.is_some()
+            || config.resources.cpus.is_some()
+            || config.resources.memory_swap.is_some()
+            || config.resources.memory_reservation.is_some()
+            || config.resources.cpu_shares.is_some()
+            || config.resources.pids_limit.is_some()
+        {
+            anyhow::bail!("resource limits are not enforced by the EXO macOS Linux VM yet");
+        }
+        if config.gpu.is_some() {
+            anyhow::bail!("GPU passthrough is not implemented for the EXO macOS Linux VM");
+        }
+        for mount in &config.mounts {
+            if mount.source.contains('/') {
+                anyhow::bail!(
+                    "host bind mount '{}' is not implemented for the EXO macOS Linux VM; use a named guest volume until virtio-fs lands",
+                    mount.source
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Lowercase hex-encode bytes for line-delimited JSON transport.
@@ -176,6 +234,133 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Create a gzipped tarball of a directory's *contents* and stream it into the
+/// guest via WriteChunk requests.
+fn push_workspace_to_guest(
+    backend: &MacLinuxBackend,
+    host_dir: &std::path::Path,
+    guest_tar_path: &str,
+) -> anyhow::Result<()> {
+    let temp = tempfile::NamedTempFile::with_suffix(".tar.gz")?;
+    tar_directory_contents(host_dir, temp.path())?;
+
+    let bytes = std::fs::read(temp.path())?;
+    const CHUNK: usize = 2 * 1024;
+    let client = backend.client()?;
+    tracing::info!(
+        "Pushing workspace {} into guest ({} bytes, {} chunks)",
+        host_dir.display(),
+        bytes.len(),
+        bytes.len().div_ceil(CHUNK)
+    );
+    for (i, chunk) in bytes.chunks(CHUNK).enumerate() {
+        match client.guest_request(GuestRequest::WriteChunk {
+            path: guest_tar_path.to_string(),
+            data_hex: to_hex(chunk),
+            append: i > 0,
+        })? {
+            GuestResponse::Ok { .. } => {}
+            GuestResponse::Error { message } => anyhow::bail!("WriteChunk failed: {}", message),
+            other => anyhow::bail!("unexpected response to WriteChunk: {:?}", other),
+        }
+    }
+    Ok(())
+}
+
+/// Read the guest-side exported workspace tarball back to the host and extract
+/// it over the host workspace directory.
+fn pull_workspace_from_guest(
+    backend: &MacLinuxBackend,
+    container_name: &str,
+    guest_tar_path: &str,
+    host_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let temp = tempfile::NamedTempFile::with_suffix(".tar.gz")?;
+    read_guest_file_chunks(backend, guest_tar_path, temp.path())?;
+    extract_tarball_contents(temp.path(), host_dir)?;
+    tracing::info!(
+        "Pulled workspace for container {} back to {}",
+        container_name,
+        host_dir.display()
+    );
+    Ok(())
+}
+
+fn read_guest_file_chunks(
+    backend: &MacLinuxBackend,
+    guest_path: &str,
+    host_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let mut file = std::fs::File::create(host_path)?;
+    let mut offset: u64 = 0;
+    const CHUNK: usize = 2 * 1024;
+    let client = backend.client()?;
+    loop {
+        match client.guest_request(GuestRequest::ReadChunk {
+            path: guest_path.to_string(),
+            offset,
+            len: CHUNK,
+        })? {
+            GuestResponse::Chunk { data_hex, eof } => {
+                let bytes = decode_hex(&data_hex)
+                    .ok_or_else(|| anyhow::anyhow!("invalid hex chunk from guest"))?;
+                use std::io::Write;
+                file.write_all(&bytes)?;
+                offset += bytes.len() as u64;
+                if eof || bytes.is_empty() {
+                    break;
+                }
+            }
+            GuestResponse::Error { message } => anyhow::bail!("ReadChunk failed: {}", message),
+            other => anyhow::bail!("unexpected response to ReadChunk: {:?}", other),
+        }
+    }
+    Ok(())
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    let s = s.as_bytes();
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    fn nib(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for pair in s.chunks(2) {
+        out.push((nib(pair[0])? << 4) | nib(pair[1])?);
+    }
+    Some(out)
+}
+
+fn tar_directory_contents(src_dir: &std::path::Path, dst_file: &std::path::Path) -> anyhow::Result<()> {
+    let file = std::fs::File::create(dst_file)?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    for entry in walkdir::WalkDir::new(src_dir).min_depth(1) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(src_dir)?;
+        builder.append_path_with_name(path, rel)?;
+    }
+    builder.finish()?;
+    Ok(())
+}
+
+fn extract_tarball_contents(src_file: &std::path::Path, dst_dir: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst_dir)?;
+    let file = std::fs::File::open(src_file)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(dst_dir)?;
+    Ok(())
+}
+
 #[async_trait]
 impl ExoBackend for MacLinuxBackend {
     async fn run(
@@ -183,12 +368,49 @@ impl ExoBackend for MacLinuxBackend {
         config: ContainerConfig,
         _opts: BackendRunOptions,
     ) -> anyhow::Result<RunResult> {
+        Self::validate_run_config(&config)?;
         // Provision the image rootfs into the guest so the run is isolated in
         // that rootfs rather than exec'd raw in the guest.
         self.ensure_image(&config.image).await?;
 
-        let spec = Self::container_spec(&config);
-        match self.client()?.guest_request(GuestRequest::RunContainer {
+        let mut spec = Self::container_spec(&config);
+        let workspace_host_path = config.workspace.clone();
+
+        // Push the host workspace into the guest before the run. The tarball
+        // contents are extracted into a guest staging area; the guest runtime
+        // copies them into the container's workdir after mounting the overlay.
+        let pushed_guest_tar = if let Some(ref host_ws) = workspace_host_path {
+            if host_ws.exists() && host_ws.is_dir() {
+                let guest_tar = format!("/tmp/exo-workspace-in-{}.tar.gz", spec.name);
+                push_workspace_to_guest(self, host_ws, &guest_tar)?;
+                let dest_dir = format!("/var/lib/exo-guest/workspaces/{}", spec.name);
+                match self.client()?.guest_request(GuestRequest::PushWorkspace {
+                    tar_path: guest_tar.clone(),
+                    dest_dir: dest_dir.clone(),
+                })? {
+                    GuestResponse::Ok { .. } => {
+                        // Tell the guest runtime where the staged workspace is so
+                        // it can copy it into the container before exec.
+                        spec.workspace = Some(dest_dir.clone());
+                        Some((guest_tar, dest_dir))
+                    }
+                    GuestResponse::Error { message } => {
+                        anyhow::bail!("PushWorkspace failed: {}", message)
+                    }
+                    other => anyhow::bail!("unexpected response to PushWorkspace: {:?}", other),
+                }
+            } else {
+                tracing::warn!(
+                    "workspace {} does not exist or is not a directory; skipping push",
+                    host_ws.display()
+                );
+                None
+            }
+        } else {
+            None
+        };
+
+        let result = match self.client()?.guest_request(GuestRequest::RunContainer {
             spec,
             detach: _opts.detach,
             rm: _opts.rm,
@@ -203,16 +425,32 @@ impl ExoBackend for MacLinuxBackend {
                 if !stderr.is_empty() {
                     tracing::warn!("guest stderr: {}", stderr);
                 }
-                Ok(RunResult {
+                RunResult {
                     id: Some(id),
                     name,
                     message: stdout,
                     exit_code,
-                })
+                }
             }
             GuestResponse::Error { message } => anyhow::bail!("{}", message),
             other => anyhow::bail!("unexpected guest response to RunContainer: {:?}", other),
+        };
+
+        // Pull the workspace back after the run so host-side artifacts are
+        // persisted. The guest exports the modified overlay upper layer to a
+        // known /tmp path before removing the container.
+        if let Some((guest_in_tar, guest_dest_dir)) = pushed_guest_tar {
+            if let Some(ref host_ws) = workspace_host_path {
+                let guest_out_tar = format!("/tmp/exo-workspace-out-{}.tar.gz", result.name);
+                if let Err(e) =
+                    pull_workspace_from_guest(self, &result.name, &guest_out_tar, host_ws)
+                {
+                    tracing::warn!("failed to pull workspace back from guest: {}", e);
+                }
+            }
         }
+
+        Ok(result)
     }
 
     async fn list(&self, _opts: ListOptions) -> anyhow::Result<Vec<ContainerMetadata>> {
@@ -280,6 +518,9 @@ impl ExoBackend for MacLinuxBackend {
     }
 
     async fn logs(&self, _id: &str, _opts: BackendLogOptions) -> anyhow::Result<LogStream> {
+        if _opts.follow {
+            anyhow::bail!("follow-mode logs are not implemented for the EXO macOS Linux VM yet");
+        }
         match self.client()?.guest_request(GuestRequest::Logs {
             id: _id.to_string(),
             follow: _opts.follow,
@@ -298,6 +539,9 @@ impl ExoBackend for MacLinuxBackend {
         _command: Vec<String>,
         _opts: ExecOptions,
     ) -> anyhow::Result<i32> {
+        if _opts.interactive || _opts.tty {
+            anyhow::bail!("interactive/TTY exec is not implemented for the EXO macOS Linux VM yet");
+        }
         match self.client()?.guest_request(GuestRequest::Exec {
             id: _id.to_string(),
             command: _command,
@@ -396,8 +640,31 @@ mod tests {
         let backend = MacLinuxBackend::new(crate::VmConfig::default());
         let caps = backend.capabilities();
         assert!(caps.linux_containers);
-        assert!(caps.namespaces);
-        assert!(caps.cgroups);
+        assert!(caps.overlayfs);
+        assert!(caps.daemon);
+        assert!(!caps.namespaces);
+        assert!(!caps.cgroups);
+        assert!(!caps.seccomp);
+        assert!(!caps.rootless);
         assert!(!caps.native_processes);
+    }
+
+    #[test]
+    fn rejects_unenforced_network_and_host_mounts() {
+        let mut config = ContainerConfig::default();
+        assert!(MacLinuxBackend::validate_run_config(&config).is_err());
+
+        config.network.mode = "none".to_string();
+        assert!(MacLinuxBackend::validate_run_config(&config).is_ok());
+
+        config.mounts.push(exo_runtime::MountConfig {
+            mount_type: "bind".to_string(),
+            source: "/host/project".to_string(),
+            target: "/project".to_string(),
+            readonly: true,
+            size: None,
+            propagation: "rprivate".to_string(),
+        });
+        assert!(MacLinuxBackend::validate_run_config(&config).is_err());
     }
 }

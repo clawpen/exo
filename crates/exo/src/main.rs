@@ -47,6 +47,11 @@ enum Commands {
         #[arg(long, value_name = "DIR")]
         workdir: Option<String>,
 
+        /// Host workspace directory to stream into the container and pull back
+        /// after the run (macOS Linux microVM backend only)
+        #[arg(long, value_name = "DIR")]
+        workspace: Option<String>,
+
         /// Volume mounts (source:target)
         #[arg(short, long, value_name = "SRC:DEST")]
         volume: Vec<String>,
@@ -118,6 +123,10 @@ enum Commands {
         /// Output in JSON format
         #[arg(long)]
         json: bool,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
     },
 
     /// Start a stopped container
@@ -128,6 +137,10 @@ enum Commands {
         /// Attach to container output
         #[arg(short, long)]
         attach: bool,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
     },
 
     /// Stop a running container
@@ -142,6 +155,10 @@ enum Commands {
         /// Wait time before force killing (seconds)
         #[arg(short, long, default_value = "10")]
         time: u64,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
     },
 
     /// Remove a container
@@ -153,6 +170,10 @@ enum Commands {
         /// Force remove (even if running)
         #[arg(short, long)]
         force: bool,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
     },
 
     /// View container logs
@@ -171,6 +192,10 @@ enum Commands {
         /// Show timestamps
         #[arg(long)]
         timestamps: bool,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
     },
 
     /// Execute a command in a running container
@@ -193,6 +218,10 @@ enum Commands {
         /// User to run as
         #[arg(long, value_name = "USER")]
         user: Option<String>,
+
+        /// Runtime backend: auto, native, or linux
+        #[arg(long, value_name = "BACKEND", default_value = "auto")]
+        backend: String,
     },
 
     /// Pull an image
@@ -463,6 +492,7 @@ async fn main() -> anyhow::Result<()> {
             name,
             config,
             workdir,
+            workspace,
             volume,
             env,
             secret,
@@ -485,6 +515,7 @@ async fn main() -> anyhow::Result<()> {
                 name,
                 config,
                 workdir,
+                workspace,
                 volume,
                 env,
                 secret,
@@ -503,38 +534,60 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?
         }
-        Commands::List { all, json } => {
-            commands::list::execute(commands::list::ListArgs { all, json }).await?
+        Commands::List { all, json, backend } => {
+            commands::list::execute(commands::list::ListArgs { all, json, backend }).await?
         }
-        Commands::Start { container, attach } => {
-            commands::start::execute(commands::start::StartArgs { container, attach }).await?
+        Commands::Start {
+            container,
+            attach,
+            backend,
+        } => {
+            commands::start::execute(commands::start::StartArgs {
+                container,
+                attach,
+                backend,
+            })
+            .await?
         }
         Commands::Stop {
             container,
             force,
             time,
+            backend,
         } => {
             commands::stop::execute(commands::stop::StopArgs {
                 container,
                 force,
                 time,
+                backend,
             })
             .await?
         }
-        Commands::Remove { container, force } => {
-            commands::remove::execute(commands::remove::RemoveArgs { container, force }).await?
+        Commands::Remove {
+            container,
+            force,
+            backend,
+        } => {
+            commands::remove::execute(commands::remove::RemoveArgs {
+                container,
+                force,
+                backend,
+            })
+            .await?
         }
         Commands::Logs {
             container,
             follow,
             tail,
             timestamps,
+            backend,
         } => {
             commands::logs::execute(commands::logs::LogsArgs {
                 container,
                 follow,
                 tail,
                 timestamps,
+                backend,
             })
             .await?
         }
@@ -544,6 +597,7 @@ async fn main() -> anyhow::Result<()> {
             interactive,
             tty,
             user,
+            backend,
         } => {
             commands::exec::execute(commands::exec::ExecArgs {
                 container,
@@ -551,6 +605,7 @@ async fn main() -> anyhow::Result<()> {
                 interactive,
                 tty,
                 user,
+                backend,
             })
             .await?
         }

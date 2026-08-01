@@ -34,6 +34,21 @@ pub fn request(
         return Err(std::io::Error::last_os_error())
             .map_err(|e| anyhow::anyhow!("failed to dup RPC fd: {}", e));
     }
+
+    // Virtualization.framework hands back the host socketpair end in
+    // non-blocking mode. std's UnixStream read/write assume blocking semantics,
+    // so without clearing O_NONBLOCK the very first read returns EAGAIN
+    // ("Resource temporarily unavailable", os error 35) and the guest looks
+    // unreachable even though it is answering. Clear it on the dup we own.
+    unsafe {
+        let flags = libc::fcntl(dup_fd, libc::F_GETFL, 0);
+        if flags < 0 || libc::fcntl(dup_fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(dup_fd);
+            return Err(anyhow::anyhow!("failed to set RPC fd blocking: {}", err));
+        }
+    }
+
     let mut stream = unsafe { UnixStream::from_raw_fd(dup_fd) };
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;

@@ -9,6 +9,7 @@ mod runtime;
 
 use runtime::{ContainerSpec, ContainerSummary, GuestRuntime};
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,6 +68,23 @@ enum GuestRequest {
     ImageExists {
         image: String,
     },
+    /// Extract a host-streamed tarball into a guest directory before a container
+    /// run. The tarball must already exist at `tar_path` (written via WriteChunk).
+    PushWorkspace {
+        tar_path: String,
+        dest_dir: String,
+    },
+    /// Create a gzipped tarball of a guest directory so the host can pull it back.
+    ExportWorkspace {
+        source_dir: String,
+        tar_path: String,
+    },
+    /// Read a byte range from a guest file and return it as a hex-encoded chunk.
+    ReadChunk {
+        path: String,
+        offset: u64,
+        len: usize,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -100,6 +118,11 @@ enum GuestResponse {
     ImageImported {
         image: String,
         rootfs_path: String,
+    },
+    /// Hex-encoded byte chunk returned by ReadChunk.
+    Chunk {
+        data_hex: String,
+        eof: bool,
     },
     Error {
         message: String,
@@ -162,14 +185,19 @@ fn handle_request_with_runtime(
                 message: e.to_string(),
             },
         },
-        GuestRequest::StartContainer { id, .. } => GuestResponse::Error {
-            message: format!("container start is not implemented yet for {}", id),
+        GuestRequest::StartContainer { id, attach } => match runtime.start_container(&id, attach) {
+            Ok(()) => GuestResponse::Ok {
+                message: format!("container {} started", id),
+            },
+            Err(e) => GuestResponse::Error {
+                message: e.to_string(),
+            },
         },
         GuestRequest::StopContainer {
             id,
             force,
-            timeout_secs: _,
-        } => match runtime.stop_container(&id, force) {
+            timeout_secs,
+        } => match runtime.stop_container(&id, force, timeout_secs) {
             Ok(()) => GuestResponse::Ok {
                 message: format!("container {} stopped", id),
             },
@@ -230,6 +258,34 @@ fn handle_request_with_runtime(
             let present = runtime.image_rootfs_dir(&image).exists();
             GuestResponse::Ok {
                 message: if present { "present" } else { "absent" }.to_string(),
+            }
+        }
+        GuestRequest::PushWorkspace { tar_path, dest_dir } => {
+            match runtime.push_workspace(Path::new(&tar_path), Path::new(&dest_dir)) {
+                Ok(()) => GuestResponse::Ok {
+                    message: format!("workspace extracted to {}", dest_dir),
+                },
+                Err(e) => GuestResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        GuestRequest::ExportWorkspace { source_dir, tar_path } => {
+            match runtime.export_workspace(Path::new(&source_dir), Path::new(&tar_path)) {
+                Ok(()) => GuestResponse::Ok {
+                    message: format!("workspace exported to {}", tar_path),
+                },
+                Err(e) => GuestResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        GuestRequest::ReadChunk { path, offset, len } => {
+            match runtime.read_chunk(Path::new(&path), offset, len) {
+                Ok((data_hex, eof)) => GuestResponse::Chunk { data_hex, eof },
+                Err(e) => GuestResponse::Error {
+                    message: e.to_string(),
+                },
             }
         }
     }
@@ -416,6 +472,7 @@ mod tests {
             image: "alpine:latest".to_string(),
             command: command.into_iter().map(String::from).collect(),
             workdir: "/".to_string(),
+            workspace: None,
             env: vec!["EXO_TEST_VALUE=ok".to_string()],
             mounts: vec![],
             network: NetworkSpec {

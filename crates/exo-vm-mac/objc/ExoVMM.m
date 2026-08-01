@@ -176,8 +176,10 @@
             canStart = self.vm.canStart;
             NSLog(@"ExoVMM: starting VM (canStart=%d state=%ld)", canStart, (long)self.vm.state);
         });
-        // Wait briefly for the VM to finish asynchronous setup.
-        for (int i = 0; i < 50 && !canStart; i++) {
+        // Wait for the VM to finish asynchronous setup. On some macOS builds
+        // canStart remains false for several seconds even while state is
+        // Stopped and the configuration has already validated.
+        for (int i = 0; i < 200 && !canStart; i++) {
             [NSThread sleepForTimeInterval:0.05];
             dispatch_sync(self.vmQueue, ^{
                 canStart = self.vm.canStart;
@@ -185,8 +187,10 @@
         }
         NSLog(@"ExoVMM: canStart after wait=%d", canStart);
         if (!canStart) {
-            [self setLastErrorFromError:nil message:@"VM is not startable"];
-            return NO;
+            // Do not replace Virtualization.framework's real start error with
+            // an opaque advisory-state failure. Attempt start and let the
+            // completion handler return the actionable NSError.
+            NSLog(@"ExoVMM: canStart is still false; attempting start to obtain the framework result");
         }
         __block BOOL completed = NO;
         __block NSError *startError = nil;

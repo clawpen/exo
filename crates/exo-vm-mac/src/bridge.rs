@@ -32,6 +32,10 @@ pub struct ContainerSpec {
     pub image: String,
     pub command: Vec<String>,
     pub workdir: String,
+    /// Host workspace directory streamed into the container before the run and
+    /// pulled back after. The value is the guest path where the workspace is
+    /// extracted (typically the container workdir).
+    pub workspace: Option<String>,
     pub env: Vec<String>,
     pub mounts: Vec<MountSpec>,
     pub network: NetworkSpec,
@@ -104,6 +108,23 @@ pub enum GuestRequest {
     ImageExists {
         image: String,
     },
+    /// Extract a host-streamed tarball into a guest directory before a container
+    /// run. The tarball must already exist at `tar_path` (written via WriteChunk).
+    PushWorkspace {
+        tar_path: String,
+        dest_dir: String,
+    },
+    /// Create a gzipped tarball of a guest directory so the host can pull it back.
+    ExportWorkspace {
+        source_dir: String,
+        tar_path: String,
+    },
+    /// Read a byte range from a guest file and return it as a hex-encoded chunk.
+    ReadChunk {
+        path: String,
+        offset: u64,
+        len: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +159,11 @@ pub enum GuestResponse {
         image: String,
         rootfs_path: String,
     },
+    /// Hex-encoded byte chunk returned by ReadChunk.
+    Chunk {
+        data_hex: String,
+        eof: bool,
+    },
     Error {
         message: String,
     },
@@ -155,6 +181,7 @@ mod tests {
                 image: "alpine:latest".to_string(),
                 command: vec!["echo".to_string(), "hello".to_string()],
                 workdir: "/app".to_string(),
+                workspace: None,
                 env: vec!["A=B".to_string()],
                 mounts: vec![MountSpec {
                     source: "/host".to_string(),

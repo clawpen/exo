@@ -5,6 +5,7 @@ pub struct LogsArgs {
     pub follow: bool,
     pub tail: usize,
     pub timestamps: bool,
+    pub backend: String,
 }
 
 pub async fn execute(args: LogsArgs) -> anyhow::Result<()> {
@@ -33,14 +34,33 @@ pub async fn execute(args: LogsArgs) -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn execute_macos(args: LogsArgs) -> anyhow::Result<()> {
-    let output = super::mac::backend()?.logs(
-        &args.container,
-        exo_mac::LogOptions {
-            follow: args.follow,
-            tail: args.tail,
-            timestamps: args.timestamps,
-        },
-    )?;
-    print!("{}", output);
+    use exo_runtime::{BackendLogOptions, ExoBackend};
+
+    match super::mac::select_backend(&args.backend)? {
+        super::mac::BackendSelection::Native => {
+            let output = super::mac::native_backend()?.logs(
+                &args.container,
+                exo_mac::LogOptions {
+                    follow: args.follow,
+                    tail: args.tail,
+                    timestamps: args.timestamps,
+                },
+            )?;
+            print!("{}", output);
+        }
+        super::mac::BackendSelection::Linux => {
+            let output = super::mac::linux_backend()
+                .logs(
+                    &args.container,
+                    BackendLogOptions {
+                        follow: args.follow,
+                        tail: args.tail,
+                        timestamps: args.timestamps,
+                    },
+                )
+                .await?;
+            print!("{}", output.content);
+        }
+    }
     Ok(())
 }

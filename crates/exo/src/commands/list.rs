@@ -9,6 +9,7 @@ use exo_wsl::WslCommand;
 pub struct ListArgs {
     pub all: bool,
     pub json: bool,
+    pub backend: String,
 }
 
 pub async fn execute(args: ListArgs) -> Result<()> {
@@ -49,45 +50,89 @@ async fn execute_windows(args: ListArgs) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn execute_macos(args: ListArgs) -> Result<()> {
-    if args.json {
-        println!("{}", super::mac::backend()?.list_json(args.all)?);
-        return Ok(());
-    }
+    use exo_runtime::{ExoBackend, ListOptions};
 
-    let containers = super::mac::backend()?.list(args.all)?;
-    if containers.is_empty() {
-        if args.all {
-            println!("No containers found.");
-        } else {
-            println!("No running containers. Use --all to show all containers.");
+    match super::mac::select_backend(&args.backend)? {
+        super::mac::BackendSelection::Native => {
+            let backend = super::mac::native_backend()?;
+            if args.json {
+                println!("{}", backend.list_json(args.all)?);
+                return Ok(());
+            }
+
+            let containers = backend.list(args.all)?;
+            if containers.is_empty() {
+                print_empty(args.all);
+                return Ok(());
+            }
+
+            print_table_header();
+            for container in containers {
+                let id_short = &container.id[..8.min(container.id.len())];
+                let name = truncate(&container.name, 20);
+                let image = truncate(&container.image, 16);
+                let status = truncate(&container.status, 12);
+                let pid = container
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let created = format_created(container.created_at);
+                println!(
+                    "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
+                    id_short, name, image, status, pid, created
+                );
+            }
         }
-        return Ok(());
+        super::mac::BackendSelection::Linux => {
+            let containers = super::mac::linux_backend()
+                .list(ListOptions { all: args.all })
+                .await?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&containers)?);
+                return Ok(());
+            }
+            if containers.is_empty() {
+                print_empty(args.all);
+                return Ok(());
+            }
+            print_table_header();
+            for container in containers {
+                let id_short = &container.id[..8.min(container.id.len())];
+                let name = truncate(&container.name, 20);
+                let image = truncate(&container.image, 16);
+                let status = truncate(&container.status, 12);
+                let pid = container
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let created = format_created(container.created_at);
+                println!(
+                    "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
+                    id_short, name, image, status, pid, created
+                );
+            }
+        }
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn print_empty(all: bool) {
+    if all {
+        println!("No containers found.");
+    } else {
+        println!("No running containers. Use --all to show all containers.");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn print_table_header() {
     println!(
         "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
         "CONTAINER ID", "NAME", "IMAGE", "STATUS", "PID", "CREATED"
     );
     println!("{}", "-".repeat(90));
-
-    for container in containers {
-        let id_short = &container.id[..8.min(container.id.len())];
-        let name = truncate(&container.name, 20);
-        let image = truncate(&container.image, 16);
-        let status = truncate(&container.status, 12);
-        let pid = container
-            .pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let created = format_created(container.created_at);
-
-        println!(
-            "{:<12} {:<20} {:<16} {:<12} {:<8} {:<20}",
-            id_short, name, image, status, pid, created
-        );
-    }
-
-    Ok(())
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]

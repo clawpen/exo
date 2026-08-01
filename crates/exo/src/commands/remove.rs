@@ -9,6 +9,7 @@ use exo_wsl::WslCommand;
 pub struct RemoveArgs {
     pub container: String,
     pub force: bool,
+    pub backend: String,
 }
 
 pub async fn execute(args: RemoveArgs) -> Result<()> {
@@ -93,8 +94,20 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn execute_macos(args: RemoveArgs) -> Result<()> {
-    let output = super::mac::backend()?.remove(&args.container, args.force)?;
-    print!("{}", output);
+    use exo_runtime::{ExoBackend, RemoveOptions};
+
+    match super::mac::select_backend(&args.backend)? {
+        super::mac::BackendSelection::Native => {
+            let output = super::mac::native_backend()?.remove(&args.container, args.force)?;
+            print!("{}", output);
+        }
+        super::mac::BackendSelection::Linux => {
+            super::mac::linux_backend()
+                .remove(&args.container, RemoveOptions { force: args.force })
+                .await?;
+            println!("Container {} removed from the EXO Linux VM", args.container);
+        }
+    }
     Ok(())
 }
 

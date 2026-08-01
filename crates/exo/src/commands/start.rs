@@ -12,6 +12,7 @@ pub struct StartArgs {
     pub container: String,
     /// Attach to container (follow logs)
     pub attach: bool,
+    pub backend: String,
 }
 
 pub async fn execute(args: StartArgs) -> Result<()> {
@@ -76,8 +77,25 @@ async fn execute_windows(args: StartArgs) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn execute_macos(args: StartArgs) -> Result<()> {
-    let output = super::mac::backend()?.start(&args.container, args.attach)?;
-    print!("{}", output);
+    use exo_runtime::{ExoBackend, StartOptions};
+
+    match super::mac::select_backend(&args.backend)? {
+        super::mac::BackendSelection::Native => {
+            let output = super::mac::native_backend()?.start(&args.container, args.attach)?;
+            print!("{}", output);
+        }
+        super::mac::BackendSelection::Linux => {
+            super::mac::linux_backend()
+                .start(
+                    &args.container,
+                    StartOptions {
+                        attach: args.attach,
+                    },
+                )
+                .await?;
+            println!("Container {} started in the EXO Linux VM", args.container);
+        }
+    }
     Ok(())
 }
 

@@ -52,6 +52,8 @@ pub struct ContainerSpec {
     pub image: String,
     pub command: Vec<String>,
     pub workdir: String,
+    /// Guest path where the host workspace was extracted before the run.
+    pub workspace: Option<String>,
     pub env: Vec<String>,
     pub mounts: Vec<MountSpec>,
     pub network: NetworkSpec,
@@ -77,6 +79,7 @@ pub struct ContainerRecord {
     pub image: String,
     pub command: Vec<String>,
     pub workdir: String,
+    pub workspace: Option<String>,
     pub env: Vec<String>,
     pub mounts: Vec<MountSpec>,
     pub network: NetworkSpec,
@@ -135,6 +138,7 @@ impl GuestRuntime {
         fs::create_dir_all(self.containers_dir())?;
         fs::create_dir_all(self.images_dir())?;
         fs::create_dir_all(self.volumes_dir())?;
+        fs::create_dir_all(self.workspaces_dir())?;
         Ok(())
     }
 
@@ -148,6 +152,10 @@ impl GuestRuntime {
 
     fn volumes_dir(&self) -> PathBuf {
         self.root.join("volumes")
+    }
+
+    fn workspaces_dir(&self) -> PathBuf {
+        self.root.join("workspaces")
     }
 
     fn container_dir(&self, name: &str) -> PathBuf {
@@ -192,6 +200,19 @@ impl GuestRuntime {
         record.stopped_at_ms = Some(now_ms());
         self.append_logs(&record.name, &stdout, &stderr)?;
         self.save_record(&record)?;
+
+        // If a workspace was pushed into this container, export the modified
+        // workdir to a known guest path before the container (and its overlay
+        // upper dir) is removed. The host pulls this tarball back after
+        // RunContainer returns.
+        if spec.workspace.is_some() {
+            if let Ok(Some(runtime_rootfs)) = self.resolve_runtime_rootfs(&record, &spec) {
+                let source = runtime_rootfs.join(spec.workdir.trim_start_matches('/'));
+                let out_tar = format!("/tmp/exo-workspace-out-{}.tar.gz", record.name);
+                let _ = self.export_workspace(&source, Path::new(&out_tar));
+            }
+        }
+
         if rm {
             let _ = self.remove_container(&record.name, true);
         }
@@ -289,46 +310,30 @@ impl GuestRuntime {
         let spec = record.to_spec();
         self.prepare_volumes_and_mounts(&spec)?;
 
-        let image_rootfs = self.rootfs_for_image(&spec.image);
-        let runtime_rootfs = if image_rootfs.exists() {
-            #[cfg(target_os = "linux")]
-            {
-                // Per-container writes must never fall back to the shared image
-                // rootfs unless the kernel truly cannot mount overlayfs. When
-                // overlayfs is unavailable, fall back automatically with a loud
-                // warning so first-boot bring-up can proceed on minimal VM
-                // kernels; production kernels should always enable overlayfs.
-                let layout = self.overlay_layout(&record.name, &spec.image);
-                match self.mount_overlay(&layout) {
-                    Ok(()) => layout.merged,
-                    Err(e) if !self.overlayfs_available() => {
-                        eprintln!(
-                            "WARNING: overlayfs unavailable ({e}); using unsafe shared-rootfs fallback. \
-                             Install a kernel with CONFIG_OVERLAY_FS=y for isolated containers."
-                        );
-                        image_rootfs.clone()
+        let runtime_rootfs = self.resolve_runtime_rootfs(record, &spec)?;
+        let mut command = match runtime_rootfs {
+            Some(ref rootfs) if rootfs.exists() => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.apply_bind_mounts(rootfs, &spec)?;
+                    // If a workspace was staged for this container, copy it into the
+                    // merged overlay workdir so the command sees the host files.
+                    if let Some(ref staged) = spec.workspace {
+                        let source = Path::new(staged);
+                        if source.exists() {
+                            let dest = rootfs.join(spec.workdir.trim_start_matches('/'));
+                            fs::create_dir_all(&dest)?;
+                            copy_dir_contents(source, &dest)?;
+                        }
                     }
-                    Err(e) => anyhow::bail!(
-                        "overlayfs is required for isolated container writes: {e}. \
-                         Fix the EXO VM kernel or set EXO_GUEST_ALLOW_SHARED_ROOTFS=1 \
-                         only for disposable development testing"
-                    ),
+                    command_in_rootfs(rootfs, &spec)?
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    command_in_rootfs(rootfs, &spec)?
                 }
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                image_rootfs.clone()
-            }
-        } else {
-            image_rootfs.clone()
-        };
-
-        let mut command = if runtime_rootfs.exists() {
-            #[cfg(target_os = "linux")]
-            self.apply_bind_mounts(&runtime_rootfs, &spec)?;
-            command_in_rootfs(&runtime_rootfs, &spec)?
-        } else {
-            command_in_guest(&spec)?
+            _ => command_in_guest(&spec)?,
         };
 
         for entry in &spec.env {
@@ -337,6 +342,44 @@ impl GuestRuntime {
             }
         }
         Ok(command)
+    }
+
+    /// Resolve the filesystem root that the container will run in: the merged
+    /// overlay when overlayfs is available, otherwise the shared image rootfs
+    /// (with a warning). Returns `None` when no image rootfs exists and the
+    /// command should run directly in the guest.
+    fn resolve_runtime_rootfs(
+        &self,
+        record: &ContainerRecord,
+        spec: &ContainerSpec,
+    ) -> Result<Option<PathBuf>> {
+        let image_rootfs = self.rootfs_for_image(&spec.image);
+        if !image_rootfs.exists() {
+            return Ok(None);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let layout = self.overlay_layout(&record.name, &spec.image);
+            match self.mount_overlay(&layout) {
+                Ok(()) => Ok(Some(layout.merged)),
+                Err(e) if !self.overlayfs_available() => {
+                    eprintln!(
+                        "WARNING: overlayfs unavailable ({e}); using unsafe shared-rootfs fallback. \
+                         Install a kernel with CONFIG_OVERLAY_FS=y for isolated containers."
+                    );
+                    Ok(Some(image_rootfs))
+                }
+                Err(e) => anyhow::bail!(
+                    "overlayfs is required for isolated container writes: {e}. \
+                     Fix the EXO VM kernel or set EXO_GUEST_ALLOW_SHARED_ROOTFS=1 \
+                     only for disposable development testing"
+                ),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Some(image_rootfs))
+        }
     }
 
     /// Check whether the kernel advertises overlayfs support.
@@ -485,6 +528,63 @@ impl GuestRuntime {
             std::fs::set_permissions(&target, perms)?;
         }
         Ok(())
+    }
+
+    /// Extract a host-streamed tarball into a guest directory. Used to push the
+    /// host workspace into the VM before a container run.
+    pub fn push_workspace(&self, tar_path: &Path, dest_dir: &Path) -> Result<()> {
+        fs::create_dir_all(dest_dir)?;
+        let file = fs::File::open(tar_path)
+            .with_context(|| format!("open workspace archive {}", tar_path.display()))?;
+        if is_gzip(tar_path)? {
+            let decoder = flate2::read::GzDecoder::new(file);
+            tar::Archive::new(decoder)
+                .unpack(dest_dir)
+                .with_context(|| format!("extract {} to {}", tar_path.display(), dest_dir.display()))?;
+        } else {
+            tar::Archive::new(file)
+                .unpack(dest_dir)
+                .with_context(|| format!("extract {} to {}", tar_path.display(), dest_dir.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Create a gzipped tarball of a guest directory so the host can pull the
+    /// workspace back after a container run.
+    pub fn export_workspace(&self, source_dir: &Path, tar_path: &Path) -> Result<()> {
+        fs::create_dir_all(
+            tar_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("tar path has no parent"))?,
+        )?;
+        let file = fs::File::create(tar_path)
+            .with_context(|| format!("create workspace archive {}", tar_path.display()))?;
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        // Append the source directory's *contents* so the host can extract
+        // directly over its workspace directory.
+        builder
+            .append_dir_all(".", source_dir)
+            .with_context(|| format!("archive {} to {}", source_dir.display(), tar_path.display()))?;
+        builder
+            .finish()
+            .with_context(|| format!("finish workspace archive {}", tar_path.display()))?;
+        Ok(())
+    }
+
+    /// Read a byte range from a guest file and return it as a hex-encoded string
+    /// plus an EOF flag.
+    pub fn read_chunk(&self, path: &Path, offset: u64, len: usize) -> Result<(String, bool)> {
+        let mut file = fs::File::open(path)
+            .with_context(|| format!("open chunk {}", path.display()))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seek chunk {} at {}", path.display(), offset))?;
+        let mut buf = vec![0u8; len];
+        let n = file.read(&mut buf)?;
+        buf.truncate(n);
+        let hex = encode_hex(&buf);
+        let eof = n < len;
+        Ok((hex, eof))
     }
 
     /// Overlay layout for a container run: read-only image rootfs as the lower
@@ -773,6 +873,7 @@ impl ContainerRecord {
             image: spec.image,
             command: spec.command,
             workdir: spec.workdir,
+            workspace: spec.workspace,
             env: spec.env,
             mounts: spec.mounts,
             network: spec.network,
@@ -792,6 +893,7 @@ impl ContainerRecord {
             image: self.image.clone(),
             command: self.command.clone(),
             workdir: self.workdir.clone(),
+            workspace: self.workspace.clone(),
             env: self.env.clone(),
             mounts: self.mounts.clone(),
             network: self.network.clone(),
@@ -917,6 +1019,46 @@ fn is_gzip(path: &Path) -> Result<bool> {
     Ok(n == 2 && magic == [0x1f, 0x8b])
 }
 
+/// Minimal hex encoder (avoids pulling in a crate for the guest).
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+/// Copy the contents of `src` into `dst`, preserving directory structure.
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst)?;
+    copy_dir_contents_recursive(src, dst, src)
+}
+
+fn copy_dir_contents_recursive(base: &Path, dst: &Path, current: &Path) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(base)?;
+        let target = dst.join(rel);
+        if entry.file_type()?.is_dir() {
+            fs::create_dir_all(&target)?;
+            copy_dir_contents_recursive(base, dst, &path)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &target)
+                .with_context(|| format!("copy {} to {}", path.display(), target.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1023,6 +1165,7 @@ mod tests {
             image: "guest".to_string(),
             command: command.into_iter().map(String::from).collect(),
             workdir: "/".to_string(),
+            workspace: None,
             env: vec!["A=B".to_string()],
             mounts: vec![MountSpec {
                 source: "data".to_string(),

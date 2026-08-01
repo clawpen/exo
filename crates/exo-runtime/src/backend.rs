@@ -81,25 +81,26 @@ impl BackendCapabilities {
         }
     }
 
-    /// Capabilities targeted by the Exo-managed Linux microVM backend on macOS.
+    /// Capabilities currently enforced by the Exo-managed Linux microVM backend
+    /// on macOS.
     ///
-    /// This represents the intended capability surface once the guest bridge is
-    /// connected; current implementations may still return "not ready" until
-    /// the VM manager can provide a live persistent guest connection.
+    /// The VM provides a Linux kernel boundary and the guest runtime requires an
+    /// isolated overlay rootfs. Namespace, cgroup, seccomp, host-volume, and port
+    /// forwarding claims remain false until the guest actually enforces them.
     pub fn macos_linux_microvm() -> Self {
         Self {
             linux_containers: true,
             native_processes: false,
             gpu: false,
             metal: false,
-            cgroups: true,
-            namespaces: true,
-            seccomp: true,
+            cgroups: false,
+            namespaces: false,
+            seccomp: false,
             overlayfs: true,
             port_forwarding: false,
             volume_mounts: false,
-            daemon: false,
-            rootless: true,
+            daemon: true,
+            rootless: false,
         }
     }
 }

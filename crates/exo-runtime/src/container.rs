@@ -477,6 +477,7 @@ mod tests {
             name: "test-container".to_string(),
             image: "python:3.12".to_string(),
             workdir: "/app".into(),
+            workspace: None,
             env: std::collections::HashMap::new(),
             user: "root".to_string(),
             command: vec!["sleep".to_string(), "10".to_string()],

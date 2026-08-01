@@ -6,6 +6,7 @@ pub struct ExecArgs {
     pub interactive: bool,
     pub tty: bool,
     pub user: Option<String>,
+    pub backend: String,
 }
 
 pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
@@ -15,13 +16,32 @@ pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        if args.interactive {
-            tracing::warn!("macOS native backend exec inherits stdin/stdout by default");
-        }
-        if args.tty {
-            tracing::warn!("macOS native backend does not allocate a new pseudo-TTY");
-        }
-        let code = super::mac::backend()?.exec(&args.container, args.command, args.user)?;
+        use exo_runtime::{ExecOptions, ExoBackend};
+
+        let code = match super::mac::select_backend(&args.backend)? {
+            super::mac::BackendSelection::Native => {
+                if args.interactive {
+                    tracing::warn!("macOS native backend exec inherits stdin/stdout by default");
+                }
+                if args.tty {
+                    tracing::warn!("macOS native backend does not allocate a new pseudo-TTY");
+                }
+                super::mac::native_backend()?.exec(&args.container, args.command, args.user)?
+            }
+            super::mac::BackendSelection::Linux => {
+                super::mac::linux_backend()
+                    .exec(
+                        &args.container,
+                        args.command,
+                        ExecOptions {
+                            user: args.user,
+                            interactive: args.interactive,
+                            tty: args.tty,
+                        },
+                    )
+                    .await?
+            }
+        };
         if code != 0 {
             anyhow::bail!("exec exited with code {}", code);
         }

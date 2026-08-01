@@ -10,6 +10,7 @@ pub struct StopArgs {
     pub container: String,
     pub force: bool,
     pub time: u64,
+    pub backend: String,
 }
 
 pub async fn execute(args: StopArgs) -> Result<()> {
@@ -75,8 +76,27 @@ async fn execute_windows(args: StopArgs) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn execute_macos(args: StopArgs) -> Result<()> {
-    let output = super::mac::backend()?.stop(&args.container, args.force, args.time)?;
-    print!("{}", output);
+    use exo_runtime::{ExoBackend, StopOptions};
+
+    match super::mac::select_backend(&args.backend)? {
+        super::mac::BackendSelection::Native => {
+            let output =
+                super::mac::native_backend()?.stop(&args.container, args.force, args.time)?;
+            print!("{}", output);
+        }
+        super::mac::BackendSelection::Linux => {
+            super::mac::linux_backend()
+                .stop(
+                    &args.container,
+                    StopOptions {
+                        force: args.force,
+                        timeout_secs: args.time,
+                    },
+                )
+                .await?;
+            println!("Container {} stopped in the EXO Linux VM", args.container);
+        }
+    }
     Ok(())
 }
 

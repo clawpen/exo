@@ -120,8 +120,14 @@ pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if handle_client(stream, &mut manager)? {
-                    should_stop = true;
+                match handle_client(stream, &mut manager) {
+                    Ok(true) => should_stop = true,
+                    Ok(false) => {}
+                    Err(e) => {
+                        // A single malformed or half-open client connection must
+                        // never take down the live VM handle. Log and keep serving.
+                        tracing::warn!("VM daemon client error: {}", e);
+                    }
                 }
             }
             Err(e) => {
@@ -142,6 +148,8 @@ pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
 }
 
 fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<bool> {
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;

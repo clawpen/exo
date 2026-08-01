@@ -19,6 +19,12 @@ pub struct ContainerConfig {
     #[serde(default = "default_workdir")]
     pub workdir: PathBuf,
 
+    /// Host workspace directory to stream into the container before the run and
+    /// pull back after the run. Used by the macOS Linux microVM backend where
+    /// host bind mounts are not available.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
+
     /// Environment variables
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -207,6 +213,7 @@ impl Default for ContainerConfig {
             name: String::new(),
             image: String::new(),
             workdir: default_workdir(),
+            workspace: None,
             env: HashMap::new(),
             user: default_user(),
             command: vec![],
