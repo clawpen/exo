@@ -317,6 +317,7 @@ impl GuestRuntime {
                 {
                     self.apply_bind_mounts(rootfs, &spec)?;
                     inject_resolv_conf(rootfs);
+                    prepare_rootfs_pseudo_fs(rootfs);
                     // If a workspace was staged for this container, copy it into the
                     // merged overlay workdir so the command sees the host files.
                     if let Some(ref staged) = spec.workspace {
@@ -1136,6 +1137,70 @@ fn inject_resolv_conf(rootfs: &Path) {
         return;
     }
     let _ = fs::copy(source, dest_dir.join("resolv.conf"));
+}
+
+/// Mount /proc into a container rootfs and create the basic device nodes a
+/// chrooted userspace expects. Image tars skip char devices (and whiteout
+/// application drops them), so /dev is empty without this; libuv reads
+/// /proc/self/status for uv_resident_set_memory, so node/openclaw fail
+/// outright without /proc. Best-effort: repeated mounts and existing nodes
+/// are fine.
+#[cfg(target_os = "linux")]
+fn prepare_rootfs_pseudo_fs(rootfs: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    let proc_dir = rootfs.join("proc");
+    if fs::create_dir_all(&proc_dir).is_ok() {
+        let target = match std::ffi::CString::new(proc_dir.as_os_str().as_bytes()) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        // EBUSY (already mounted by a previous container) is fine.
+        let ret = unsafe {
+            libc::mount(
+                b"proc\0".as_ptr() as *const libc::c_char,
+                target.as_ptr(),
+                b"proc\0".as_ptr() as *const libc::c_char,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EBUSY) {
+                eprintln!(
+                    "warning: mount proc at {} failed: {}",
+                    proc_dir.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    let dev_dir = rootfs.join("dev");
+    if fs::create_dir_all(&dev_dir).is_err() {
+        return;
+    }
+    // (name, major, minor, mode)
+    let devices: [(&str, u32, u32, u32); 4] = [
+        ("null", 1, 3, 0o666),
+        ("zero", 1, 5, 0o666),
+        ("random", 1, 8, 0o444),
+        ("urandom", 1, 9, 0o444),
+    ];
+    for (name, major, minor, mode) in devices {
+        let path = dev_dir.join(name);
+        if path.exists() {
+            continue;
+        }
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            continue;
+        };
+        let dev = libc::makedev(major, minor);
+        unsafe {
+            libc::mknod(c_path.as_ptr(), libc::S_IFCHR | mode, dev);
+        }
+    }
 }
 
 fn validate_container_name(value: &str) -> Result<()> {

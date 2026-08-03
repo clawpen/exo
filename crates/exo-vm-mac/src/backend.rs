@@ -612,8 +612,10 @@ impl ExoBackend for MacLinuxBackend {
 
         // Pull the workspace back after the run so host-side artifacts are
         // persisted. The guest exports the modified overlay upper layer to a
-        // known /tmp path before removing the container.
-        if pushed_guest_tar.is_some() {
+        // known /tmp path before removing the container. Detached containers
+        // are still running, so there is nothing to export yet — skip the
+        // pull (and its guaranteed "no such file" warning) for them.
+        if !_opts.detach && pushed_guest_tar.is_some() {
             if let Some(ref host_ws) = workspace_host_path {
                 let guest_out_tar = format!("/tmp/exo-workspace-out-{}.tar.gz", result.name);
                 if let Err(e) =
