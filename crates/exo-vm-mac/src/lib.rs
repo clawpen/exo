@@ -12,6 +12,7 @@ mod ffi;
 mod image;
 mod oci;
 mod paths;
+mod tunnel;
 mod vmm;
 
 pub use backend::MacLinuxBackend;

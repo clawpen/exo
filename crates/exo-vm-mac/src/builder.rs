@@ -18,10 +18,32 @@ struct DiskSupportPackages {
     virtio_blk_ko: PathBuf,
     ext4_ko: PathBuf,
     jbd2_ko: PathBuf,
+    vsock_ko: PathBuf,
+    vsock_virtio_common_ko: PathBuf,
+    vsock_virtio_ko: PathBuf,
     mke2fs: PathBuf,
     libext2fs: PathBuf,
     libe2p: PathBuf,
     libcom_err: PathBuf,
+}
+
+impl DiskSupportPackages {
+    fn all_present(&self) -> bool {
+        [
+            &self.virtio_blk_ko,
+            &self.ext4_ko,
+            &self.jbd2_ko,
+            &self.vsock_ko,
+            &self.vsock_virtio_common_ko,
+            &self.vsock_virtio_ko,
+            &self.mke2fs,
+            &self.libext2fs,
+            &self.libe2p,
+            &self.libcom_err,
+        ]
+        .iter()
+        .all(|p| p.exists())
+    }
 }
 
 /// Debian installer module Packages index for arm64. The installer module
@@ -29,6 +51,11 @@ struct DiskSupportPackages {
 /// found in the base initramfs always has matching module packages here.
 const INSTALLER_PACKAGES_URL: &str =
     "https://deb.debian.org/debian/dists/stable/main/debian-installer/binary-arm64/Packages.gz";
+
+/// Main arm64 Packages index, used to resolve the full kernel-image deb that
+/// carries the vsock modules (the installer udebs do not ship them).
+const MAIN_PACKAGES_URL: &str =
+    "https://deb.debian.org/debian/dists/stable/main/binary-arm64/Packages.gz";
 
 /// Userspace e2fsprogs packages for the guest (pinned to the Debian stable
 /// versions validated against the netboot glibc initramfs).
@@ -68,7 +95,9 @@ pub async fn ensure_image(config: &VmConfig, force: bool) -> anyhow::Result<Imag
         repack_initrd(temp_dir.path(), &exo_initrd)?;
     }
 
-    if force || !disk.exists() {
+    // The state disk holds guest images and workspaces; never truncate it on
+    // an image rebuild (`--force`). `exo vm reset` is the state-clearing path.
+    if !disk.exists() {
         create_sparse_disk(&disk, STATE_DISK_SIZE)?;
     }
 
@@ -126,8 +155,18 @@ async fn download_disk_support_packages(kver: &str) -> anyhow::Result<DiskSuppor
     let out = cache.join("extracted").join(kver);
     let marker = out.join(".complete");
     if marker.exists() {
-        info!("Using cached guest disk-support files at {}", out.display());
-        return Ok(disk_support_paths(&out));
+        let cached = disk_support_paths(&out);
+        // The marker only means a previous run finished; the required file set
+        // grows as the builder gains features (e.g. vsock modules), so treat a
+        // cache with missing files as incomplete and re-resolve.
+        if cached.all_present() {
+            info!("Using cached guest disk-support files at {}", out.display());
+            return Ok(cached);
+        }
+        info!(
+            "Cached guest disk-support files at {} are incomplete; re-resolving",
+            out.display()
+        );
     }
 
     // Resolve the installer module udebs for this exact kernel ABI.
@@ -138,6 +177,13 @@ async fn download_disk_support_packages(kver: &str) -> anyhow::Result<DiskSuppor
     let scsi_udeb = cache.join(format!("scsi-modules-{kver}-di.udeb"));
     download_file_if_missing(&filenames.0, &ext4_udeb).await?;
     download_file_if_missing(&filenames.1, &scsi_udeb).await?;
+
+    // The installer udebs do not ship vsock modules; the full kernel deb does.
+    let main_packages_gz = cache.join("main-Packages.gz");
+    let linux_image_url =
+        resolve_main_package(&main_packages_gz, &format!("linux-image-{kver}")).await?;
+    let linux_image_deb = cache.join(format!("linux-image-{kver}_arm64.deb"));
+    download_file_if_missing(&linux_image_url, &linux_image_deb).await?;
 
     let e2fsprogs_deb = cache.join("e2fsprogs_arm64.deb");
     let libext2fs_deb = cache.join("libext2fs2t64_arm64.deb");
@@ -169,6 +215,26 @@ async fn download_disk_support_packages(kver: &str) -> anyhow::Result<DiskSuppor
         &format!("{modules_base}/drivers/block/virtio_blk.ko.xz"),
         &out.join("virtio_blk.ko.xz"),
     )?;
+
+    let kernel_extract = extract_deb(&linux_image_deb)?;
+    let kernel_modules_base = format!("usr/lib/modules/{kver}/kernel");
+    for (rel, name) in [
+        ("net/vmw_vsock/vsock.ko.xz", "vsock.ko.xz"),
+        (
+            "net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.xz",
+            "vmw_vsock_virtio_transport_common.ko.xz",
+        ),
+        (
+            "net/vmw_vsock/vmw_vsock_virtio_transport.ko.xz",
+            "vmw_vsock_virtio_transport.ko.xz",
+        ),
+    ] {
+        copy_package_file(
+            &kernel_extract,
+            &format!("{kernel_modules_base}/{rel}"),
+            &out.join(name),
+        )?;
+    }
 
     let e2fsprogs_extract = extract_deb(&e2fsprogs_deb)?;
     copy_package_file(&e2fsprogs_extract, "usr/sbin/mke2fs", &out.join("mke2fs"))?;
@@ -208,11 +274,62 @@ fn disk_support_paths(out: &Path) -> DiskSupportPackages {
         virtio_blk_ko: out.join("virtio_blk.ko.xz"),
         ext4_ko: out.join("ext4.ko.xz"),
         jbd2_ko: out.join("jbd2.ko.xz"),
+        vsock_ko: out.join("vsock.ko.xz"),
+        vsock_virtio_common_ko: out.join("vmw_vsock_virtio_transport_common.ko.xz"),
+        vsock_virtio_ko: out.join("vmw_vsock_virtio_transport.ko.xz"),
         mke2fs: out.join("mke2fs"),
         libext2fs: out.join("libext2fs.so.2.4"),
         libe2p: out.join("libe2p.so.2.3"),
         libcom_err: out.join("libcom_err.so.2.1"),
     }
+}
+
+/// Load a Debian Packages index (cached at `packages_gz`, re-downloaded when
+/// stale) and run `parse` over its decompressed contents.
+async fn with_packages_index<T>(
+    packages_gz: &Path,
+    index_url: &str,
+    parse: impl Fn(&[u8]) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if packages_gz.exists() {
+        let gz = std::fs::read(packages_gz)?;
+        if let Ok(bytes) = gunzip(&gz) {
+            if let Ok(parsed) = parse(&bytes) {
+                return Ok(parsed);
+            }
+        }
+        info!(
+            "Cached Packages index {} is stale; re-downloading",
+            packages_gz.display()
+        );
+        let _ = std::fs::remove_file(packages_gz);
+    }
+
+    info!("Downloading Packages index from {index_url}");
+    let response = reqwest::get(index_url).await?;
+    response.error_for_status_ref()?;
+    let gz = response.bytes().await?;
+    std::fs::write(packages_gz, &gz)?;
+    let bytes = gunzip(&gz)?;
+    parse(&bytes)
+}
+
+/// Extract the Filename field for exact package names from Packages-index text.
+fn find_package_filenames(text: &str, wanted: &[&str]) -> Vec<Option<String>> {
+    let mut found: Vec<Option<String>> = vec![None; wanted.len()];
+    let mut current_pkg = String::new();
+    for line in text.lines() {
+        if let Some(pkg) = line.strip_prefix("Package: ") {
+            current_pkg = pkg.trim().to_string();
+        } else if let Some(file) = line.strip_prefix("Filename: ") {
+            for (i, name) in wanted.iter().enumerate() {
+                if current_pkg == *name && found[i].is_none() {
+                    found[i] = Some(format!("https://deb.debian.org/debian/{}", file.trim()));
+                }
+            }
+        }
+    }
+    found
 }
 
 /// Parse the installer Packages index and return full URLs of the ext4 and
@@ -221,52 +338,35 @@ async fn resolve_installer_udebs(
     packages_gz: &Path,
     kver: &str,
 ) -> anyhow::Result<(String, String)> {
-    let parse = |bytes: &[u8]| -> anyhow::Result<(String, String)> {
+    let ext4_pkg = format!("ext4-modules-{kver}-di");
+    let scsi_pkg = format!("scsi-modules-{kver}-di");
+    let urls = with_packages_index(packages_gz, INSTALLER_PACKAGES_URL, move |bytes| {
         let text = String::from_utf8_lossy(bytes);
-        let ext4_pkg = format!("ext4-modules-{kver}-di");
-        let scsi_pkg = format!("scsi-modules-{kver}-di");
-        let mut ext4_url = None;
-        let mut scsi_url = None;
-        let mut current_pkg = String::new();
-        for line in text.lines() {
-            if let Some(pkg) = line.strip_prefix("Package: ") {
-                current_pkg = pkg.trim().to_string();
-            } else if let Some(file) = line.strip_prefix("Filename: ") {
-                let file = file.trim();
-                if current_pkg == ext4_pkg {
-                    ext4_url = Some(format!("https://deb.debian.org/debian/{file}"));
-                } else if current_pkg == scsi_pkg {
-                    scsi_url = Some(format!("https://deb.debian.org/debian/{file}"));
-                }
-            }
-        }
-        match (ext4_url, scsi_url) {
-            (Some(e), Some(s)) => Ok((e, s)),
+        let found = find_package_filenames(&text, &[&ext4_pkg, &scsi_pkg]);
+        match found.as_slice() {
+            [Some(e), Some(s)] => Ok((e.clone(), s.clone())),
             _ => anyhow::bail!(
                 "installer Packages index has no module udebs for kernel {kver}; \
                  the Debian stable netboot kernel may have moved past the pinned initramfs"
             ),
         }
-    };
+    })
+    .await?;
+    Ok(urls)
+}
 
-    if packages_gz.exists() {
-        let gz = std::fs::read(packages_gz)?;
-        if let Ok(bytes) = gunzip(&gz) {
-            if let Ok(urls) = parse(&bytes) {
-                return Ok(urls);
-            }
+/// Resolve the full kernel-image deb (which carries the vsock modules) from
+/// the main Packages index.
+async fn resolve_main_package(packages_gz: &Path, package: &str) -> anyhow::Result<String> {
+    let package = package.to_string();
+    with_packages_index(packages_gz, MAIN_PACKAGES_URL, move |bytes| {
+        let text = String::from_utf8_lossy(bytes);
+        match find_package_filenames(&text, &[&package]).into_iter().next() {
+            Some(Some(url)) => Ok(url),
+            _ => anyhow::bail!("package {} not found in the main Packages index", package),
         }
-        info!("Cached installer Packages index is stale; re-downloading");
-        let _ = std::fs::remove_file(packages_gz);
-    }
-
-    info!("Downloading installer Packages index from {INSTALLER_PACKAGES_URL}");
-    let response = reqwest::get(INSTALLER_PACKAGES_URL).await?;
-    response.error_for_status_ref()?;
-    let gz = response.bytes().await?;
-    std::fs::write(packages_gz, &gz)?;
-    let bytes = gunzip(&gz)?;
-    parse(&bytes)
+    })
+    .await
 }
 
 fn gunzip(data: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -341,12 +441,23 @@ fn embed_disk_support(
     let block_dir = modules_base.join("drivers").join("block");
     let ext4_dir = modules_base.join("fs").join("ext4");
     let jbd2_dir = modules_base.join("fs").join("jbd2");
+    let vsock_dir = modules_base.join("net").join("vmw_vsock");
     std::fs::create_dir_all(&block_dir)?;
     std::fs::create_dir_all(&ext4_dir)?;
     std::fs::create_dir_all(&jbd2_dir)?;
+    std::fs::create_dir_all(&vsock_dir)?;
     std::fs::copy(&tools.virtio_blk_ko, block_dir.join("virtio_blk.ko.xz"))?;
     std::fs::copy(&tools.ext4_ko, ext4_dir.join("ext4.ko.xz"))?;
     std::fs::copy(&tools.jbd2_ko, jbd2_dir.join("jbd2.ko.xz"))?;
+    std::fs::copy(&tools.vsock_ko, vsock_dir.join("vsock.ko.xz"))?;
+    std::fs::copy(
+        &tools.vsock_virtio_common_ko,
+        vsock_dir.join("vmw_vsock_virtio_transport_common.ko.xz"),
+    )?;
+    std::fs::copy(
+        &tools.vsock_virtio_ko,
+        vsock_dir.join("vmw_vsock_virtio_transport.ko.xz"),
+    )?;
 
     let sbin_dir = temp_path.join("usr").join("sbin");
     std::fs::create_dir_all(&sbin_dir)?;
@@ -400,6 +511,7 @@ if [ -n "$KVER" ]; then
     depmod -a "$KVER" 2>/dev/null
     modprobe virtio_blk 2>/dev/null || true
     modprobe ext4 2>/dev/null || true
+    modprobe vmw_vsock_virtio_transport 2>/dev/null || true
 fi
 DISK=""
 i=0

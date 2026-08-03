@@ -295,17 +295,37 @@ impl MacLinuxBackend {
         Ok(())
     }
 
+    /// Remove an image rootfs from the guest store, e.g. to recover from a
+    /// partial import or to force a re-provision on the next run.
+    pub async fn remove_image(&self, image: &str) -> anyhow::Result<()> {
+        self.ensure_ready().await?;
+        match self.client()?.guest_request(GuestRequest::RemoveImage {
+            image: image.to_string(),
+        })? {
+            GuestResponse::Ok { .. } => Ok(()),
+            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            other => anyhow::bail!("unexpected guest response to RemoveImage: {:?}", other),
+        }
+    }
+
     fn validate_run_config(config: &ContainerConfig) -> anyhow::Result<()> {
         // The guest brings up eth0 over the host's VZ NAT attachment; chrooted
         // containers share that namespace, so "nat" gives outbound networking.
-        // Host port publishing still needs a vsock tunnel and stays rejected.
-        if !matches!(config.network.mode.as_str(), "none" | "nat" | "bridge")
-            || !config.network.port_mappings.is_empty()
-        {
+        // TCP port publishing works through the vsock tunnel: the daemon binds
+        // 127.0.0.1:<host_port> and forwards into the guest.
+        if !matches!(config.network.mode.as_str(), "none" | "nat" | "bridge") {
             anyhow::bail!(
-                "network mode '{}' or port publishing is not implemented for the EXO macOS Linux VM yet; use --network nat (outbound) or --network none",
+                "network mode '{}' is not implemented for the EXO macOS Linux VM yet; use --network nat (outbound) or --network none",
                 config.network.mode
             );
+        }
+        for port in &config.network.port_mappings {
+            if !port.protocol.eq_ignore_ascii_case("tcp") {
+                anyhow::bail!(
+                    "only TCP port publishing is supported by the EXO macOS Linux VM vsock tunnel, got '{}'",
+                    port.protocol
+                );
+            }
         }
         if config.resources.memory.is_some()
             || config.resources.cpu.is_some()
@@ -527,11 +547,32 @@ impl ExoBackend for MacLinuxBackend {
             None
         };
 
-        let result = match self.client()?.guest_request(GuestRequest::RunContainer {
-            spec,
-            detach: _opts.detach,
-            rm: _opts.rm,
-        })? {
+        // Publish requested container ports on the host loopback through the
+        // daemon's vsock tunnels. The guest connects 127.0.0.1:<container_port>
+        // per accepted host connection, so the tunnels work for any process
+        // listening inside the VM's shared network namespace.
+        let mut published_host_ports: Vec<u16> = Vec::new();
+        for port in &config.network.port_mappings {
+            self.client()?
+                .start_tunnel(port.host_port, port.container_port)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "publish {}:{} failed: {}",
+                        port.host_port,
+                        port.container_port,
+                        e
+                    )
+                })?;
+            published_host_ports.push(port.host_port);
+        }
+
+        let result: anyhow::Result<RunResult> = match self.client()?.guest_request(
+            GuestRequest::RunContainer {
+                spec,
+                detach: _opts.detach,
+                rm: _opts.rm,
+            },
+        )? {
             GuestResponse::RunResult {
                 id,
                 name,
@@ -542,21 +583,37 @@ impl ExoBackend for MacLinuxBackend {
                 if !stderr.is_empty() {
                     tracing::warn!("guest stderr: {}", stderr);
                 }
-                RunResult {
+                Ok(RunResult {
                     id: Some(id),
                     name,
                     message: stdout,
                     exit_code,
+                })
+            }
+            GuestResponse::Error { message } => Err(anyhow::anyhow!("{}", message)),
+            other => Err(anyhow::anyhow!(
+                "unexpected guest response to RunContainer: {:?}",
+                other
+            )),
+        };
+
+        // Foreground runs are done: tear the tunnels down. Detached containers
+        // keep serving, so their tunnels stay up in the daemon until the VM
+        // stops or an explicit StopTunnel arrives.
+        if !_opts.detach {
+            for host_port in published_host_ports {
+                if let Err(e) = self.client()?.stop_tunnel(host_port) {
+                    tracing::warn!("failed to stop tunnel on :{}: {}", host_port, e);
                 }
             }
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
-            other => anyhow::bail!("unexpected guest response to RunContainer: {:?}", other),
-        };
+        }
+
+        let result = result?;
 
         // Pull the workspace back after the run so host-side artifacts are
         // persisted. The guest exports the modified overlay upper layer to a
         // known /tmp path before removing the container.
-        if let Some((guest_in_tar, guest_dest_dir)) = pushed_guest_tar {
+        if pushed_guest_tar.is_some() {
             if let Some(ref host_ws) = workspace_host_path {
                 let guest_out_tar = format!("/tmp/exo-workspace-out-{}.tar.gz", result.name);
                 if let Err(e) =
@@ -772,7 +829,7 @@ mod tests {
         // The default bridge mode maps to guest NAT: allowed.
         assert!(MacLinuxBackend::validate_run_config(&config).is_ok());
 
-        // Host port publishing is not implemented yet.
+        // TCP host port publishing goes through the vsock tunnel: allowed.
         config
             .network
             .port_mappings
@@ -782,6 +839,10 @@ mod tests {
                 container_port: 80,
                 protocol: "tcp".to_string(),
             });
+        assert!(MacLinuxBackend::validate_run_config(&config).is_ok());
+
+        // UDP publishing is not supported by the tunnel.
+        config.network.port_mappings[0].protocol = "udp".to_string();
         assert!(MacLinuxBackend::validate_run_config(&config).is_err());
         config.network.port_mappings.clear();
 

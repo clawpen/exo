@@ -6,6 +6,8 @@
 //! serial port.
 
 mod runtime;
+#[cfg(target_os = "linux")]
+mod tunnel;
 
 use runtime::{ContainerSpec, ContainerSummary, GuestRuntime};
 use std::io::{BufRead, BufReader, Write};
@@ -66,6 +68,10 @@ enum GuestRequest {
     },
     /// Report whether an image rootfs is already present in the guest store.
     ImageExists {
+        image: String,
+    },
+    /// Delete an image rootfs from the guest store.
+    RemoveImage {
         image: String,
     },
     /// Extract a host-streamed tarball into a guest directory before a container
@@ -260,6 +266,14 @@ fn handle_request_with_runtime(
                 message: if present { "present" } else { "absent" }.to_string(),
             }
         }
+        GuestRequest::RemoveImage { image } => match runtime.remove_image(&image) {
+            Ok(()) => GuestResponse::Ok {
+                message: format!("image {} removed", image),
+            },
+            Err(e) => GuestResponse::Error {
+                message: e.to_string(),
+            },
+        }
         GuestRequest::PushWorkspace { tar_path, dest_dir } => {
             match runtime.push_workspace(Path::new(&tar_path), Path::new(&dest_dir)) {
                 Ok(()) => GuestResponse::Ok {
@@ -360,6 +374,11 @@ fn main() {
     // the port is unavailable, so a misconfigured guest still limps rather than
     // silently hangs.
     let started = Instant::now();
+
+    // Host-published container ports arrive over virtio-vsock; serve them on a
+    // dedicated thread so the serial RPC loop stays request/response only.
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(tunnel::serve_vsock_tunnels);
 
     // Try the dedicated RPC port first; on any failure, fall back to stdio so a
     // misconfigured guest limps instead of silently hanging.

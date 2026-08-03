@@ -13,6 +13,9 @@
 @property (assign) BOOL startCompleted;
 @property (assign) int rpcHostReadFd;
 @property (assign) int rpcHostWriteFd;
+// Retained live vsock tunnel connections, keyed by file descriptor, so the
+// connection object is not deallocated (closing the fd) while Rust pumps it.
+@property (strong) NSMutableDictionary<NSNumber *, VZVirtioSocketConnection *> *vsockConnections;
 @end
 
 @implementation ExoVM
@@ -24,6 +27,7 @@
         self.vmQueue = dispatch_queue_create("ca.clawpen.exo.vm", DISPATCH_QUEUE_SERIAL);
         self.rpcHostReadFd = -1;
         self.rpcHostWriteFd = -1;
+        self.vsockConnections = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -263,12 +267,15 @@
     __block BOOL connected = NO;
     dispatch_semaphore_t connectSem = dispatch_semaphore_create(0);
 
-    [socketDevice connectToPort:port completionHandler:^(VZVirtioSocketConnection *conn, NSError *err) {
-        connection = conn;
-        connectError = err;
-        connected = YES;
-        dispatch_semaphore_signal(connectSem);
-    }];
+    // Must run on the VM's dispatch queue; see connectVsockPort:.
+    dispatch_sync(self.vmQueue, ^{
+        [socketDevice connectToPort:port completionHandler:^(VZVirtioSocketConnection *conn, NSError *err) {
+            connection = conn;
+            connectError = err;
+            connected = YES;
+            dispatch_semaphore_signal(connectSem);
+        }];
+    });
 
     dispatch_time_t connectDeadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutMs * NSEC_PER_MSEC));
     dispatch_semaphore_wait(connectSem, connectDeadline);
@@ -349,6 +356,56 @@
 
     NSString *str = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
     return [str stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (int)connectVsockPort:(uint32_t)port timeout:(uint32_t)timeoutMs {
+    @autoreleasepool {
+        VZVirtioSocketDevice *socketDevice = (VZVirtioSocketDevice *)self.vm.socketDevices.firstObject;
+        if (!socketDevice) {
+            [self setLastErrorFromError:nil message:@"No socket device"];
+            return -1;
+        }
+        __block VZVirtioSocketConnection *connection = nil;
+        __block NSError *connectError = nil;
+        dispatch_semaphore_t connectSem = dispatch_semaphore_create(0);
+        // Virtualization.framework requires connectToPort: to run on the
+        // queue the VZVirtualMachine was created with; calling it from a bare
+        // tunnel thread trips dispatch_assert_queue and kills the process.
+        dispatch_sync(self.vmQueue, ^{
+            [socketDevice connectToPort:port completionHandler:^(VZVirtioSocketConnection *conn, NSError *err) {
+                connection = conn;
+                connectError = err;
+                dispatch_semaphore_signal(connectSem);
+            }];
+        });
+        dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutMs * NSEC_PER_MSEC));
+        if (dispatch_semaphore_wait(connectSem, deadline) != 0 || !connection) {
+            if (connectError) {
+                [self setLastErrorFromError:connectError message:@"vsock connect failed"];
+            } else {
+                [self setLastErrorFromError:nil message:@"Timeout connecting vsock port"];
+            }
+            return -1;
+        }
+        int fd = connection.fileDescriptor;
+        // Blocking semantics for std::fs::File pumping on the Rust side.
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags != -1) {
+            fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        }
+        @synchronized (self.vsockConnections) {
+            self.vsockConnections[@(fd)] = connection;
+        }
+        return fd;
+    }
+}
+
+- (void)disconnectVsockFd:(int)fd {
+    @autoreleasepool {
+        @synchronized (self.vsockConnections) {
+            [self.vsockConnections removeObjectForKey:@(fd)];
+        }
+    }
 }
 
 @end
@@ -459,6 +516,26 @@ int exo_vm_request(exo_vm_t vm, uint32_t port, const char *json_in,
 
         *json_out = strdup([response UTF8String]);
         return 0;
+    }
+}
+
+int exo_vm_vsock_connect(exo_vm_t vm, uint32_t port, uint32_t timeout_ms) {
+    @autoreleasepool {
+        if (!vm) return -1;
+        ExoVM *exoVM = (__bridge ExoVM *)vm;
+        if (exoVM.vm.state != VZVirtualMachineStateRunning) {
+            [exoVM setLastErrorFromError:nil message:@"VM is not running"];
+            return -1;
+        }
+        return [exoVM connectVsockPort:port timeout:timeout_ms];
+    }
+}
+
+void exo_vm_vsock_disconnect(exo_vm_t vm, int fd) {
+    @autoreleasepool {
+        if (!vm) return;
+        ExoVM *exoVM = (__bridge ExoVM *)vm;
+        [exoVM disconnectVsockFd:fd];
     }
 }
 

@@ -20,6 +20,9 @@ pub enum VmDaemonRequest {
     Status,
     Stop { force: bool },
     Guest { request: GuestRequest },
+    /// Publish a guest TCP port on the host loopback via the vsock tunnel.
+    StartTunnel { host_port: u16, guest_port: u16 },
+    StopTunnel { host_port: u16 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,12 @@ pub enum VmDaemonResponse {
     Stopped,
     Guest {
         response: GuestResponse,
+    },
+    TunnelStarted {
+        host_port: u16,
+    },
+    TunnelStopped {
+        host_port: u16,
     },
     Error {
         message: String,
@@ -96,6 +105,26 @@ impl VmDaemonClient {
 
     pub fn stop(&self, force: bool) -> anyhow::Result<VmDaemonResponse> {
         self.request(VmDaemonRequest::Stop { force })
+    }
+
+    /// Ask the daemon to publish `guest_port` on host loopback `host_port`.
+    pub fn start_tunnel(&self, host_port: u16, guest_port: u16) -> anyhow::Result<()> {
+        match self.request(VmDaemonRequest::StartTunnel {
+            host_port,
+            guest_port,
+        })? {
+            VmDaemonResponse::TunnelStarted { .. } => Ok(()),
+            VmDaemonResponse::Error { message } => anyhow::bail!("{}", message),
+            other => anyhow::bail!("unexpected VM daemon response: {:?}", other),
+        }
+    }
+
+    pub fn stop_tunnel(&self, host_port: u16) -> anyhow::Result<()> {
+        match self.request(VmDaemonRequest::StopTunnel { host_port })? {
+            VmDaemonResponse::TunnelStopped { .. } => Ok(()),
+            VmDaemonResponse::Error { message } => anyhow::bail!("{}", message),
+            other => anyhow::bail!("unexpected VM daemon response: {:?}", other),
+        }
     }
 }
 
@@ -245,6 +274,28 @@ fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<
                     Err(e) => VmDaemonResponse::Error {
                         message: e.to_string(),
                     },
+                }
+            }
+        }
+        Ok(VmDaemonRequest::StartTunnel {
+            host_port,
+            guest_port,
+        }) => {
+            // No boot-grace gate here: the tunnel only binds the host listener
+            // now; the vsock connection is opened per accepted connection.
+            match manager.start_tunnel(host_port, guest_port) {
+                Ok(()) => VmDaemonResponse::TunnelStarted { host_port },
+                Err(e) => VmDaemonResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Ok(VmDaemonRequest::StopTunnel { host_port }) => {
+            if manager.stop_tunnel(host_port) {
+                VmDaemonResponse::TunnelStopped { host_port }
+            } else {
+                VmDaemonResponse::Error {
+                    message: format!("no tunnel bound to host port {}", host_port),
                 }
             }
         }

@@ -404,6 +404,12 @@ enum VmCommands {
         #[arg(long, value_name = "PATH")]
         guest_path: String,
     },
+
+    /// Remove an image rootfs from the guest store
+    RmImage {
+        /// Image name/tag to remove from guest state
+        image: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -692,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
             VmCommands::ImportImage { image, guest_path } => {
                 commands::vm::import_image(image, guest_path).await?
             }
+            VmCommands::RmImage { image } => commands::vm::remove_image(image).await?,
         },
         Commands::Volume { command } => match command {
             VolumeCommands::Create { name } => {

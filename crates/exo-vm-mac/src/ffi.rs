@@ -32,6 +32,11 @@ extern "C" {
     ) -> c_int;
     pub fn exo_vm_rpc_fds(vm: *mut ExoVmHandle, read_fd: *mut c_int, write_fd: *mut c_int)
         -> c_int;
+    /// Open a vsock connection to a guest port. Returns a blocking file
+    /// descriptor (owned by the caller) or -1 on failure.
+    pub fn exo_vm_vsock_connect(vm: *mut ExoVmHandle, port: u32, timeout_ms: u32) -> c_int;
+    /// Release the retained VZVirtioSocketConnection for a closed fd.
+    pub fn exo_vm_vsock_disconnect(vm: *mut ExoVmHandle, fd: c_int);
     pub fn exo_vm_free_string(s: *mut c_char);
 }
 
@@ -96,6 +101,18 @@ pub mod stub {
     ) -> c_int {
         -1
     }
+
+    #[no_mangle]
+    pub extern "C" fn exo_vm_vsock_connect(
+        _vm: *mut ExoVmHandle,
+        _port: u32,
+        _timeout_ms: u32,
+    ) -> c_int {
+        -1
+    }
+
+    #[no_mangle]
+    pub extern "C" fn exo_vm_vsock_disconnect(_vm: *mut ExoVmHandle, _fd: c_int) {}
 
     #[no_mangle]
     pub extern "C" fn exo_vm_free_string(_s: *mut c_char) {}

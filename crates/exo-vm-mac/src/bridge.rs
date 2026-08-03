@@ -108,6 +108,10 @@ pub enum GuestRequest {
     ImageExists {
         image: String,
     },
+    /// Delete an image rootfs from the guest store.
+    RemoveImage {
+        image: String,
+    },
     /// Extract a host-streamed tarball into a guest directory before a container
     /// run. The tarball must already exist at `tar_path` (written via WriteChunk).
     PushWorkspace {

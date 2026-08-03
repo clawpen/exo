@@ -187,6 +187,21 @@ pub async fn import_image(image: String, guest_path: String) -> anyhow::Result<(
     }
 }
 
+pub async fn remove_image(image: String) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());
+        backend.remove_image(&image).await?;
+        println!("Removed image {}", image);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = image;
+        anyhow::bail!("'exo vm rm-image' is only supported on macOS")
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn start_daemon() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};

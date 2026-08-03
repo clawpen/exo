@@ -15,6 +15,8 @@ pub struct VmManager {
     config: VmConfig,
     state: VmState,
     handle: *mut ExoVmHandle,
+    /// Host-loopback port tunnels into the guest, keyed by host port.
+    tunnels: std::collections::HashMap<u16, crate::tunnel::HostTunnel>,
 }
 
 impl VmManager {
@@ -24,6 +26,7 @@ impl VmManager {
             config,
             state,
             handle: ptr::null_mut(),
+            tunnels: std::collections::HashMap::new(),
         })
     }
 
@@ -147,6 +150,9 @@ impl VmManager {
         if self.handle.is_null() {
             anyhow::bail!("VM is not running");
         }
+        // Tunnels pump vsock connections on this handle; stop them before the
+        // VM handle is freed.
+        self.tunnels.clear();
         let ret = unsafe { exo_vm_stop(self.handle) };
         if ret != 0 {
             let err = unsafe {
@@ -203,6 +209,31 @@ impl VmManager {
             req,
             self.config.guest_agent_timeout_ms,
         )
+    }
+
+    /// Publish a guest TCP port on the host loopback. The vsock connection is
+    /// opened per accepted host connection, so this can be called before the
+    /// guest agent is up; it only binds the host listener.
+    pub fn start_tunnel(&mut self, host_port: u16, guest_port: u16) -> anyhow::Result<()> {
+        if self.handle.is_null() {
+            anyhow::bail!("VM is not running");
+        }
+        if self.tunnels.contains_key(&host_port) {
+            anyhow::bail!("a tunnel is already bound to host port {}", host_port);
+        }
+        let tunnel = crate::tunnel::HostTunnel::start(
+            crate::tunnel::SendableHandle(self.handle),
+            host_port,
+            guest_port,
+        )?;
+        self.tunnels.insert(host_port, tunnel);
+        info!("tunnel: 127.0.0.1:{} -> guest :{}", host_port, guest_port);
+        Ok(())
+    }
+
+    /// Stop the tunnel bound to a host port, if any.
+    pub fn stop_tunnel(&mut self, host_port: u16) -> bool {
+        self.tunnels.remove(&host_port).is_some()
     }
 
     /// Print VM status.
@@ -277,6 +308,9 @@ impl VmManager {
 
 impl Drop for VmManager {
     fn drop(&mut self) {
+        // Tunnel threads call into the VM handle; they must be joined before
+        // the handle is stopped and freed.
+        self.tunnels.clear();
         if !self.handle.is_null() {
             warn!("VmManager dropped with live VM; stopping");
             unsafe {

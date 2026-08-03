@@ -485,6 +485,18 @@ impl GuestRuntime {
         self.rootfs_for_image(image)
     }
 
+    /// Remove an image rootfs from the guest store. The next run that needs it
+    /// re-provisions from the host.
+    pub fn remove_image(&self, image: &str) -> Result<()> {
+        let dir = self.images_dir().join(sanitize_name(image));
+        if !dir.exists() {
+            anyhow::bail!("image '{}' is not present in the guest store", image);
+        }
+        fs::remove_dir_all(&dir)
+            .with_context(|| format!("remove image store {}", dir.display()))?;
+        Ok(())
+    }
+
     /// Import an image rootfs from a `.tar` or `.tar.gz` archive into the guest
     /// image store. Returns the extracted rootfs directory.
     pub fn import_image_from_tar(&self, image: &str, tar_path: &Path) -> Result<PathBuf> {
@@ -827,8 +839,18 @@ impl GuestRuntime {
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 let path = entry.path().join("record.json");
                 if path.exists() {
-                    let bytes = fs::read(path)?;
-                    out.push(serde_json::from_slice(&bytes)?);
+                    // A container record corrupted by an unclean shutdown (or a
+                    // 0-byte file left by ext4 recovery) must not break listing
+                    // for every other container.
+                    match fs::read(&path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|bytes| Ok(serde_json::from_slice(&bytes)?))
+                    {
+                        Ok(record) => out.push(record),
+                        Err(e) => {
+                            eprintln!("skipping corrupt container record {}: {}", path.display(), e)
+                        }
+                    }
                 }
             }
         }
@@ -1168,11 +1190,6 @@ fn unmount_detached(path: &Path) -> Result<()> {
         return Ok(());
     }
     Err(error).with_context(|| format!("unmount {}", path.display()))
-}
-
-#[cfg(target_os = "linux")]
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
