@@ -992,11 +992,25 @@ fn command_in_rootfs(rootfs: &Path, spec: &ContainerSpec) -> Result<Command> {
             spec.workdir.clone()
         };
         let workdir_c = CString::new(workdir).context("workdir contains NUL")?;
+        let hostname_c = CString::new(spec.name.as_bytes()).context("name contains NUL")?;
+        // sethostname is capped at 64 bytes (incl. NUL) by the kernel.
+        let hostname_len = hostname_c.as_bytes().len().min(63);
 
         // SAFETY: only async-signal-safe libc calls in the pre_exec hook; the
         // CStrings are allocated before the fork and moved in.
         unsafe {
             cmd.pre_exec(move || {
+                // Isolate the container's mount table (its own mounts never
+                // leak into the guest's shared namespace, and guest-side
+                // unmounts on removal don't fight a live container), its
+                // hostname, and its SysV IPC. PID/user namespaces are not
+                // taken: unshare(CLONE_NEWPID) only affects future children,
+                // so it is useless without a second fork in this hook.
+                if libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::sethostname(hostname_c.as_ptr(), hostname_len);
                 if libc::chroot(root_c.as_ptr()) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }

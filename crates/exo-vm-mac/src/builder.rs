@@ -18,6 +18,7 @@ struct DiskSupportPackages {
     virtio_blk_ko: PathBuf,
     ext4_ko: PathBuf,
     jbd2_ko: PathBuf,
+    overlay_ko: PathBuf,
     vsock_ko: PathBuf,
     vsock_virtio_common_ko: PathBuf,
     vsock_virtio_ko: PathBuf,
@@ -33,6 +34,7 @@ impl DiskSupportPackages {
             &self.virtio_blk_ko,
             &self.ext4_ko,
             &self.jbd2_ko,
+            &self.overlay_ko,
             &self.vsock_ko,
             &self.vsock_virtio_common_ko,
             &self.vsock_virtio_ko,
@@ -228,6 +230,8 @@ async fn download_disk_support_packages(kver: &str) -> anyhow::Result<DiskSuppor
             "net/vmw_vsock/vmw_vsock_virtio_transport.ko.xz",
             "vmw_vsock_virtio_transport.ko.xz",
         ),
+        // Per-container writable layers; the installer kernel has no overlayfs.
+        ("fs/overlayfs/overlay.ko.xz", "overlay.ko.xz"),
     ] {
         copy_package_file(
             &kernel_extract,
@@ -277,6 +281,7 @@ fn disk_support_paths(out: &Path) -> DiskSupportPackages {
         vsock_ko: out.join("vsock.ko.xz"),
         vsock_virtio_common_ko: out.join("vmw_vsock_virtio_transport_common.ko.xz"),
         vsock_virtio_ko: out.join("vmw_vsock_virtio_transport.ko.xz"),
+        overlay_ko: out.join("overlay.ko.xz"),
         mke2fs: out.join("mke2fs"),
         libext2fs: out.join("libext2fs.so.2.4"),
         libe2p: out.join("libe2p.so.2.3"),
@@ -441,14 +446,17 @@ fn embed_disk_support(
     let block_dir = modules_base.join("drivers").join("block");
     let ext4_dir = modules_base.join("fs").join("ext4");
     let jbd2_dir = modules_base.join("fs").join("jbd2");
+    let overlay_dir = modules_base.join("fs").join("overlayfs");
     let vsock_dir = modules_base.join("net").join("vmw_vsock");
     std::fs::create_dir_all(&block_dir)?;
     std::fs::create_dir_all(&ext4_dir)?;
     std::fs::create_dir_all(&jbd2_dir)?;
+    std::fs::create_dir_all(&overlay_dir)?;
     std::fs::create_dir_all(&vsock_dir)?;
     std::fs::copy(&tools.virtio_blk_ko, block_dir.join("virtio_blk.ko.xz"))?;
     std::fs::copy(&tools.ext4_ko, ext4_dir.join("ext4.ko.xz"))?;
     std::fs::copy(&tools.jbd2_ko, jbd2_dir.join("jbd2.ko.xz"))?;
+    std::fs::copy(&tools.overlay_ko, overlay_dir.join("overlay.ko.xz"))?;
     std::fs::copy(&tools.vsock_ko, vsock_dir.join("vsock.ko.xz"))?;
     std::fs::copy(
         &tools.vsock_virtio_common_ko,
@@ -512,6 +520,7 @@ if [ -n "$KVER" ]; then
     modprobe virtio_blk 2>/dev/null || true
     modprobe ext4 2>/dev/null || true
     modprobe vmw_vsock_virtio_transport 2>/dev/null || true
+    modprobe overlay 2>/dev/null || true
 fi
 DISK=""
 i=0
