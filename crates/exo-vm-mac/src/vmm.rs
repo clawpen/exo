@@ -17,6 +17,9 @@ pub struct VmManager {
     handle: *mut ExoVmHandle,
     /// Host-loopback port tunnels into the guest, keyed by host port.
     tunnels: std::collections::HashMap<u16, crate::tunnel::HostTunnel>,
+    /// Which container each tunnel belongs to (by container name), so tunnels
+    /// can be retired when the container is stopped or removed.
+    tunnel_containers: std::collections::HashMap<u16, String>,
 }
 
 impl VmManager {
@@ -27,6 +30,7 @@ impl VmManager {
             state,
             handle: ptr::null_mut(),
             tunnels: std::collections::HashMap::new(),
+            tunnel_containers: std::collections::HashMap::new(),
         })
     }
 
@@ -153,6 +157,7 @@ impl VmManager {
         // Tunnels pump vsock connections on this handle; stop them before the
         // VM handle is freed.
         self.tunnels.clear();
+        self.tunnel_containers.clear();
         let ret = unsafe { exo_vm_stop(self.handle) };
         if ret != 0 {
             let err = unsafe {
@@ -213,8 +218,14 @@ impl VmManager {
 
     /// Publish a guest TCP port on the host loopback. The vsock connection is
     /// opened per accepted host connection, so this can be called before the
-    /// guest agent is up; it only binds the host listener.
-    pub fn start_tunnel(&mut self, host_port: u16, guest_port: u16) -> anyhow::Result<()> {
+    /// guest agent is up; it only binds the host listener. `container` ties
+    /// the tunnel to a container name for lifecycle cleanup.
+    pub fn start_tunnel(
+        &mut self,
+        host_port: u16,
+        guest_port: u16,
+        container: Option<String>,
+    ) -> anyhow::Result<()> {
         if self.handle.is_null() {
             anyhow::bail!("VM is not running");
         }
@@ -227,13 +238,33 @@ impl VmManager {
             guest_port,
         )?;
         self.tunnels.insert(host_port, tunnel);
+        if let Some(container) = container {
+            self.tunnel_containers.insert(host_port, container);
+        }
         info!("tunnel: 127.0.0.1:{} -> guest :{}", host_port, guest_port);
         Ok(())
     }
 
     /// Stop the tunnel bound to a host port, if any.
     pub fn stop_tunnel(&mut self, host_port: u16) -> bool {
+        self.tunnel_containers.remove(&host_port);
         self.tunnels.remove(&host_port).is_some()
+    }
+
+    /// Stop every tunnel associated with a container name. Returns the host
+    /// ports that were released.
+    pub fn stop_tunnels_for_container(&mut self, container: &str) -> Vec<u16> {
+        let ports: Vec<u16> = self
+            .tunnel_containers
+            .iter()
+            .filter(|(_, owner)| owner.as_str() == container)
+            .map(|(port, _)| *port)
+            .collect();
+        for port in &ports {
+            self.tunnel_containers.remove(port);
+            self.tunnels.remove(port);
+        }
+        ports
     }
 
     /// Print VM status.
@@ -311,6 +342,7 @@ impl Drop for VmManager {
         // Tunnel threads call into the VM handle; they must be joined before
         // the handle is stopped and freed.
         self.tunnels.clear();
+        self.tunnel_containers.clear();
         if !self.handle.is_null() {
             warn!("VmManager dropped with live VM; stopping");
             unsafe {

@@ -552,9 +552,10 @@ impl ExoBackend for MacLinuxBackend {
         // per accepted host connection, so the tunnels work for any process
         // listening inside the VM's shared network namespace.
         let mut published_host_ports: Vec<u16> = Vec::new();
+        let tunnel_owner = Some(spec.name.clone());
         for port in &config.network.port_mappings {
             self.client()?
-                .start_tunnel(port.host_port, port.container_port)
+                .start_tunnel(port.host_port, port.container_port, tunnel_owner.clone())
                 .map_err(|e| {
                     anyhow::anyhow!(
                         "publish {}:{} failed: {}",
@@ -598,8 +599,9 @@ impl ExoBackend for MacLinuxBackend {
         };
 
         // Foreground runs are done: tear the tunnels down. Detached containers
-        // keep serving, so their tunnels stay up in the daemon until the VM
-        // stops or an explicit StopTunnel arrives.
+        // keep serving, so their tunnels stay up until the container is stopped
+        // or removed through the daemon (matched by container name) or the VM
+        // stops.
         if !_opts.detach {
             for host_port in published_host_ports {
                 if let Err(e) = self.client()?.stop_tunnel(host_port) {

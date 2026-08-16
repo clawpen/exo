@@ -21,7 +21,14 @@ pub enum VmDaemonRequest {
     Stop { force: bool },
     Guest { request: GuestRequest },
     /// Publish a guest TCP port on the host loopback via the vsock tunnel.
-    StartTunnel { host_port: u16, guest_port: u16 },
+    /// `container` ties the tunnel to a container name so it is dropped when
+    /// that container is stopped or removed through the daemon.
+    StartTunnel {
+        host_port: u16,
+        guest_port: u16,
+        #[serde(default)]
+        container: Option<String>,
+    },
     StopTunnel { host_port: u16 },
 }
 
@@ -108,10 +115,16 @@ impl VmDaemonClient {
     }
 
     /// Ask the daemon to publish `guest_port` on host loopback `host_port`.
-    pub fn start_tunnel(&self, host_port: u16, guest_port: u16) -> anyhow::Result<()> {
+    pub fn start_tunnel(
+        &self,
+        host_port: u16,
+        guest_port: u16,
+        container: Option<String>,
+    ) -> anyhow::Result<()> {
         match self.request(VmDaemonRequest::StartTunnel {
             host_port,
             guest_port,
+            container,
         })? {
             VmDaemonResponse::TunnelStarted { .. } => Ok(()),
             VmDaemonResponse::Error { message } => anyhow::bail!("{}", message),
@@ -269,8 +282,30 @@ fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<
                     message: "guest agent is still booting; retry shortly".to_string(),
                 }
             } else {
+                // StopContainer/RemoveContainer retire the container's port
+                // tunnels alongside it (they were started by run via
+                // StartTunnel with the container name attached).
+                let tunnel_owner = match &request {
+                    GuestRequest::StopContainer { id, .. }
+                    | GuestRequest::RemoveContainer { id, .. } => Some(id.clone()),
+                    _ => None,
+                };
                 match manager.guest_request(request) {
-                    Ok(response) => VmDaemonResponse::Guest { response },
+                    Ok(response) => {
+                        if let Some(owner) = tunnel_owner {
+                            if !matches!(response, GuestResponse::Error { .. }) {
+                                let dropped = manager.stop_tunnels_for_container(&owner);
+                                if !dropped.is_empty() {
+                                    tracing::info!(
+                                        "tunnel: dropped {:?} with container {}",
+                                        dropped,
+                                        owner
+                                    );
+                                }
+                            }
+                        }
+                        VmDaemonResponse::Guest { response }
+                    }
                     Err(e) => VmDaemonResponse::Error {
                         message: e.to_string(),
                     },
@@ -280,10 +315,11 @@ fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<
         Ok(VmDaemonRequest::StartTunnel {
             host_port,
             guest_port,
+            container,
         }) => {
             // No boot-grace gate here: the tunnel only binds the host listener
             // now; the vsock connection is opened per accepted connection.
-            match manager.start_tunnel(host_port, guest_port) {
+            match manager.start_tunnel(host_port, guest_port, container) {
                 Ok(()) => VmDaemonResponse::TunnelStarted { host_port },
                 Err(e) => VmDaemonResponse::Error {
                     message: e.to_string(),

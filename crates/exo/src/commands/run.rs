@@ -433,7 +433,11 @@ async fn execute_macos(
             let result = backend
                 .run(config, exo_runtime::BackendRunOptions { detach, rm })
                 .await?;
-            if !result.message.is_empty() {
+            if detach {
+                // Like docker run -d: print the container identifier so callers
+                // (e.g. Orchestre's ExoClient) can stop/rm it later.
+                println!("{}", result.name);
+            } else if !result.message.is_empty() {
                 print!("{}", result.message);
             }
             if let Some(code) = result.exit_code {
