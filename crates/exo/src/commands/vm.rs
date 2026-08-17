@@ -9,7 +9,7 @@ pub async fn init(force: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         ensure_virtualization_entitlement()?;
-        let manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::default())?;
+        let manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::load())?;
         manager.init(force).await?;
         Ok(())
     }
@@ -25,7 +25,7 @@ pub async fn start(foreground: bool) -> anyhow::Result<()> {
     {
         ensure_virtualization_entitlement()?;
         if foreground {
-            let mut manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::default())?;
+            let mut manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::load())?;
             manager.start(true)?;
             return Ok(());
         }
@@ -135,7 +135,7 @@ pub async fn serve() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         ensure_virtualization_entitlement()?;
-        exo_vm_mac::daemon::serve_foreground(exo_vm_mac::VmConfig::default())
+        exo_vm_mac::daemon::serve_foreground(exo_vm_mac::VmConfig::load())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -175,7 +175,7 @@ pub async fn install_guest_agent(path: std::path::PathBuf) -> anyhow::Result<()>
 pub async fn import_image(image: String, guest_path: String) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());
+        let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::load());
         let rootfs = backend.import_image_from_guest_path(&image, &guest_path)?;
         println!("Imported image {} to {}", image, rootfs);
         Ok(())
@@ -190,7 +190,7 @@ pub async fn import_image(image: String, guest_path: String) -> anyhow::Result<(
 pub async fn remove_image(image: String) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());
+        let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::load());
         backend.remove_image(&image).await?;
         println!("Removed image {}", image);
         Ok(())
@@ -236,7 +236,7 @@ fn start_daemon() -> anyhow::Result<()> {
 pub async fn reset(keep_state: bool) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let mut manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::default())?;
+        let mut manager = exo_vm_mac::VmManager::new(exo_vm_mac::VmConfig::load())?;
         manager.reset(keep_state).await?;
         Ok(())
     }

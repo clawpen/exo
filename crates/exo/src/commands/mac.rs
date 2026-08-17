@@ -42,7 +42,7 @@ pub fn native_backend() -> Result<exo_mac::NativeMacBackend> {
 
 #[cfg(target_os = "macos")]
 pub fn linux_backend() -> exo_vm_mac::MacLinuxBackend {
-    exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default())
+    exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::load())
 }
 
 #[cfg(all(test, target_os = "macos"))]

@@ -429,7 +429,7 @@ async fn execute_macos(
                 config.workdir = std::path::PathBuf::from("/app");
             }
 
-            let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::default());
+            let backend = exo_vm_mac::MacLinuxBackend::new(exo_vm_mac::VmConfig::load());
             let result = backend
                 .run(config, exo_runtime::BackendRunOptions { detach, rm })
                 .await?;

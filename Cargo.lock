@@ -730,6 +730,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
  "walkdir",
