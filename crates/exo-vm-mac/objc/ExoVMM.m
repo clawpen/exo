@@ -71,7 +71,12 @@
         NSLog(@"ExoVMM: creating VM kernel=%@ initrd=%@ disk=%@ console=%@ memory=%llu cpus=%u", kernel, initrd, disk, consoleLogPath, memory, cpus);
         VZLinuxBootLoader *bootLoader = [[VZLinuxBootLoader alloc] initWithKernelURL:kernelURL];
         bootLoader.initialRamdiskURL = initrdURL;
-        bootLoader.commandLine = @"rw console=hvc0 init=/init";
+        // The guest kernel has no RTC and boots with a default epoch, leaving the
+        // clock days behind the host — which breaks signature-freshness checks in
+        // containers (openclaw rejects "expired" device signatures). Pass the host
+        // epoch on the kernel command line; /init adopts it at boot.
+        long long hostEpoch = (long long)[[NSDate date] timeIntervalSince1970];
+        bootLoader.commandLine = [NSString stringWithFormat:@"rw console=hvc0 init=/init exo_epoch=%lld", hostEpoch];
 
         VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
         config.bootLoader = bootLoader;

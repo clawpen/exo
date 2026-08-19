@@ -363,8 +363,59 @@ fn trigger_power_off() {
     }
 }
 
+/// Adopt the host-provided epoch (`exo_epoch=<secs>` on the kernel command
+/// line) as the guest system time. Mounts /proc first if needed — the
+/// initramfs does not mount it and /proc/cmdline is the only way to read the
+/// command line from userspace.
+#[cfg(target_os = "linux")]
+fn sync_clock_from_cmdline() {
+    std::fs::create_dir_all("/proc").ok();
+    unsafe {
+        // Ignore errors: EBUSY just means something mounted it already.
+        libc::mount(
+            c"proc".as_ptr(),
+            c"/proc".as_ptr(),
+            c"proc".as_ptr(),
+            0,
+            std::ptr::null(),
+        );
+    }
+
+    let Ok(cmdline) = std::fs::read_to_string("/proc/cmdline") else {
+        eprintln!("clock sync: /proc/cmdline unreadable, clock left at boot default");
+        return;
+    };
+    let Some(token) = cmdline.split_whitespace().find_map(|t| t.strip_prefix("exo_epoch=")) else {
+        eprintln!("clock sync: no exo_epoch= on kernel command line");
+        return;
+    };
+    let Ok(secs) = token.parse::<i64>() else {
+        eprintln!("clock sync: unparseable exo_epoch value: {}", token);
+        return;
+    };
+
+    let ts = libc::timespec {
+        tv_sec: secs,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+    if rc == 0 {
+        eprintln!("clock synced from host (epoch {})", secs);
+    } else {
+        eprintln!("clock sync: clock_settime failed: {}", std::io::Error::last_os_error());
+    }
+}
+
 fn main() {
     eprintln!("exo-vm-guest-init started");
+
+    // The guest kernel has no RTC and boots with a default epoch, which leaves
+    // the clock days behind the host and breaks signature-freshness checks in
+    // containers (openclaw rejects "expired" device signatures). The host passes
+    // its current epoch as `exo_epoch=` on the kernel command line; adopt it as
+    // the system time before serving any requests.
+    #[cfg(target_os = "linux")]
+    sync_clock_from_cmdline();
 
     // RPC travels over the dedicated virtio-console port (hvc1). hvc0 is the
     // console/log port that the kernel wires to this process's stdio, so reading
