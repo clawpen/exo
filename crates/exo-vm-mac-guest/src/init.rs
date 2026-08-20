@@ -54,6 +54,10 @@ enum GuestRequest {
         interactive: bool,
         tty: bool,
     },
+    /// Retrieve a persisted container record by id or name.
+    GetContainer {
+        id_or_name: String,
+    },
     ImportImage {
         image: String,
         tar_path: String,
@@ -112,6 +116,13 @@ enum GuestResponse {
     },
     ContainerList {
         containers: Vec<ContainerSummary>,
+    },
+    ContainerInfo {
+        id: String,
+        name: String,
+        image: String,
+        container_status: String,
+        ports: Vec<String>,
     },
     Logs {
         content: String,
@@ -230,6 +241,23 @@ fn handle_request_with_runtime(
                 exit_code,
                 stdout,
                 stderr,
+            },
+            Err(e) => GuestResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        GuestRequest::GetContainer { id_or_name } => match runtime.get_container(&id_or_name) {
+            Ok(record) => GuestResponse::ContainerInfo {
+                id: record.id,
+                name: record.name,
+                image: record.image,
+                container_status: record.status,
+                ports: record
+                    .network
+                    .ports
+                    .iter()
+                    .map(|p| format!("{}:{}", p.host_port, p.container_port))
+                    .collect(),
             },
             Err(e) => GuestResponse::Error {
                 message: e.to_string(),

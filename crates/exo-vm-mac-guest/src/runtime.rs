@@ -668,6 +668,11 @@ impl GuestRuntime {
         Ok(out)
     }
 
+    /// Load a persisted container record by id or name.
+    pub fn get_container(&self, id_or_name: &str) -> Result<ContainerRecord> {
+        self.find_record(id_or_name)
+    }
+
     pub fn start_container(&self, id: &str, attach: bool) -> Result<()> {
         if attach {
             anyhow::bail!("attach-on-start is not implemented for the EXO macOS Linux VM");
@@ -859,14 +864,46 @@ impl GuestRuntime {
     }
 
     fn find_record(&self, id_or_name: &str) -> Result<ContainerRecord> {
+        // 1) Exact name match: if the argument is a valid container name and we
+        //    have a record under that name, use it directly.
         if validate_container_name(id_or_name).is_ok() && self.record_path(id_or_name).exists() {
             return self.load_record_by_name(id_or_name);
         }
+
+        // 2) Exact id match.
         for record in self.load_all_records()? {
-            if record.id.starts_with(id_or_name) || record.name == id_or_name {
+            if record.id == id_or_name {
                 return Ok(record);
             }
         }
+
+        // 3) Prefix match only when it is unambiguous. The CLI truncates ids for
+        //    display, and a short prefix like "guest-ws" can collide between
+        //    "guest-ws-live-test-..." and "guest-ws-test-2-...". Require at least
+        //    12 characters before we consider a prefix match, and reject if more
+        //    than one record matches.
+        if id_or_name.len() >= 12 {
+            let mut matches = Vec::new();
+            for record in self.load_all_records()? {
+                if record.id.starts_with(id_or_name) || record.name == id_or_name {
+                    matches.push(record);
+                }
+            }
+            match matches.len() {
+                0 => {}
+                1 => return Ok(matches.into_iter().next().unwrap()),
+                _ => anyhow::bail!(
+                    "ambiguous prefix '{}' matches multiple containers: {}",
+                    id_or_name,
+                    matches
+                        .iter()
+                        .map(|r| format!("{} ({})", r.id, r.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+
         anyhow::bail!("container not found: {}", id_or_name)
     }
 

@@ -660,8 +660,61 @@ impl ExoBackend for MacLinuxBackend {
     }
 
     async fn start(&self, _id: &str, _opts: StartOptions) -> anyhow::Result<()> {
+        // Re-establish port tunnels before telling the guest to start. The
+        // tunnels are owned by the host daemon and are torn down when the
+        // container stops; starting a container must recreate them.
+        let container = match self.client()?.guest_request(GuestRequest::GetContainer {
+            id_or_name: _id.to_string(),
+        })? {
+            GuestResponse::ContainerInfo {
+                id,
+                name,
+                ports,
+                ..
+            } => (id, name, ports),
+            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            other => anyhow::bail!("unexpected response to GetContainer: {:?}", other),
+        };
+
+        for port_str in &container.2 {
+            let Some((host_s, guest_s)) = port_str.split_once(':') else {
+                tracing::warn!("ignoring malformed port mapping '{}'", port_str);
+                continue;
+            };
+            let Ok(host_port) = host_s.parse::<u16>() else {
+                tracing::warn!("ignoring malformed host port '{}'", host_s);
+                continue;
+            };
+            let Ok(guest_port) = guest_s.parse::<u16>() else {
+                tracing::warn!("ignoring malformed guest port '{}'", guest_s);
+                continue;
+            };
+            if let Err(e) = self
+                .client()?
+                .start_tunnel(host_port, guest_port, Some(container.1.clone()))
+            {
+                // If the tunnel is already bound (e.g. container was never fully
+                // stopped), treat it as success rather than fail the start.
+                if !e.to_string().contains("already bound") {
+                    anyhow::bail!(
+                        "failed to rebind tunnel {}:{} for container {}: {}",
+                        host_port,
+                        guest_port,
+                        container.0,
+                        e
+                    );
+                }
+                tracing::info!(
+                    "tunnel {}:{} already bound for container {}",
+                    host_port,
+                    guest_port,
+                    container.0
+                );
+            }
+        }
+
         match self.client()?.guest_request(GuestRequest::StartContainer {
-            id: _id.to_string(),
+            id: container.0,
             attach: _opts.attach,
         })? {
             GuestResponse::Ok { .. } => Ok(()),

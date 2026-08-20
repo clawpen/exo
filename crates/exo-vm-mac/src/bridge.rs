@@ -94,6 +94,10 @@ pub enum GuestRequest {
         interactive: bool,
         tty: bool,
     },
+    /// Retrieve a persisted container record by id or name.
+    GetContainer {
+        id_or_name: String,
+    },
     ImportImage {
         image: String,
         tar_path: String,
@@ -150,6 +154,13 @@ pub enum GuestResponse {
     },
     ContainerList {
         containers: Vec<ContainerSummary>,
+    },
+    ContainerInfo {
+        id: String,
+        name: String,
+        image: String,
+        container_status: String,
+        ports: Vec<String>,
     },
     Logs {
         content: String,
