@@ -44,7 +44,7 @@ async fn execute_windows(args: StopArgs) -> Result<()> {
 
     let list_output = list_result.stdout.trim();
     if list_output.contains("NOT_FOUND") || list_output.is_empty() {
-        anyhow::bail!("Container not found: {}", args.container);
+        return Err(exo_runtime::ExoError::ContainerNotFound(args.container.clone()).into());
     }
 
     // Check if container is running
@@ -107,7 +107,7 @@ async fn execute_linux(args: StopArgs) -> Result<()> {
     // Find container by name or ID
     let mut metadata = manager
         .find(&args.container)?
-        .ok_or_else(|| anyhow::anyhow!("Container not found: {}", args.container))?;
+        .ok_or_else(|| exo_runtime::ExoError::ContainerNotFound(args.container.clone()))?;
 
     // Check if container is running
     if !metadata.is_running() {

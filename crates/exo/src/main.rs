@@ -473,7 +473,7 @@ enum VolumeCommands {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
     // Initialize tracing
@@ -490,8 +490,22 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Exit-code contract (docs/EXIT_CODES.md): typed ExoErrors carry their
+    // documented code even through anyhow chains; anything untyped is an
+    // internal error (6). Never exit 1 on failure.
+    match dispatch(cli.command).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            let code = exo_runtime::exit_code_for(&err);
+            eprintln!("Error: {err:#}");
+            std::process::ExitCode::from(code as u8)
+        }
+    }
+}
+
+async fn dispatch(command: Commands) -> anyhow::Result<()> {
     // Run the appropriate command
-    match cli.command {
+    match command {
         Commands::Run {
             image,
             command,

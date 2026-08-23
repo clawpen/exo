@@ -17,7 +17,11 @@ pub async fn execute(args: ImportArgs) -> Result<()> {
 
     // Validate tarball exists
     if !args.tarball.exists() {
-        anyhow::bail!("Tarball not found: {}", args.tarball.display());
+        return Err(exo_runtime::ExoError::InvalidInput(format!(
+            "tarball not found: {}",
+            args.tarball.display()
+        ))
+        .into());
     }
 
     // Create image store
@@ -95,7 +99,10 @@ pub async fn execute(args: ImportArgs) -> Result<()> {
     } else if let Some(tag) = repo_tags.first() {
         ImageReference::parse(tag)?
     } else {
-        anyhow::bail!("No image name found. Use --name to specify.");
+        return Err(exo_runtime::ExoError::InvalidInput(
+            "no image name in tarball; use --name to specify one".to_string(),
+        )
+        .into());
     };
 
     let rootfs_path = store.rootfs_path(&image_ref);

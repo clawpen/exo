@@ -1,182 +1,84 @@
-# Exo Container Runtime - Development Roadmap
+# Exo — Roadmap
 
-## Vision
+> Rewritten 2026-08-23 from a code-level survey (the previous roadmap dated 2026-03-09 predated the entire microVM track and no longer described reality). Historical version lives in git history.
+>
+> **Goal:** a stable container runtime that competes with Docker/Podman for **agent workloads**. The consumer of this CLI is an AI agent (via Orchestre), not a human — so "compatibility" means an *agent contract*, not docker flag parity.
 
-A production-ready, agent-first container runtime that replaces Docker for Claw Pen deployments.
+## Strategy (decided 2026-08-23)
 
-## Current State (2026-03-09)
+1. **Both backends, macOS leads.** exo-vm-mac is the wedge (Docker Desktop is weak on macOS: licensing, perf, battery; VM-level isolation beats runc for agent sandboxes). Linux rootless stays green in CI.
+2. **Exo's own CLI, agent-first.** No docker CLI/socket emulation. What agents need: stable JSON schemas, typed errors, idempotent verbs, zero prompts.
 
-✅ Working:
-- Container isolation (namespaces, seccomp, capabilities)
-- Alpine rootfs extraction
-- Basic `run --rm` command
-- Rootless by default
+## Current state (code-grounded, 2026-08-23)
 
-⚠️ In Progress (agents running):
-- Persistent containers (stop/start/remove)
-- Claw Pen integration
+### Parity matrix
 
-## Phase 1: Core Functionality (Week 1)
+| Capability | Linux | macOS native | macOS microVM | WSL |
+|---|---|---|---|---|
+| run / stop / rm / ps | ✅ | ✅ | ✅ | ⚠️ broken (wrong binary name) |
+| exec / logs | ❌ placeholders that fake success | ✅ | ✅ | partial |
+| images / pull | ✅ | ✅ | ✅ | partial |
+| Volume mounts | ✅ bind+named | ✅ | ⚠️ guest-only, host bind rejected | partial |
+| Port mapping | ⚠️ needs socat/ncat | ❌ host net only | ✅ TCP/UDP vsock tunnels | ✅ netsh |
+| Resource limits | ✅ cgroup v2 | ❌ ignored | ❌ rejected | delegated |
+| `--json` output | ⚠️ read commands only | ⚠️ | ⚠️ | ⚠️ |
+| Crash reconciliation | ✅ reconciler | n/a | ✅ VM daemon | n/a |
+| `ExoBackend` trait | ❌ bypassed | ✅ | ✅ | ❌ shell wrapper |
 
-### 1.1 Persistent Containers [IN PROGRESS]
-- [ ] `--name` flag for named containers
-- [ ] `exo stop <name>`
-- [ ] `exo start <name>`
-- [ ] `exo remove <name>`
-- [ ] `exo list --json`
-- [ ] Container metadata storage
+### Known defects (fix-first, before any new features)
 
-### 1.2 Overlayfs Writable Layer
-- [ ] Create overlay mount with lowerdir (image) + upperdir (writable)
-- [ ] Persist changes across container restarts
-- [ ] Clean upperdir on container remove
-- [ ] Handle overlay mount in user namespace
+- ~~**D1** — Linux `exec`/`logs` are stubs that print args and return `Ok`~~ **FIXED 2026-08-23**: placeholders now fail with `BACKEND_UNSUPPORTED` (exit 4); real Linux impls tracked in B3
+- **D2** — WSL invokes `exo-runtime`; the binary is `openclaw-runtime` (`crates/exo-wsl/src/command.rs`)
+- ~~**D3** — Every error exits 1; anyhow stringly errors, no typed codes~~ **FIXED 2026-08-23**: `ExoError` taxonomy + exit-code harness (`docs/EXIT_CODES.md`); untyped legacy errors exit 6
+- **D4** — `run`, `stop`, `rm`, `exec`, `logs`, `images`, `pull` have no `--json`
+- **D5** — `path.chars().next().unwrap()` panics on empty path (exo-wsl); `.unwrap()` on mutex locks (windows_networking.rs)
+- **D6** — cgroup `Drop` silently swallows cleanup errors → leaks cgroup subtrees
+- **D7** — TOCTOU race in daemon auto-start (socket check → connect)
+- **D8** — Linux doesn't implement `ExoBackend` → cross-backend drift
 
-### 1.3 Volume Mounts
-- [ ] `-v /host/path:/container/path` syntax
-- [ ] Named volumes (`-v data:/app/data`)
-- [ ] Proper permission handling (uid/gid mapping)
-- [ ] Volume isolation between containers
+---
 
-### 1.4 TTY/Exec Mode
-- [ ] `exo exec -it <name> <command>`
-- [ ] PTY allocation
-- [ ] Stdin forwarding
-- [ ] Signal handling (Ctrl+C)
+## Pillar 1 — Agent contract CLI
 
-## Phase 2: Image Support (Week 2)
+*The interface an LLM can drive without guessing. Each item is testable.*
 
-### 2.1 OCI Registry Pull
-- [ ] Docker Hub authentication
-- [ ] Manifest parsing
-- [ ] Layer download
-- [ ] Layer extraction
-- [ ] Image caching
+- [~] **A1. Typed errors.** `thiserror` error taxonomy crate-wide (`ImageNotFound`, `DaemonUnreachable`, `ContainerRunning`, `InvalidName`, `BackendUnsupported`, …). Kill stringly `anyhow!` at command boundaries. **2026-08-23:** `ExoError` + `exit_code_for` harness landed in `exo-runtime/src/error.rs`; core lifecycle commands (`run`/`stop`/`start`/`rm`/`exec`/`logs`/`pull`/`import`) converted at their boundaries. Remainder: `exo-image` registry errors, `daemon`/`vm`/`secret`/`volume` commands, backend internals (`exo-mac`/`exo-vm-mac`/`exo-wsl`).
+- [~] **A2. Exit-code taxonomy.** Documented, stable: 0 ok, 2 not-found, 3 conflict/state, 4 backend-unavailable, 5 invalid-input, 6 internal. Mapped from A1. **2026-08-23:** contract lives in `docs/EXIT_CODES.md`; `main` returns typed `ExitCode` (never 1); verified live (`invalid input` → 5). Follow-up: propagate *container* exit codes through `exo run`.
+- [ ] **A3. `--json` everywhere.** Every command accepts `--json`; errors emit `{"error": {"code": "...", "message": "...", "retryable": bool}}` on stdout with the A2 exit code.
+- [ ] **A4. Schema versioning.** Every JSON payload carries `"schema": 1`. Additive-only changes within a version.
+- [ ] **A5. Idempotent verbs.** `stop`/`rm` on absent or stopped containers succeed (or exit 2 with a typed code — pick one, document it, test it). Agents retry; retries must be safe.
+- [ ] **A6. No fake success.** Placeholders (D1) either work or exit 4 with `BACKEND_UNSUPPORTED`. Never `Ok` on a no-op.
+- [ ] **A7. Generated agent docs.** Command/flag/JSON-schema reference generated from clap definitions, checked by CI so docs can't drift.
 
-### 2.2 Layer Management
-- [ ] Content-addressable storage
-- [ ] Layer deduplication
-- [ ] `exo images` command
-- [ ] `exo rmi` command
-- [ ] Prune unused layers
+## Pillar 2 — Stability engineering
 
-### 2.3 Image Building
-- [ ] Dockerfile parsing (basic)
-- [ ] `exo build -t name .`
-- [ ] Layer commit
-- [ ] Build caching
+- [ ] **S1. Executable conformance suite.** Port `test.sh` categories (smoke/isolation/features/edge/integration) to Rust integration tests driving the real binary; assert on JSON output + exit codes, not stdout prose.
+- [ ] **S2. CI matrix on every commit.** macOS (vm-mac), Linux rootless, WSL2. Today only WSL2 has CI — and its backend is broken (D2).
+- [ ] **S3. Crash-resilience tests.** Kill VM/daemon mid-run → restart → state reconciles (Linux reconciler exists; vm-mac needs equivalent guest-state recovery). Stale containers cleaned up.
+- [ ] **S4. Nightly soak.** Hundreds of run/stop cycles; watch fd counts, cgroup leaks (D6), memory.
+- [ ] **S5. Defect sweep.** D2, D5, D6, D7 fixed with regression tests.
+- [ ] **S6. Linux implements `ExoBackend`** (D8) — one trait, four backends, parity enforced by the conformance suite running against each.
 
-## Phase 3: Networking (Week 3)
+## Pillar 3 — Backend completion (macOS leads)
 
-### 3.1 Network Namespace
-- [ ] Create isolated network namespace
-- [ ] Virtual ethernet pair (veth)
-- [ ] Bridge network (exo0)
-- [ ] IP allocation
+- [ ] **B1. vm-mac resource limits.** Map `ContainerConfig.resources` to guest cgroups (currently rejected outright).
+- [ ] **B2. vm-mac host bind mounts.** Streamed/virtio-fs host paths into guest (currently rejected; Orchestre workspaces need this).
+- [ ] **B3. Linux `exec`/`logs` for real** (unblocks D1).
+- [ ] **B4. Linux port mapping without socat/ncat** — built-in forwarder or documented hard dependency with `doctor` check.
+- [ ] **B5. Default seccomp profile on Linux** (audit of current filter vs docker's default).
+- [ ] **B6. Repair or formally drop WSL** (D2) — a broken backend shipped is worse than none.
+- [ ] **B7. Keep the parity matrix above generated from conformance results**, not hand-maintained.
 
-### 3.2 Port Forwarding
-- [ ] `-p host:container` syntax
-- [ ] Port mapping via iptables/nftables
-- [ ] Multiple port mappings
+## Non-goals (for now)
 
-### 3.3 DNS
-- [ ] Container DNS resolution
-- [ ] Custom DNS servers
-- [ ] /etc/hosts management
+- Docker socket/API emulation, Compose compatibility
+- Swarm/k8s orchestration features
+- docker CLI flag-parity aliases
 
-## Phase 4: Resource Management (Week 4)
+## Gates
 
-### 4.1 Cgroup v2 Support
-- [ ] Cgroup delegation for rootless
-- [ ] Memory limits
-- [ ] CPU limits
-- [ ] I/O limits
+- **G5 (agent-usable):** A1–A6 done — Orchestre can drive exo with typed-error handling, no stderr parsing.
+- **G6 (trustworthy):** S1–S3 green in CI on macOS + Linux.
+- **G7 (feature-complete core):** B1–B3 done; parity matrix has no ❌ in the Linux/vm-mac columns for the core lifecycle.
 
-### 4.2 Resource Monitoring
-- [ ] `exo stats <name>`
-- [ ] Real-time metrics
-- [ ] Historical data
-
-## Phase 5: Agent Features (Week 5)
-
-### 5.1 Agent Communication Protocol
-- [ ] Structured JSON messaging over stdio
-- [ ] Tool request/response format
-- [ ] Tool bus for sandboxed execution
-- [ ] Capability negotiation
-
-### 5.2 Health Checks
-- [ ] `--health-cmd` option
-- [ ] Periodic health checks
-- [ ] Auto-restart on failure
-- [ ] Health status in `exo list`
-
-### 5.3 Secrets Management
-- [ ] `--secret name=value` option
-- [ ] Secrets file mounting
-- [ ] Environment injection
-- [ ] Secret rotation
-
-## Phase 6: Production (Week 6)
-
-### 6.1 Logging
-- [ ] Structured logging
-- [ ] Log rotation
-- [ ] Log aggregation support
-
-### 6.2 Security Hardening
-- [ ] Security audit
-- [ ] Fuzzing
-- [ ] SELinux/AppArmor profiles
-
-### 6.3 Documentation
-- [ ] User guide
-- [ ] API reference
-- [ ] Architecture docs
-- [ ] Migration guide (from Docker)
-
-## Tracking
-
-- Started: 2026-03-09
-- Target: 2026-04-20 (6 weeks)
-- Current Phase: 1.2 (Overlayfs - partially working)
-
-## Completed (2026-03-09)
-
-### Phase 1.1 - Persistent Containers ✅
-- [x] `--name` flag for named containers
-- [x] `exo stop <name>`
-- [x] `exo start <name>`
-- [x] `exo remove <name>`
-- [x] `exo list --json`
-- [x] Container metadata storage
-- [x] ESRCH race condition fix
-
-### Phase 1.2 - Overlayfs Writable Layer ⚠️
-- [x] Create overlay directories
-- [x] Fallback to read-only on EPERM (rootless limitation)
-- [ ] Full writable layer (needs fuse-overlayfs or root)
-
-### Phase 2.1 - OCI Registry Pull ✅
-- [x] Docker Hub authentication
-- [x] Layer download and extraction
-- [x] SHA256 verification
-- [x] Multi-arch manifest support
-
-### Claw Pen Integration ✅
-- [x] ExoRuntimeClient replaces Docker
-- [x] JSON parsing for exo list
-- [x] CLI flags compatible (-m, --detach)
-- [x] Auth token working (access_token/refresh_token)
-
-## Next Up
-- [ ] Volume mounts (Phase 1.3)
-- [ ] TTY/exec (Phase 1.4)
-- [ ] Network namespace (Phase 3)
-
-## Notes
-
-- Each phase should be usable independently
-- Maintain backward compatibility with CLI
-- Test on both Linux and WSL2
-- Keep rootless as default
+*Next review: after G5.*

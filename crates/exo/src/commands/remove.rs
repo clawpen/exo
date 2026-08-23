@@ -43,15 +43,16 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
 
     let list_output = list_result.stdout.trim();
     if list_output.contains("NOT_FOUND") || list_output.is_empty() {
-        anyhow::bail!("Container not found: {}", args.container);
+        return Err(exo_runtime::ExoError::ContainerNotFound(args.container.clone()).into());
     }
 
     // Check if container is running
     if list_output.contains("running") && !args.force {
-        anyhow::bail!(
-            "Container {} is running. Use --force to stop and remove.",
+        return Err(exo_runtime::ExoError::ContainerRunning(format!(
+            "{} (use --force to stop and remove)",
             args.container
-        );
+        ))
+        .into());
     }
 
     // If running and force, stop first
@@ -118,14 +119,15 @@ async fn execute_linux(args: RemoveArgs) -> Result<()> {
     // Find container by name or ID
     let metadata = manager
         .find(&args.container)?
-        .ok_or_else(|| anyhow::anyhow!("Container not found: {}", args.container))?;
+        .ok_or_else(|| exo_runtime::ExoError::ContainerNotFound(args.container.clone()))?;
 
     // Check if container is running
     if metadata.is_running() && !args.force {
-        anyhow::bail!(
-            "Container {} is running. Use --force to stop and remove.",
+        return Err(exo_runtime::ExoError::ContainerRunning(format!(
+            "{} (use --force to stop and remove)",
             metadata.name
-        );
+        ))
+        .into());
     }
 
     // If running and force, stop first

@@ -11,7 +11,7 @@ pub struct ExecArgs {
 
 pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
     if args.command.is_empty() {
-        anyhow::bail!("No command specified");
+        return Err(exo_runtime::ExoError::InvalidInput("no command specified".to_string()).into());
     }
 
     #[cfg(target_os = "macos")]
@@ -50,23 +50,12 @@ pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        println!(
-            "Executing in container {}: {:?}",
-            args.container, args.command
-        );
-
-        if args.interactive {
-            println!("Interactive mode enabled");
+        // Fail loudly per the agent contract: a placeholder that returns Ok
+        // tells the caller the command ran when nothing happened (roadmap D1).
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exec".to_string(),
+            backend: std::env::consts::OS.to_string(),
         }
-
-        if args.tty {
-            println!("TTY enabled");
-        }
-
-        if let Some(user) = &args.user {
-            println!("Running as user: {}", user);
-        }
-
-        Ok(())
+        .into())
     }
 }

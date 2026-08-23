@@ -28,10 +28,10 @@ pub fn select_backend(requested: &str) -> Result<BackendSelection> {
         "native" => Ok(BackendSelection::Native),
         "linux" => Ok(BackendSelection::Linux),
         "auto" => Ok(BackendSelection::Linux),
-        other => anyhow::bail!(
-            "unsupported macOS backend '{}'; expected auto, native, or linux",
-            other
-        ),
+        other => Err(exo_runtime::ExoError::InvalidInput(format!(
+            "unsupported macOS backend '{other}'; expected auto, native, or linux"
+        ))
+        .into()),
     }
 }
 

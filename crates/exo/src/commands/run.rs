@@ -86,10 +86,17 @@ async fn execute_windows(
     use tracing::{debug, info};
 
     if config.backend == BackendSelection::Native {
-        anyhow::bail!("native backend is only available on macOS; use '--backend linux' or '--backend auto' on Windows");
+        return Err(exo_runtime::ExoError::BackendUnavailable(
+            "native backend is only available on macOS; use '--backend linux' or '--backend auto' on Windows".to_string(),
+        )
+        .into());
     }
     if !config.secrets.is_empty() {
-        anyhow::bail!("--secret injection is currently supported only by the macOS native backend");
+        return Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "secret injection".to_string(),
+            backend: "wsl".to_string(),
+        }
+        .into());
     }
 
     info!("Running container via WSL2 backend");
@@ -497,10 +504,17 @@ async fn execute_linux(
     use exo_runtime::{Container, ContainerStatus};
 
     if config.backend == BackendSelection::Native {
-        anyhow::bail!("native backend is only available on macOS; use '--backend linux' or '--backend auto' on Linux");
+        return Err(exo_runtime::ExoError::BackendUnavailable(
+            "native backend is only available on macOS; use '--backend linux' or '--backend auto' on Linux".to_string(),
+        )
+        .into());
     }
     if !config.secrets.is_empty() {
-        anyhow::bail!("--secret injection is currently supported only by the macOS native backend");
+        return Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "secret injection".to_string(),
+            backend: "linux".to_string(),
+        }
+        .into());
     }
 
     // If --detach and the daemon is running, delegate to it. The daemon is a
@@ -527,7 +541,10 @@ async fn execute_linux(
     // Check if container name is already in use
     if let Some(ref container_name) = name {
         if manager.exists(container_name) {
-            anyhow::bail!("Container name '{}' is already in use", container_name);
+            return Err(exo_runtime::ExoError::ContainerAlreadyExists(
+                container_name.clone(),
+            )
+            .into());
         }
     }
 
@@ -665,7 +682,7 @@ fn parse_memory_mb(size: &str) -> anyhow::Result<u64> {
 
     let num: u64 = num
         .parse()
-        .map_err(|_| anyhow::anyhow!("Invalid size: {}", size))?;
+        .map_err(|_| exo_runtime::ExoError::InvalidInput(format!("invalid size: {size}")))?;
 
     Ok(match unit {
         "g" => num * 1024,
@@ -921,7 +938,7 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
     });
 
     let mut stream = UnixStream::connect("/tmp/exo-daemon.sock")
-        .map_err(|e| anyhow::anyhow!("connect daemon socket: {}", e))?;
+        .map_err(|e| exo_runtime::ExoError::DaemonUnreachable(format!("connect daemon socket: {e}")))?;
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
     stream.write_all(req.to_string().as_bytes())?;
     stream.write_all(b"\n")?;

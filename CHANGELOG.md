@@ -2,6 +2,27 @@
 
 All notable changes to Exo will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Agent error contract (A1/A2):** typed `ExoError` taxonomy in `exo-runtime`
+  with stable machine-readable codes (`CONTAINER_NOT_FOUND`, `BACKEND_UNSUPPORTED`,
+  …), documented exit-code classes (2 not-found, 3 conflict, 4 backend,
+  5 invalid-input, 6 internal — never 1), a `retryable` flag, and a
+  schema-1 JSON error envelope for `--json` output. Contract documented in
+  `docs/EXIT_CODES.md`.
+- `exo-runtime::exit_code_for` recovers typed codes through `anyhow` chains,
+  so converted and legacy code paths share one process boundary.
+- Roadmap rewritten from a code-level survey: parity matrix, defect list
+  (D1–D8), three pillars (agent contract / stability / backend completion).
+
+### Changed
+- CLI `main` returns typed `ExitCode`; core lifecycle commands (`run`, `stop`,
+  `start`, `rm`, `exec`, `logs`, `pull`, `import`, backend selection) raise
+  typed errors at their boundaries.
+- Linux `exec`/`logs` placeholders no longer fake success — they fail with
+  `BACKEND_UNSUPPORTED` (exit 4) until the real implementations land (D1).
+
 ## [1.0.0-alpha] - 2025-02-27
 
 ### Added

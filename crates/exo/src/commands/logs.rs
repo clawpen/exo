@@ -16,19 +16,13 @@ pub async fn execute(args: LogsArgs) -> anyhow::Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        println!("Showing logs for container: {}", args.container);
-
-        if args.follow {
-            println!("Following logs...");
+        // Fail loudly per the agent contract: a placeholder that prints
+        // flags and returns Ok fakes success (roadmap D1).
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "logs".to_string(),
+            backend: std::env::consts::OS.to_string(),
         }
-
-        if args.timestamps {
-            println!("With timestamps");
-        }
-
-        println!("(Last {} lines)", args.tail);
-
-        Ok(())
+        .into())
     }
 }
 

@@ -38,6 +38,7 @@ pub mod cgroup;
 pub mod channel;
 pub mod config;
 pub mod container;
+pub mod error;
 pub mod events;
 pub mod image;
 pub mod manager;
@@ -65,6 +66,10 @@ pub use channel::{AgentChannel, AgentMessage, ToolRequest, ToolResponse};
 pub use config::{BackendSelection, ContainerConfig, MountConfig, NetworkConfig, ResourceConfig};
 pub use config::{RestartPolicy, SandboxMode};
 pub use container::{Container, ContainerHandle, ContainerStatus};
+pub use error::{
+    exit_code_for, ErrorBody, ErrorEnvelope, ExoError, ExoResult, EXIT_BACKEND, EXIT_CONFLICT,
+    EXIT_INTERNAL, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_OK,
+};
 pub use events::{Event, EventLog, EventType};
 pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};
 pub use manager::{
