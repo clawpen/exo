@@ -128,26 +128,25 @@ impl VmConfig {
 mod tests {
     use super::*;
 
+    // Both env tests mutate the same process-wide variables, so they must live
+    // in one test function — as separate #[test]s they race under the default
+    // parallel test runner and flake.
     #[test]
-    fn env_overrides_defaults() {
+    fn env_overrides_and_invalid_values() {
         let mut config = VmConfig::default();
         std::env::set_var("EXO_VM_CPUS", "6");
         std::env::set_var("EXO_VM_MEMORY_MB", "8192");
         config.apply_env();
         assert_eq!(config.cpu_count, 6);
         assert_eq!(config.memory_mb, 8192);
-        std::env::remove_var("EXO_VM_CPUS");
-        std::env::remove_var("EXO_VM_MEMORY_MB");
-    }
 
-    #[test]
-    fn invalid_env_values_are_ignored() {
         let mut config = VmConfig::default();
         std::env::set_var("EXO_VM_CPUS", "zero");
         std::env::set_var("EXO_VM_MEMORY_MB", "12");
         config.apply_env();
         assert_eq!(config.cpu_count, 2);
         assert_eq!(config.memory_mb, 2048);
+
         std::env::remove_var("EXO_VM_CPUS");
         std::env::remove_var("EXO_VM_MEMORY_MB");
     }
