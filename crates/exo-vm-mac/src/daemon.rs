@@ -206,16 +206,24 @@ pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let listener = UnixListener::bind(&socket_path)?;
+    // Nonblocking accept so the loop can also do periodic maintenance (guest
+    // clock re-sync) while idle. A blocking accept would park the daemon in
+    // the kernel and never run the timer.
+    listener.set_nonblocking(true)?;
     tracing::info!("VM daemon listening on {}", socket_path.display());
 
     let mut manager = VmManager::new(config)?;
     manager.start(false)?;
     tracing::info!("VM daemon started VM");
 
+    // The boot-time clock sync (exo_epoch= on the kernel command line) just
+    // happened, so the first periodic re-sync is a full interval out.
+    let mut last_clock_sync = std::time::Instant::now();
+
     let mut should_stop = false;
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
                 match handle_client(stream, &mut manager) {
                     Ok(true) => should_stop = true,
                     Ok(false) => {}
@@ -226,6 +234,9 @@ pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
                     }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
             Err(e) => {
                 tracing::warn!("VM daemon accept failed: {}", e);
             }
@@ -233,6 +244,7 @@ pub fn serve_foreground(config: VmConfig) -> anyhow::Result<()> {
         if should_stop {
             break;
         }
+        maybe_sync_guest_clock(&manager, &mut last_clock_sync);
     }
 
     if manager.running() {
@@ -256,6 +268,35 @@ fn guest_booting(manager: &VmManager) -> bool {
             .boot_elapsed()
             .map(|elapsed| elapsed < GUEST_BOOT_GRACE)
             .unwrap_or(false)
+}
+
+/// How often the daemon pushes the host wall clock into the guest. The guest
+/// kernel has no RTC and its clock stalls while the host is asleep (the vCPUs
+/// are suspended), so the boot-time sync alone drifts by however long the
+/// host slept — after a weekend of lid-closed time the guest can be days
+/// behind, and openclaw in containers then rejects the orchestrator's device
+/// signature as expired. A minute of skew is well inside any freshness window.
+const CLOCK_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+
+fn maybe_sync_guest_clock(manager: &VmManager, last_sync: &mut std::time::Instant) {
+    if last_sync.elapsed() < CLOCK_SYNC_INTERVAL || !manager.running() || guest_booting(manager) {
+        return;
+    }
+    // Reset the timer regardless of outcome so a wedged guest agent isn't
+    // hammered with a SetTime on every accept-loop pass.
+    *last_sync = std::time::Instant::now();
+    let epoch_secs = chrono::Utc::now().timestamp();
+    match manager.guest_request(GuestRequest::SetTime { epoch_secs }) {
+        Ok(GuestResponse::Ok { .. }) => {
+            tracing::debug!("guest clock re-synced (epoch {})", epoch_secs);
+        }
+        Ok(other) => {
+            tracing::warn!("guest clock sync: unexpected response: {:?}", other);
+        }
+        Err(e) => {
+            tracing::warn!("guest clock sync failed: {}", e);
+        }
+    }
 }
 
 fn handle_client(stream: UnixStream, manager: &mut VmManager) -> anyhow::Result<bool> {

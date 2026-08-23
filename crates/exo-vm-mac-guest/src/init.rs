@@ -58,6 +58,13 @@ enum GuestRequest {
     GetContainer {
         id_or_name: String,
     },
+    /// Set the guest system clock to the given Unix epoch seconds. The guest
+    /// kernel has no RTC and its clock stalls while the host is asleep (the
+    /// vCPUs are suspended), so boot-time sync alone drifts by however long
+    /// the host slept. The host daemon re-sends this periodically.
+    SetTime {
+        epoch_secs: i64,
+    },
     ImportImage {
         image: String,
         tar_path: String,
@@ -263,6 +270,7 @@ fn handle_request_with_runtime(
                 message: e.to_string(),
             },
         },
+        GuestRequest::SetTime { epoch_secs } => set_time_response(epoch_secs),
         GuestRequest::ImportImage { image, tar_path } => {
             match runtime.import_image_from_tar(&image, std::path::Path::new(&tar_path)) {
                 Ok(rootfs) => GuestResponse::ImageImported {
@@ -391,6 +399,45 @@ fn trigger_power_off() {
     }
 }
 
+/// Set the system clock to the given Unix epoch seconds (CLOCK_REALTIME).
+#[cfg(target_os = "linux")]
+fn set_system_time(secs: i64) -> Result<(), String> {
+    let ts = libc::timespec {
+        tv_sec: secs,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "clock_settime failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+/// Handle a host-pushed SetTime request. Linux-only; the host-side unit tests
+/// build this crate for macOS, where the request is simply rejected.
+fn set_time_response(epoch_secs: i64) -> GuestResponse {
+    #[cfg(target_os = "linux")]
+    {
+        match set_system_time(epoch_secs) {
+            Ok(()) => GuestResponse::Ok {
+                message: format!("clock set to epoch {}", epoch_secs),
+            },
+            Err(e) => GuestResponse::Error { message: e },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = epoch_secs;
+        GuestResponse::Error {
+            message: "SetTime is only supported inside the Linux guest".to_string(),
+        }
+    }
+}
+
 /// Adopt the host-provided epoch (`exo_epoch=<secs>` on the kernel command
 /// line) as the guest system time. Mounts /proc first if needed — the
 /// initramfs does not mount it and /proc/cmdline is the only way to read the
@@ -422,15 +469,9 @@ fn sync_clock_from_cmdline() {
         return;
     };
 
-    let ts = libc::timespec {
-        tv_sec: secs,
-        tv_nsec: 0,
-    };
-    let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
-    if rc == 0 {
-        eprintln!("clock synced from host (epoch {})", secs);
-    } else {
-        eprintln!("clock sync: clock_settime failed: {}", std::io::Error::last_os_error());
+    match set_system_time(secs) {
+        Ok(()) => eprintln!("clock synced from host (epoch {})", secs),
+        Err(e) => eprintln!("clock sync: {}", e),
     }
 }
 

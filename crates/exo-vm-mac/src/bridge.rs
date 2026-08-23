@@ -98,6 +98,12 @@ pub enum GuestRequest {
     GetContainer {
         id_or_name: String,
     },
+    /// Push the host wall clock into the guest (epoch seconds). The guest has
+    /// no RTC and its clock stalls while the host is asleep, so the daemon
+    /// re-sends this periodically to keep container time honest.
+    SetTime {
+        epoch_secs: i64,
+    },
     ImportImage {
         image: String,
         tar_path: String,
