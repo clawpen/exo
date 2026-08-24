@@ -4,12 +4,30 @@ use exo_image::ImageManager;
 
 pub struct ImagesArgs {
     pub all: bool,
+    pub json: bool,
 }
 
 pub async fn execute(args: ImagesArgs) -> anyhow::Result<()> {
     let image_manager = ImageManager::new()?;
 
     let images = image_manager.list_images()?;
+
+    if args.json {
+        let list: Vec<serde_json::Value> = images
+            .iter()
+            .map(|img| {
+                serde_json::json!({
+                    "repository": img.repository,
+                    "tag": img.tag,
+                    "registry": img.registry,
+                })
+            })
+            .collect();
+        let mut fields = serde_json::Map::new();
+        fields.insert("images".to_string(), serde_json::Value::Array(list));
+        super::print_json(fields);
+        return Ok(());
+    }
 
     if images.is_empty() {
         println!("No images found.");

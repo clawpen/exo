@@ -7,6 +7,7 @@ pub struct ExecArgs {
     pub tty: bool,
     pub user: Option<String>,
     pub backend: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
@@ -42,6 +43,12 @@ pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
                     .await?
             }
         };
+        if args.json {
+            let mut fields = serde_json::Map::new();
+            fields.insert("container".to_string(), args.container.clone().into());
+            fields.insert("exit_code".to_string(), code.into());
+            super::print_json(fields);
+        }
         if code != 0 {
             anyhow::bail!("exec exited with code {}", code);
         }

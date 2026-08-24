@@ -30,7 +30,7 @@
 - ~~**D1** — Linux `exec`/`logs` are stubs that print args and return `Ok`~~ **FIXED 2026-08-23**: placeholders now fail with `BACKEND_UNSUPPORTED` (exit 4); real Linux impls tracked in B3
 - **D2** — WSL invokes `exo-runtime`; the binary is `openclaw-runtime` (`crates/exo-wsl/src/command.rs`)
 - ~~**D3** — Every error exits 1; anyhow stringly errors, no typed codes~~ **FIXED 2026-08-23**: `ExoError` taxonomy + exit-code harness (`docs/EXIT_CODES.md`); untyped legacy errors exit 6
-- **D4** — `run`, `stop`, `rm`, `exec`, `logs`, `images`, `pull` have no `--json`
+- ~~**D4** — `run`, `stop`, `rm`, `exec`, `logs`, `images`, `pull` have no `--json`~~ **FIXED 2026-08-23**: global `--json` flag with schema-1 payloads on all lifecycle commands + JSON error envelope on stderr
 - **D5** — `path.chars().next().unwrap()` panics on empty path (exo-wsl); `.unwrap()` on mutex locks (windows_networking.rs)
 - **D6** — cgroup `Drop` silently swallows cleanup errors → leaks cgroup subtrees
 - **D7** — TOCTOU race in daemon auto-start (socket check → connect)
@@ -44,8 +44,8 @@
 
 - [~] **A1. Typed errors.** `thiserror` error taxonomy crate-wide (`ImageNotFound`, `DaemonUnreachable`, `ContainerRunning`, `InvalidName`, `BackendUnsupported`, …). Kill stringly `anyhow!` at command boundaries. **2026-08-23:** `ExoError` + `exit_code_for` harness landed in `exo-runtime/src/error.rs`; core lifecycle commands (`run`/`stop`/`start`/`rm`/`exec`/`logs`/`pull`/`import`) converted at their boundaries. Remainder: `exo-image` registry errors, `daemon`/`vm`/`secret`/`volume` commands, backend internals (`exo-mac`/`exo-vm-mac`/`exo-wsl`).
 - [~] **A2. Exit-code taxonomy.** Documented, stable: 0 ok, 2 not-found, 3 conflict/state, 4 backend-unavailable, 5 invalid-input, 6 internal. Mapped from A1. **2026-08-23:** contract lives in `docs/EXIT_CODES.md`; `main` returns typed `ExitCode` (never 1); verified live (`invalid input` → 5). Follow-up: propagate *container* exit codes through `exo run`.
-- [ ] **A3. `--json` everywhere.** Every command accepts `--json`; errors emit `{"error": {"code": "...", "message": "...", "retryable": bool}}` on stdout with the A2 exit code.
-- [ ] **A4. Schema versioning.** Every JSON payload carries `"schema": 1`. Additive-only changes within a version.
+- [x] **A3. `--json` everywhere.** Every command accepts `--json`; errors emit `{"error": {"code": "...", "message": "...", "retryable": bool}}` on stdout with the A2 exit code. **DONE 2026-08-23** (deviation: envelope on **stderr**, not stdout — stdout stays pure data): global `--json` flag (per-command dupes removed), schema-1 success payloads on `run -d`/`stop`/`start`/`rm`/`exec`/`logs`/`pull`/`images`, `envelope_for` in the main harness, log noise suppressed in json mode. Shapes documented in `docs/EXIT_CODES.md`.
+- [x] **A4. Schema versioning.** Every JSON payload carries `"schema": 1`. Additive-only changes within a version. **DONE 2026-08-23** — enforced by the shared `print_json` helper, which inserts the field so call sites can't forget.
 - [ ] **A5. Idempotent verbs.** `stop`/`rm` on absent or stopped containers succeed (or exit 2 with a typed code — pick one, document it, test it). Agents retry; retries must be safe.
 - [ ] **A6. No fake success.** Placeholders (D1) either work or exit 4 with `BACKEND_UNSUPPORTED`. Never `Ok` on a no-op.
 - [ ] **A7. Generated agent docs.** Command/flag/JSON-schema reference generated from clap definitions, checked by CI so docs can't drift.

@@ -13,6 +13,7 @@ pub struct StartArgs {
     /// Attach to container (follow logs)
     pub attach: bool,
     pub backend: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: StartArgs) -> Result<()> {
@@ -51,11 +52,13 @@ async fn execute_windows(args: StartArgs) -> Result<()> {
 
     // Check if container is already running
     if list_output.contains("running") {
-        println!("Container {} is already running", args.container);
+        super::emit_lifecycle_status(&args.container, "already_running", args.json);
         return Ok(());
     }
 
-    println!("Starting container: {}", args.container);
+    if !args.json {
+        println!("Starting container: {}", args.container);
+    }
 
     // Start the container
     let start_result = wsl_cmd.exec(&format!("exo-runtime start {}", args.container))?;
@@ -64,7 +67,7 @@ async fn execute_windows(args: StartArgs) -> Result<()> {
         anyhow::bail!("Failed to start container: {}", start_result.stderr);
     }
 
-    println!("Container {} started", args.container);
+    super::emit_lifecycle_status(&args.container, "started", args.json);
 
     if args.attach {
         // Follow logs
@@ -82,7 +85,11 @@ async fn execute_macos(args: StartArgs) -> Result<()> {
     match super::mac::select_backend(&args.backend)? {
         super::mac::BackendSelection::Native => {
             let output = super::mac::native_backend()?.start(&args.container, args.attach)?;
-            print!("{}", output);
+            if args.json {
+                super::emit_lifecycle_status(&args.container, "started", true);
+            } else {
+                print!("{}", output);
+            }
         }
         super::mac::BackendSelection::Linux => {
             super::mac::linux_backend()
@@ -93,7 +100,11 @@ async fn execute_macos(args: StartArgs) -> Result<()> {
                     },
                 )
                 .await?;
-            println!("Container {} started in the EXO Linux VM", args.container);
+            if args.json {
+                super::emit_lifecycle_status(&args.container, "started", true);
+            } else {
+                println!("Container {} started in the EXO Linux VM", args.container);
+            }
         }
     }
     Ok(())
@@ -110,7 +121,7 @@ async fn execute_linux(args: StartArgs) -> Result<()> {
 
     // Check if container is already running
     if metadata.is_running() {
-        println!("Container {} is already running", metadata.name);
+        super::emit_lifecycle_status(&metadata.name, "already_running", args.json);
         return Ok(());
     }
 
@@ -118,11 +129,13 @@ async fn execute_linux(args: StartArgs) -> Result<()> {
     manager.refresh_status(&mut metadata)?;
 
     if metadata.is_running() {
-        println!("Container {} is already running", metadata.name);
+        super::emit_lifecycle_status(&metadata.name, "already_running", args.json);
         return Ok(());
     }
 
-    println!("Starting container: {}", metadata.name);
+    if !args.json {
+        println!("Starting container: {}", metadata.name);
+    }
 
     // Create a new container from the saved config
     let config = metadata.config.clone();
@@ -139,7 +152,11 @@ async fn execute_linux(args: StartArgs) -> Result<()> {
     // Save updated metadata
     manager.save(&metadata)?;
 
-    println!("Container {} started (PID: {})", metadata.name, pid);
+    if args.json {
+        super::emit_lifecycle_status(&metadata.name, "started", true);
+    } else {
+        println!("Container {} started (PID: {})", metadata.name, pid);
+    }
 
     if args.attach {
         // Wait for container to finish

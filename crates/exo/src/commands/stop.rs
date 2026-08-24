@@ -11,6 +11,7 @@ pub struct StopArgs {
     pub force: bool,
     pub time: u64,
     pub backend: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: StopArgs) -> Result<()> {
@@ -49,15 +50,17 @@ async fn execute_windows(args: StopArgs) -> Result<()> {
 
     // Check if container is running
     if !list_output.contains("running") {
-        println!("Container {} is not running", args.container);
+        emit_status(&args.container, "not_running", args.json);
         return Ok(());
     }
 
     // Stop the container
-    if args.force {
-        println!("Force stopping container: {}", args.container);
-    } else {
-        println!("Stopping container: {}", args.container);
+    if !args.json {
+        if args.force {
+            println!("Force stopping container: {}", args.container);
+        } else {
+            println!("Stopping container: {}", args.container);
+        }
     }
 
     let stop_result = wsl_cmd.exec(&format!("exo-runtime stop {}", args.container))?;
@@ -70,7 +73,7 @@ async fn execute_windows(args: StopArgs) -> Result<()> {
     let forwarder = WindowsPortForwarder::new(WslConfig::default());
     let _ = forwarder.remove_port_forward(&args.container);
 
-    println!("Container {} stopped", args.container);
+    emit_status(&args.container, "stopped", args.json);
     Ok(())
 }
 
@@ -82,7 +85,11 @@ async fn execute_macos(args: StopArgs) -> Result<()> {
         super::mac::BackendSelection::Native => {
             let output =
                 super::mac::native_backend()?.stop(&args.container, args.force, args.time)?;
-            print!("{}", output);
+            if args.json {
+                emit_status(&args.container, "stopped", true);
+            } else {
+                print!("{}", output);
+            }
         }
         super::mac::BackendSelection::Linux => {
             super::mac::linux_backend()
@@ -94,7 +101,11 @@ async fn execute_macos(args: StopArgs) -> Result<()> {
                     },
                 )
                 .await?;
-            println!("Container {} stopped in the EXO Linux VM", args.container);
+            if args.json {
+                emit_status(&args.container, "stopped", true);
+            } else {
+                println!("Container {} stopped in the EXO Linux VM", args.container);
+            }
         }
     }
     Ok(())
@@ -111,10 +122,7 @@ async fn execute_linux(args: StopArgs) -> Result<()> {
 
     // Check if container is running
     if !metadata.is_running() {
-        println!(
-            "Container {} is not running (status: {})",
-            metadata.name, metadata.status
-        );
+        emit_status(&metadata.name, "not_running", args.json);
         return Ok(());
     }
 
@@ -124,21 +132,27 @@ async fn execute_linux(args: StopArgs) -> Result<()> {
 
     // Send signal to stop the container
     if args.force {
-        println!("Force stopping container: {}", metadata.name);
+        if !args.json {
+            println!("Force stopping container: {}", metadata.name);
+        }
         // Send SIGKILL
         send_signal(pid, 9)?;
     } else {
-        println!(
-            "Stopping container: {} (waiting {}s)",
-            metadata.name, args.time
-        );
+        if !args.json {
+            println!(
+                "Stopping container: {} (waiting {}s)",
+                metadata.name, args.time
+            );
+        }
         // Send SIGTERM
         send_signal(pid, 15)?;
 
         // Wait for process to exit
         let waited = wait_for_exit(pid, args.time);
         if !waited {
-            println!("Container did not stop gracefully, sending SIGKILL");
+            if !args.json {
+                println!("Container did not stop gracefully, sending SIGKILL");
+            }
             send_signal(pid, 9)?;
             // Give it a moment to die
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -149,9 +163,14 @@ async fn execute_linux(args: StopArgs) -> Result<()> {
     metadata.set_stopped(None);
     manager.save(&metadata)?;
 
-    println!("Container {} stopped", metadata.name);
+    emit_status(&metadata.name, "stopped", args.json);
 
     Ok(())
+}
+
+/// Emit the lifecycle outcome via the shared contract helper.
+fn emit_status(container: &str, status: &str, json: bool) {
+    super::emit_lifecycle_status(container, status, json)
 }
 
 /// Send a signal to a process.

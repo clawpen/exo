@@ -35,6 +35,7 @@ pub struct RunArgs {
     pub detach: bool,
     pub backend: String,
     pub sandbox: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
@@ -42,6 +43,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let detach = args.detach;
     let rm = args.rm;
     let name = args.name.clone();
+    let json = args.json;
 
     // If config file is specified, load it
     let config = if let Some(config_path) = args.config {
@@ -53,20 +55,31 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         // Windows path: Use WSL2 backend
-        execute_windows(config, detach, rm, name).await
+        execute_windows(config, detach, rm, name, json).await
     }
 
     #[cfg(target_os = "macos")]
     {
         // macOS path: use backend selection (native today; Linux microVM later).
-        execute_macos(config, detach, rm, name).await
+        execute_macos(config, detach, rm, name, json).await
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         // Linux path: Use native runtime with new features
-        execute_linux(config, detach, rm, name).await
+        execute_linux(config, detach, rm, name, json).await
     }
+}
+
+/// JSON status line for a detached `run` (agent contract; `id`/`name` are
+/// what callers pass to stop/rm later). Human-mode output is per-backend
+/// and unchanged.
+fn emit_detached_json(id: &str, name: &str) {
+    let mut fields = serde_json::Map::new();
+    fields.insert("id".to_string(), id.into());
+    fields.insert("name".to_string(), name.into());
+    fields.insert("detached".to_string(), true.into());
+    super::print_json(fields);
 }
 
 #[cfg(windows)]
@@ -75,6 +88,7 @@ async fn execute_windows(
     detach: bool,
     rm: bool,
     name: Option<String>,
+    json: bool,
 ) -> anyhow::Result<()> {
     use exo_wsl::command::{ContainerSpec, MountSpec};
     use exo_wsl::daemon_client::DaemonClient;
@@ -119,7 +133,7 @@ async fn execute_windows(
         // Check if daemon is available
         if daemon_client.is_running() || daemon_client.ensure_running().is_ok() {
             info!("Using exo daemon for faster execution");
-            return execute_with_daemon(config, detach, rm, name, daemon_client).await;
+            return execute_with_daemon(config, detach, rm, name, daemon_client, json).await;
         } else {
             debug!("Daemon not available, using direct mode");
         }
@@ -276,10 +290,12 @@ async fn execute_windows(
 
                 match forwarder.add_port_forward(&config.name, rule) {
                     Ok(()) => {
-                        println!(
-                            "Port forwarding: {}:{} -> {}",
-                            port_mapping.host_port, port_mapping.container_port, config.name
-                        );
+                        if !json {
+                            println!(
+                                "Port forwarding: {}:{} -> {}",
+                                port_mapping.host_port, port_mapping.container_port, config.name
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to set up port forwarding: {}", e);
@@ -288,13 +304,16 @@ async fn execute_windows(
             }
         }
 
-        println!("Container running in background: {}", container_id);
-        println!(
-            "Agent reachable at {}:{}",
-            container_network.ip, config.name
-        );
-        return Ok(());
-    }
+        if json {
+            emit_detached_json(&container_id, &config.name);
+        } else {
+            println!("Container running in background: {}", container_id);
+            println!(
+                "Agent reachable at {}:{}",
+                container_network.ip, config.name
+            );
+        }
+        return Ok(());    }
 
     // Run container synchronously
     info!("Running container synchronously...");
@@ -320,6 +339,7 @@ async fn execute_with_daemon(
     rm: bool,
     name: Option<String>,
     daemon_client: exo_wsl::DaemonClient,
+    json: bool,
 ) -> anyhow::Result<()> {
     use exo_wsl::mount::WslMount;
     use exo_wsl::WslConfig;
@@ -377,7 +397,11 @@ async fn execute_with_daemon(
         anyhow::bail!("Failed to start container: {}", result.message);
     }
 
-    println!("{}", result.message);
+    if json && detach {
+        emit_detached_json(&spec.id, &config.name);
+    } else {
+        println!("{}", result.message);
+    }
 
     if detach {
         return Ok(());
@@ -401,6 +425,7 @@ async fn execute_macos(
     detach: bool,
     rm: bool,
     _name: Option<String>,
+    json: bool,
 ) -> anyhow::Result<()> {
     match config.backend {
         BackendSelection::Auto if config.image == "host" => {}
@@ -441,9 +466,13 @@ async fn execute_macos(
                 .run(config, exo_runtime::BackendRunOptions { detach, rm })
                 .await?;
             if detach {
-                // Like docker run -d: print the container identifier so callers
-                // (e.g. Orchestre's ExoClient) can stop/rm it later.
-                println!("{}", result.name);
+                if json {
+                    emit_detached_json(result.id.as_deref().unwrap_or(&result.name), &result.name);
+                } else {
+                    // Like docker run -d: print the container identifier so
+                    // callers (e.g. Orchestre's ExoClient) can stop/rm it later.
+                    println!("{}", result.name);
+                }
             } else if !result.message.is_empty() {
                 print!("{}", result.message);
             }
@@ -499,6 +528,7 @@ async fn execute_linux(
     detach: bool,
     rm: bool,
     name: Option<String>,
+    json: bool,
 ) -> anyhow::Result<()> {
     use exo_gpu::{GpuConfig, GpuType};
     use exo_runtime::{Container, ContainerStatus};
@@ -525,7 +555,11 @@ async fn execute_linux(
     if detach && std::path::Path::new("/tmp/exo-daemon.sock").exists() {
         match daemon_run_detached(&config).await {
             Ok(id_or_name) => {
-                println!("{}", id_or_name);
+                if json {
+                    emit_detached_json(&id_or_name, &config.name);
+                } else {
+                    println!("{}", id_or_name);
+                }
                 return Ok(());
             }
             Err(e) => {
@@ -607,11 +641,13 @@ async fn execute_linux(
     // Create and start the container
     let mut container = Container::new(config)?;
 
-    println!("Starting container: {}", container.handle().id);
+    if !json {
+        println!("Starting container: {}", container.handle().id);
 
-    // Print architecture info if foreign
-    if is_foreign {
-        println!("Running with QEMU emulation for foreign architecture");
+        // Print architecture info if foreign
+        if is_foreign {
+            println!("Running with QEMU emulation for foreign architecture");
+        }
     }
 
     container.start()?;
@@ -627,10 +663,17 @@ async fn execute_linux(
     }
 
     if detach {
-        println!("Container running in background: {}", container.handle().id);
-        println!("PID: {}", pid);
-        if let Some(ref container_name) = name {
-            println!("Name: {}", container_name);
+        if json {
+            emit_detached_json(
+                &container.handle().id,
+                name.as_deref().unwrap_or(&container.handle().id),
+            );
+        } else {
+            println!("Container running in background: {}", container.handle().id);
+            println!("PID: {}", pid);
+            if let Some(ref container_name) = name {
+                println!("Name: {}", container_name);
+            }
         }
 
         return Ok(());

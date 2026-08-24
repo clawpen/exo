@@ -67,8 +67,8 @@ pub use config::{BackendSelection, ContainerConfig, MountConfig, NetworkConfig, 
 pub use config::{RestartPolicy, SandboxMode};
 pub use container::{Container, ContainerHandle, ContainerStatus};
 pub use error::{
-    exit_code_for, ErrorBody, ErrorEnvelope, ExoError, ExoResult, EXIT_BACKEND, EXIT_CONFLICT,
-    EXIT_INTERNAL, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_OK,
+    envelope_for, exit_code_for, ErrorBody, ErrorEnvelope, ExoError, ExoResult, EXIT_BACKEND,
+    EXIT_CONFLICT, EXIT_INTERNAL, EXIT_INVALID_INPUT, EXIT_NOT_FOUND, EXIT_OK,
 };
 pub use events::{Event, EventLog, EventType};
 pub use image::{ImageManager, OciManifest, StoredImage, TagOrDigest};

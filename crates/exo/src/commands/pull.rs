@@ -4,29 +4,42 @@ use exo_image::{ImageReference, ImageStore, RegistryClient};
 
 pub struct PullArgs {
     pub image: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: PullArgs) -> anyhow::Result<()> {
-    println!("Pulling image: {}", args.image);
+    if !args.json {
+        println!("Pulling image: {}", args.image);
+    }
 
     // Parse the image reference
     let image_ref = ImageReference::parse(&args.image).map_err(|e| {
         exo_runtime::ExoError::InvalidInput(format!("invalid image reference '{}': {e}", args.image))
     })?;
-    println!("  Registry: {}", image_ref.registry);
-    println!("  Repository: {}", image_ref.repository);
-    println!("  Tag: {}", image_ref.tag);
-    if let Some(ref digest) = image_ref.digest {
-        println!("  Digest: {}", digest);
-    }
 
     // Create image store
     let store = ImageStore::default();
 
     // Check if already pulled
     if store.has_image(&image_ref) {
-        println!("  Image already exists locally");
+        if args.json {
+            let mut fields = serde_json::Map::new();
+            fields.insert("image".to_string(), args.image.clone().into());
+            fields.insert("cached".to_string(), true.into());
+            super::print_json(fields);
+        } else {
+            println!("  Image already exists locally");
+        }
         return Ok(());
+    }
+
+    if !args.json {
+        println!("  Registry: {}", image_ref.registry);
+        println!("  Repository: {}", image_ref.repository);
+        println!("  Tag: {}", image_ref.tag);
+        if let Some(ref digest) = image_ref.digest {
+            println!("  Digest: {}", digest);
+        }
     }
 
     // Create registry client and pull
@@ -42,10 +55,18 @@ pub async fn execute(args: PullArgs) -> anyhow::Result<()> {
         }
     })?;
 
-    println!("  Config: {}", pulled.config_digest);
-    println!("  Layers: {}", pulled.layer_digests.len());
-
-    println!("\nSuccessfully pulled {}", args.image);
+    if args.json {
+        let mut fields = serde_json::Map::new();
+        fields.insert("image".to_string(), args.image.clone().into());
+        fields.insert("cached".to_string(), false.into());
+        fields.insert("config_digest".to_string(), pulled.config_digest.into());
+        fields.insert("layers".to_string(), pulled.layer_digests.len().into());
+        super::print_json(fields);
+    } else {
+        println!("  Config: {}", pulled.config_digest);
+        println!("  Layers: {}", pulled.layer_digests.len());
+        println!("\nSuccessfully pulled {}", args.image);
+    }
 
     Ok(())
 }

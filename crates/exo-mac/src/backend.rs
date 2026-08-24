@@ -306,7 +306,7 @@ impl NativeMacBackend {
     fn find(&self, container: &str) -> Result<ContainerMetadata> {
         self.manager
             .find(container)?
-            .ok_or_else(|| anyhow::anyhow!("Container not found: {}", container))
+            .ok_or_else(|| exo_runtime::ExoError::ContainerNotFound(container.to_string()).into())
     }
 
     fn spawn_process(
@@ -433,11 +433,10 @@ impl NativeMacBackend {
                         env.insert(name.clone(), value);
                     }
                     None => {
-                        anyhow::bail!(
-                            "secret '{}' not found; set it with 'exo secret set {}'",
-                            name,
-                            name
-                        );
+                        return Err(exo_runtime::ExoError::SecretNotFound(format!(
+                            "{name} (set it with 'exo secret set {name}')"
+                        ))
+                        .into());
                     }
                 }
             }

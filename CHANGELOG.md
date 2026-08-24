@@ -17,6 +17,16 @@ All notable changes to Exo will be documented in this file.
   (D1–D8), three pillars (agent contract / stability / backend completion).
 
 ### Changed
+- **`--json` everywhere (A3/A4):** `--json` is now a global flag (per-command
+  dupes removed). Lifecycle commands emit schema-1 JSON payloads
+  (`run -d` → `{id,name,detached}`, `stop`/`start`/`rm` → `{container,status}`,
+  `exec` → `{exit_code}`, `logs` → `{content}`, `pull`/`images` → object
+  shapes in `docs/EXIT_CODES.md`). Failures in `--json` mode emit the
+  structured error envelope on **stderr** (stdout stays pure data); log noise
+  is suppressed to errors unless `--debug`.
+- `exo-mac` raises typed `CONTAINER_NOT_FOUND` / `SECRET_NOT_FOUND`;
+  `exo-vm-mac` raises typed `BACKEND_UNSUPPORTED` for resource limits, GPU,
+  and host bind mounts.
 - CLI `main` returns typed `ExitCode`; core lifecycle commands (`run`, `stop`,
   `start`, `rm`, `exec`, `logs`, `pull`, `import`, backend selection) raise
   typed errors at their boundaries.

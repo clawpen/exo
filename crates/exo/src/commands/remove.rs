@@ -10,6 +10,7 @@ pub struct RemoveArgs {
     pub container: String,
     pub force: bool,
     pub backend: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: RemoveArgs) -> Result<()> {
@@ -57,7 +58,9 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
 
     // If running and force, stop first
     if list_output.contains("running") && args.force {
-        println!("Stopping container {} before removal", args.container);
+        if !args.json {
+            println!("Stopping container {} before removal", args.container);
+        }
         let _ = wsl_cmd.exec(&format!("exo-runtime stop {}", args.container));
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
@@ -79,7 +82,7 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
             args.container
         ))?;
         if force_result.stdout.contains("REMOVED") {
-            println!("Container {} removed", args.container);
+            super::emit_lifecycle_status(&args.container, "removed", args.json);
             return Ok(());
         }
         anyhow::bail!("Failed to remove container: {}", remove_result.stderr);
@@ -89,7 +92,7 @@ async fn execute_windows(args: RemoveArgs) -> Result<()> {
     let forwarder = WindowsPortForwarder::new(WslConfig::default());
     let _ = forwarder.remove_port_forward(&args.container);
 
-    println!("Container {} removed", args.container);
+    super::emit_lifecycle_status(&args.container, "removed", args.json);
     Ok(())
 }
 
@@ -100,13 +103,21 @@ async fn execute_macos(args: RemoveArgs) -> Result<()> {
     match super::mac::select_backend(&args.backend)? {
         super::mac::BackendSelection::Native => {
             let output = super::mac::native_backend()?.remove(&args.container, args.force)?;
-            print!("{}", output);
+            if args.json {
+                super::emit_lifecycle_status(&args.container, "removed", true);
+            } else {
+                print!("{}", output);
+            }
         }
         super::mac::BackendSelection::Linux => {
             super::mac::linux_backend()
                 .remove(&args.container, RemoveOptions { force: args.force })
                 .await?;
-            println!("Container {} removed from the EXO Linux VM", args.container);
+            if args.json {
+                super::emit_lifecycle_status(&args.container, "removed", true);
+            } else {
+                println!("Container {} removed from the EXO Linux VM", args.container);
+            }
         }
     }
     Ok(())
@@ -132,7 +143,9 @@ async fn execute_linux(args: RemoveArgs) -> Result<()> {
 
     // If running and force, stop first
     if metadata.is_running() && args.force {
-        println!("Stopping container {} before removal", metadata.name);
+        if !args.json {
+            println!("Stopping container {} before removal", metadata.name);
+        }
 
         if let Some(pid) = metadata.pid {
             // Send SIGKILL
@@ -160,7 +173,7 @@ async fn execute_linux(args: RemoveArgs) -> Result<()> {
     // Remove container metadata
     manager.remove(&metadata.name)?;
 
-    println!("Container {} removed", metadata.name);
+    super::emit_lifecycle_status(&metadata.name, "removed", args.json);
 
     Ok(())
 }

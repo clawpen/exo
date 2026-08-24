@@ -22,6 +22,12 @@ struct Cli {
     /// Quiet mode (minimal output)
     #[arg(short, long, global = true)]
     quiet: bool,
+
+    /// Output machine-readable JSON (agent contract, schema 1). On failure,
+    /// a structured error envelope is printed to stderr and the process
+    /// exits with the documented code (docs/EXIT_CODES.md).
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -119,10 +125,6 @@ enum Commands {
         /// Show all containers (including stopped)
         #[arg(short, long)]
         all: bool,
-
-        /// Output in JSON format
-        #[arg(long)]
-        json: bool,
 
         /// Runtime backend: auto, native, or linux
         #[arg(long, value_name = "BACKEND", default_value = "auto")]
@@ -254,11 +256,7 @@ enum Commands {
     },
 
     /// Diagnose host readiness for Exo
-    Doctor {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
+    Doctor,
 
     /// Show the daemon's lifecycle event log
     Events {
@@ -269,10 +267,6 @@ enum Commands {
         /// Maximum events to show (newest first)
         #[arg(short, long, default_value = "50")]
         limit: usize,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 
     /// Daemon mode - run a persistent server for faster operations
@@ -296,10 +290,6 @@ enum Commands {
         /// Request timeout in milliseconds
         #[arg(long, default_value = "30000")]
         timeout: u64,
-
-        /// Show status in JSON format
-        #[arg(long)]
-        json: bool,
     },
 
     /// Show backend information and capabilities
@@ -331,21 +321,13 @@ enum Commands {
 #[derive(Subcommand, Debug)]
 enum BackendCommands {
     /// Show active backend and capabilities
-    Info {
-        /// Output in JSON format
-        #[arg(long)]
-        json: bool,
-    },
+    Info,
 }
 
 #[derive(Subcommand, Debug)]
 enum GpuCommands {
     /// List detected GPUs
-    List {
-        /// Output in JSON format
-        #[arg(long)]
-        json: bool,
-    },
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -376,11 +358,7 @@ enum VmCommands {
     },
 
     /// Show VM status
-    Status {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
+    Status,
 
     /// Reset the VM image and state
     Reset {
@@ -425,11 +403,7 @@ enum SecretCommands {
     },
 
     /// List secret names (values are never printed)
-    List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
+    List,
 
     /// Remove a secret
     Remove {
@@ -448,20 +422,12 @@ enum VolumeCommands {
 
     /// List named volumes
     #[command(alias = "ls")]
-    List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
+    List,
 
     /// Inspect a named volume
     Inspect {
         /// Volume name
         name: String,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 
     /// Remove a named volume
@@ -476,11 +442,12 @@ enum VolumeCommands {
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    // Initialize tracing
+    // Initialize tracing. In --json mode stderr carries the error envelope,
+    // so log noise is suppressed to errors unless --debug is also given.
     let filter = if cli.debug {
         "debug"
-    } else if cli.quiet {
-        "warn"
+    } else if cli.quiet || cli.json {
+        "error"
     } else {
         "info"
     };
@@ -490,20 +457,31 @@ async fn main() -> std::process::ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    // Exit-code contract (docs/EXIT_CODES.md): typed ExoErrors carry their
-    // documented code even through anyhow chains; anything untyped is an
-    // internal error (6). Never exit 1 on failure.
-    match dispatch(cli.command).await {
+    // Exit-code + error-envelope contract (docs/EXIT_CODES.md): typed
+    // ExoErrors carry their documented code even through anyhow chains;
+    // anything untyped is an internal error (6). Never exit 1 on failure.
+    // With --json, the structured envelope goes to stderr so stdout stays
+    // pure data.
+    let json = cli.json;
+    match dispatch(cli.command, json).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             let code = exo_runtime::exit_code_for(&err);
-            eprintln!("Error: {err:#}");
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&exo_runtime::envelope_for(&err))
+                        .unwrap_or_else(|_| "{\"schema\":1,\"error\":{\"code\":\"INTERNAL\",\"message\":\"serialization failure\",\"retryable\":false}}".to_string())
+                );
+            } else {
+                eprintln!("Error: {err:#}");
+            }
             std::process::ExitCode::from(code as u8)
         }
     }
 }
 
-async fn dispatch(command: Commands) -> anyhow::Result<()> {
+async fn dispatch(command: Commands, json: bool) -> anyhow::Result<()> {
     // Run the appropriate command
     match command {
         Commands::Run {
@@ -551,10 +529,11 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 detach,
                 backend,
                 sandbox,
+                json,
             })
             .await?
         }
-        Commands::List { all, json, backend } => {
+        Commands::List { all, backend } => {
             commands::list::execute(commands::list::ListArgs { all, json, backend }).await?
         }
         Commands::Start {
@@ -566,6 +545,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 container,
                 attach,
                 backend,
+                json,
             })
             .await?
         }
@@ -580,6 +560,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 force,
                 time,
                 backend,
+                json,
             })
             .await?
         }
@@ -592,6 +573,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 container,
                 force,
                 backend,
+                json,
             })
             .await?
         }
@@ -608,6 +590,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 tail,
                 timestamps,
                 backend,
+                json,
             })
             .await?
         }
@@ -626,14 +609,15 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
                 tty,
                 user,
                 backend,
+                json,
             })
             .await?
         }
         Commands::Pull { image } => {
-            commands::pull::execute(commands::pull::PullArgs { image }).await?
+            commands::pull::execute(commands::pull::PullArgs { image, json }).await?
         }
         Commands::Images { all } => {
-            commands::images::execute(commands::images::ImagesArgs { all }).await?
+            commands::images::execute(commands::images::ImagesArgs { all, json }).await?
         }
         Commands::Import { tarball, name } => {
             commands::import::execute(commands::import::ImportArgs {
@@ -646,20 +630,19 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             SecretCommands::Set { name, value } => {
                 commands::secret::set(commands::secret::SecretSetArgs { name, value }).await?
             }
-            SecretCommands::List { json } => {
+            SecretCommands::List => {
                 commands::secret::list(commands::secret::SecretListArgs { json }).await?
             }
             SecretCommands::Remove { name } => {
                 commands::secret::remove(commands::secret::SecretRemoveArgs { name }).await?
             }
         },
-        Commands::Doctor { json } => {
+        Commands::Doctor => {
             commands::doctor::execute(commands::doctor::DoctorArgs { json }).await?
         }
         Commands::Events {
             container,
             limit,
-            json,
         } => {
             commands::events::execute(commands::events::EventsArgs {
                 container,
@@ -674,7 +657,6 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             status,
             socket,
             timeout,
-            json,
         } => {
             if stop {
                 commands::daemon::stop()?;
@@ -690,12 +672,12 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             }
         }
         Commands::Backend { command } => match command {
-            BackendCommands::Info { json } => {
+            BackendCommands::Info => {
                 commands::backend::info(commands::backend::BackendInfoArgs { json }).await?
             }
         },
         Commands::Gpu { command } => match command {
-            GpuCommands::List { json } => {
+            GpuCommands::List => {
                 commands::gpu::list(commands::gpu::GpuListArgs { json }).await?
             }
         },
@@ -704,7 +686,7 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             VmCommands::Start { foreground } => commands::vm::start(foreground).await?,
             VmCommands::Serve => commands::vm::serve().await?,
             VmCommands::Stop { force } => commands::vm::stop(force).await?,
-            VmCommands::Status { json } => commands::vm::status(json).await?,
+            VmCommands::Status => commands::vm::status(json).await?,
             VmCommands::Reset { keep_state } => commands::vm::reset(keep_state).await?,
             VmCommands::InstallGuestAgent { path } => {
                 commands::vm::install_guest_agent(path).await?
@@ -718,10 +700,10 @@ async fn dispatch(command: Commands) -> anyhow::Result<()> {
             VolumeCommands::Create { name } => {
                 commands::volume::create(commands::volume::VolumeCreateArgs { name }).await?
             }
-            VolumeCommands::List { json } => {
+            VolumeCommands::List => {
                 commands::volume::list(commands::volume::VolumeListArgs { json }).await?
             }
-            VolumeCommands::Inspect { name, json } => {
+            VolumeCommands::Inspect { name } => {
                 commands::volume::inspect(commands::volume::VolumeInspectArgs { name, json })
                     .await?
             }

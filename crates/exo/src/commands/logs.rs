@@ -6,6 +6,7 @@ pub struct LogsArgs {
     pub tail: usize,
     pub timestamps: bool,
     pub backend: String,
+    pub json: bool,
 }
 
 pub async fn execute(args: LogsArgs) -> anyhow::Result<()> {
@@ -30,20 +31,17 @@ pub async fn execute(args: LogsArgs) -> anyhow::Result<()> {
 async fn execute_macos(args: LogsArgs) -> anyhow::Result<()> {
     use exo_runtime::{BackendLogOptions, ExoBackend};
 
-    match super::mac::select_backend(&args.backend)? {
-        super::mac::BackendSelection::Native => {
-            let output = super::mac::native_backend()?.logs(
-                &args.container,
-                exo_mac::LogOptions {
-                    follow: args.follow,
-                    tail: args.tail,
-                    timestamps: args.timestamps,
-                },
-            )?;
-            print!("{}", output);
-        }
+    let content = match super::mac::select_backend(&args.backend)? {
+        super::mac::BackendSelection::Native => super::mac::native_backend()?.logs(
+            &args.container,
+            exo_mac::LogOptions {
+                follow: args.follow,
+                tail: args.tail,
+                timestamps: args.timestamps,
+            },
+        )?,
         super::mac::BackendSelection::Linux => {
-            let output = super::mac::linux_backend()
+            super::mac::linux_backend()
                 .logs(
                     &args.container,
                     BackendLogOptions {
@@ -52,9 +50,18 @@ async fn execute_macos(args: LogsArgs) -> anyhow::Result<()> {
                         timestamps: args.timestamps,
                     },
                 )
-                .await?;
-            print!("{}", output.content);
+                .await?
+                .content
         }
+    };
+
+    if args.json {
+        let mut fields = serde_json::Map::new();
+        fields.insert("container".to_string(), args.container.clone().into());
+        fields.insert("content".to_string(), content.into());
+        super::print_json(fields);
+    } else {
+        print!("{}", content);
     }
     Ok(())
 }

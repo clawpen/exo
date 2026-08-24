@@ -335,17 +335,26 @@ impl MacLinuxBackend {
             || config.resources.cpu_shares.is_some()
             || config.resources.pids_limit.is_some()
         {
-            anyhow::bail!("resource limits are not enforced by the EXO macOS Linux VM yet");
+            return Err(exo_runtime::ExoError::BackendUnsupported {
+                feature: "resource limits".to_string(),
+                backend: "macos-linux-vm".to_string(),
+            }
+            .into());
         }
         if config.gpu.is_some() {
-            anyhow::bail!("GPU passthrough is not implemented for the EXO macOS Linux VM");
+            return Err(exo_runtime::ExoError::BackendUnsupported {
+                feature: "GPU passthrough".to_string(),
+                backend: "macos-linux-vm".to_string(),
+            }
+            .into());
         }
         for mount in &config.mounts {
             if mount.source.contains('/') {
-                anyhow::bail!(
-                    "host bind mount '{}' is not implemented for the EXO macOS Linux VM; use a named guest volume until virtio-fs lands",
-                    mount.source
-                );
+                return Err(exo_runtime::ExoError::BackendUnsupported {
+                    feature: format!("host bind mount '{}' (use a named guest volume until virtio-fs lands)", mount.source),
+                    backend: "macos-linux-vm".to_string(),
+                }
+                .into());
             }
         }
         Ok(())

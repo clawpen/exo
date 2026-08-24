@@ -50,7 +50,11 @@ Exit code 1 is **never** used for failures.
 
 ## JSON error envelope
 
-On failures, `--json` mode (rollout tracked as roadmap item A3) emits on stdout:
+`--json` is a **global** flag: `exo --json <command> …` or `exo <command> … --json`
+(but place it *before* the container command in `exo run`/`exo exec` — anything
+after the image is captured as the container's argv). On failures, the
+structured envelope is emitted on **stderr** (stdout stays pure data), and the
+process exits with the documented code:
 
 ```json
 {
@@ -64,7 +68,29 @@ On failures, `--json` mode (rollout tracked as roadmap item A3) emits on stdout:
 ```
 
 Human mode (default) prints `Error: <message>` to stderr; the exit code
-carries the class.
+carries the class. In `--json` mode log output is suppressed to errors so
+stderr carries only the envelope (`--debug` restores full logging).
+
+## JSON success output (schema 1)
+
+Every payload carries `"schema": 1`. Shapes per command:
+
+| Command | Payload |
+|---|---|
+| `run -d` | `{"schema":1,"id","name","detached":true}` |
+| `run` (attach) | container output streams raw; process exit code carries the result |
+| `stop` | `{"schema":1,"container","status":"stopped"\|"not_running"}` |
+| `start` | `{"schema":1,"container","status":"started"\|"already_running"}` |
+| `rm` | `{"schema":1,"container","status":"removed"}` |
+| `exec` | `{"schema":1,"container","exit_code"}` |
+| `logs` | `{"schema":1,"container","content"}` |
+| `pull` | `{"schema":1,"image","cached",…}` |
+| `images` | `{"schema":1,"images":[{repository,tag,registry}…]}` |
+| `ps`/`list` | JSON array of container objects |
+| `doctor`/`events`/`backend info`/`gpu list`/`vm status`/`secret list`/`volume ls`/`volume inspect` | per-command objects (pre-existing) |
+
+Lifecycle `status` strings are additive-only: `stopped`, `not_running`,
+`started`, `already_running`, `removed`.
 
 ## Container exit codes vs. exo exit codes
 
@@ -76,15 +102,19 @@ exo/runtime failures only.
 ## Conversion status
 
 Typed at the command boundary: `run`, `stop`, `start`, `rm`, `exec`, `logs`,
-`pull`, `import`, backend selection. Errors raised through `anyhow` chains
-keep their code (recovered via downcast at the process boundary). Known
-transitional gaps:
+`pull`, `import`, backend selection — all with `--json` success output and the
+error envelope. `exo-mac` raises typed `CONTAINER_NOT_FOUND`/`SECRET_NOT_FOUND`;
+`exo-vm-mac` raises typed `BACKEND_UNSUPPORTED` for resource limits, GPU, and
+host bind mounts. Errors raised through `anyhow` chains keep their code
+(recovered via downcast at the process boundary). Known transitional gaps:
 
 - `exo-image` registry errors are stringly with embedded HTTP statuses;
   `pull` maps 404 → `IMAGE_NOT_FOUND`, other statuses → 6. Typed errors in
   `exo-image` are the follow-up.
 - `daemon`, `vm`, `secret`, `volume`, `events` commands still exit 6 on most
   failures.
-- Backend internals (`exo-mac`, `exo-vm-mac`, `exo-wsl`) return stringly
-  errors; converting them behind the same taxonomy is roadmap item A1's
-  remainder.
+- Guest-agent errors inside `exo-vm-mac` (`GuestResponse::Error`) are stringly
+  — typed errors over the guest RPC channel are the follow-up.
+- `exo-wsl` internals return stringly errors.
+- `run` (attach) has no JSON success payload by design: container output must
+  not be corrupted. Failures still produce the envelope.

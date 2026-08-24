@@ -183,6 +183,25 @@ pub fn exit_code_for(err: &anyhow::Error) -> i32 {
         .unwrap_or(EXIT_INTERNAL)
 }
 
+/// JSON error envelope for an `anyhow::Error` chain, for `--json` failures.
+///
+/// Typed errors keep their taxonomy; untyped legacy errors become `INTERNAL`.
+/// Emit this on **stderr** (with the process exit code from
+/// [`exit_code_for`]) so stdout stays pure data for the consumer.
+pub fn envelope_for(err: &anyhow::Error) -> ErrorEnvelope {
+    match err.downcast_ref::<ExoError>() {
+        Some(typed) => typed.envelope(),
+        None => ErrorEnvelope {
+            schema: 1,
+            error: ErrorBody {
+                code: "INTERNAL",
+                message: format!("{err:#}"),
+                retryable: false,
+            },
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +288,21 @@ mod tests {
         let typed: ExoError = crate::ContainerError::Mount("bad mount".into()).into();
         assert_eq!(typed.exit_code(), 6);
         assert!(typed.to_string().contains("bad mount"));
+    }
+
+    #[test]
+    fn envelope_for_recovers_typed_and_wraps_legacy() {
+        let typed: anyhow::Error = ExoError::VolumeNotFound("data".into()).into();
+        let json = serde_json::to_value(envelope_for(&typed)).unwrap();
+        assert_eq!(json["error"]["code"], "VOLUME_NOT_FOUND");
+
+        let legacy = anyhow::anyhow!("stringly boom").context("while pulling");
+        let json = serde_json::to_value(envelope_for(&legacy)).unwrap();
+        assert_eq!(json["error"]["code"], "INTERNAL");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("while pulling"));
+        assert_eq!(json["error"]["retryable"], false);
     }
 }
