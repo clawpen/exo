@@ -92,6 +92,28 @@ Every payload carries `"schema": 1`. Shapes per command:
 Lifecycle `status` strings are additive-only: `stopped`, `not_running`,
 `started`, `already_running`, `removed`.
 
+## Idempotency (A5)
+
+Agents retry. Lifecycle verbs use **desired-state semantics**: reaching the
+requested end state is success, even if the container was already there.
+Existence is always validated — a typo'd name is a failure, not a silent
+no-op.
+
+| Verb | Target absent | Already in desired state | Conflicting state |
+|---|---|---|---|
+| `stop` | 2 `CONTAINER_NOT_FOUND` | **Ok**, `status:"not_running"` | running → stops, `status:"stopped"` |
+| `start` | 2 `CONTAINER_NOT_FOUND` | **Ok**, `status:"already_running"` | stopped → starts, `status:"started"` |
+| `rm` | 2 `CONTAINER_NOT_FOUND` | — | running without `--force` → 3 `CONTAINER_RUNNING`; with `--force` → stops, then removes |
+| `run --name X` | — | — | name taken → 3 `CONTAINER_ALREADY_EXISTS` |
+
+Retry rule of thumb: 2 means "fix the reference", 3 means "inspect or use
+`--force`", 4 with `retryable:true` means "wait and retry".
+
+Implementation note: the macOS microVM guest still reports errors as strings;
+the host maps its stable message shapes onto this taxonomy
+(`map_guest_error` in `exo-vm-mac/src/backend.rs`) until the guest RPC
+protocol carries typed codes.
+
 ## Container exit codes vs. exo exit codes
 
 Today a container that exits non-zero surfaces as exit 6 (`Container exited
@@ -113,8 +135,10 @@ host bind mounts. Errors raised through `anyhow` chains keep their code
   `exo-image` are the follow-up.
 - `daemon`, `vm`, `secret`, `volume`, `events` commands still exit 6 on most
   failures.
-- Guest-agent errors inside `exo-vm-mac` (`GuestResponse::Error`) are stringly
-  — typed errors over the guest RPC channel are the follow-up.
+- Guest-agent errors inside `exo-vm-mac` (`GuestResponse::Error`) are stringly;
+  the host maps stable message shapes onto the taxonomy via `map_guest_error`
+  (see Idempotency section). Typed codes over the guest RPC channel are the
+  follow-up.
 - `exo-wsl` internals return stringly errors.
 - `run` (attach) has no JSON success payload by design: container output must
   not be corrupted. Failures still produce the envelope.

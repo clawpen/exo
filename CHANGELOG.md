@@ -5,6 +5,18 @@ All notable changes to Exo will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Idempotent lifecycle verbs (A5):** desired-state semantics documented in
+  `docs/EXIT_CODES.md` — `stop` on a stopped container succeeds
+  (`not_running`), `start` on a running one succeeds (`already_running`),
+  absent targets always exit 2 `CONTAINER_NOT_FOUND`, `rm` on running without
+  `--force` exits 3 `CONTAINER_RUNNING`.
+- `exo-vm-mac` maps stringly guest-RPC errors onto the typed taxonomy
+  (transitional `map_guest_error`); VM "not ready" is now typed
+  `BACKEND_UNAVAILABLE` (retryable); follow-logs and interactive exec raise
+  typed `BACKEND_UNSUPPORTED`.
+- `crates/exo/tests/cli_contract.rs`: integration tests driving the real
+  binary — exit-code classes, stderr error envelope, schema-1 payloads.
+
 - **Agent error contract (A1/A2):** typed `ExoError` taxonomy in `exo-runtime`
   with stable machine-readable codes (`CONTAINER_NOT_FOUND`, `BACKEND_UNSUPPORTED`,
   …), documented exit-code classes (2 not-found, 3 conflict, 4 backend,

@@ -68,10 +68,11 @@ impl MacLinuxBackend {
     }
 
     fn not_ready(&self) -> anyhow::Error {
-        anyhow::anyhow!(
-            "macOS Linux container backend is not ready: no persistent Exo microVM guest bridge is live for '{}'. Run 'exo vm init' and 'exo vm start', then retry. For current macOS use, pass '--backend native host'.",
+        exo_runtime::ExoError::BackendUnavailable(format!(
+            "no persistent Exo microVM guest bridge is live for '{}'. Run 'exo vm init' and 'exo vm start', then retry. For current macOS use, pass '--backend native host'.",
             self.config.name
-        )
+        ))
+        .into()
     }
 
     /// Lazily bring up the microVM: initialize the VM image on first use,
@@ -205,7 +206,7 @@ impl MacLinuxBackend {
             tar_path: guest_tar_path.to_string(),
         })? {
             GuestResponse::ImageImported { rootfs_path, .. } => Ok(rootfs_path),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to ImportImage: {:?}", other),
         }
     }
@@ -303,7 +304,7 @@ impl MacLinuxBackend {
             image: image.to_string(),
         })? {
             GuestResponse::Ok { .. } => Ok(()),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to RemoveImage: {:?}", other),
         }
     }
@@ -370,6 +371,86 @@ fn to_hex(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0xf) as usize] as char);
     }
     out
+}
+
+/// Transitional guest-error mapper (roadmap A5): guest RPC errors are still
+/// stringly, but the guest's message shapes are stable. Map them onto the
+/// typed taxonomy so the CLI exit code / JSON envelope is correct; when the
+/// guest protocol grows typed error codes this function goes away.
+fn map_guest_error(message: String) -> anyhow::Error {
+    if let Some(rest) = message.strip_prefix("container not found: ") {
+        return exo_runtime::ExoError::ContainerNotFound(rest.trim().to_string()).into();
+    }
+    if let Some(name) = message.strip_prefix("container ") {
+        if let Some(name) = name.strip_suffix(" is running; use force") {
+            return exo_runtime::ExoError::ContainerRunning(name.to_string()).into();
+        }
+        if let Some(name) = name.strip_suffix(" is not running") {
+            return exo_runtime::ExoError::ContainerNotRunning(name.to_string()).into();
+        }
+        if let Some(name) = name.strip_suffix(" is already running") {
+            return exo_runtime::ExoError::ContainerRunning(format!("{name} (already running)"))
+                .into();
+        }
+        if let Some(name) = name.strip_suffix(" already exists; remove it before reusing the name")
+        {
+            return exo_runtime::ExoError::ContainerAlreadyExists(name.to_string()).into();
+        }
+    }
+    if let Some(feature) = message.strip_suffix(" is not implemented for the EXO macOS Linux VM") {
+        return exo_runtime::ExoError::BackendUnsupported {
+            feature: feature.to_string(),
+            backend: "macos-linux-vm".to_string(),
+        }
+        .into();
+    }
+    anyhow::anyhow!(message)
+}
+
+#[cfg(test)]
+mod guest_error_tests {
+    use super::map_guest_error;
+    use exo_runtime::ExoError;
+
+    fn code_of(message: &str) -> (i32, &'static str) {
+        let err = map_guest_error(message.to_string());
+        let typed = err
+            .downcast_ref::<ExoError>()
+            .unwrap_or_else(|| panic!("expected typed error for: {message}"));
+        (typed.exit_code(), typed.code())
+    }
+
+    #[test]
+    fn guest_messages_map_to_taxonomy() {
+        assert_eq!(code_of("container not found: web"), (2, "CONTAINER_NOT_FOUND"));
+        assert_eq!(
+            code_of("container web is running; use force"),
+            (3, "CONTAINER_RUNNING")
+        );
+        assert_eq!(
+            code_of("container web is not running"),
+            (3, "CONTAINER_NOT_RUNNING")
+        );
+        assert_eq!(
+            code_of("container web is already running"),
+            (3, "CONTAINER_RUNNING")
+        );
+        assert_eq!(
+            code_of("container web already exists; remove it before reusing the name"),
+            (3, "CONTAINER_ALREADY_EXISTS")
+        );
+        assert_eq!(
+            code_of("attach-on-start is not implemented for the EXO macOS Linux VM"),
+            (4, "BACKEND_UNSUPPORTED")
+        );
+    }
+
+    #[test]
+    fn unknown_guest_messages_stay_internal() {
+        let err = map_guest_error("ext4 recovery exploded".to_string());
+        assert!(err.downcast_ref::<ExoError>().is_none());
+        assert_eq!(exo_runtime::exit_code_for(&err), 6);
+    }
 }
 
 /// Create a gzipped tarball of a directory's *contents* and stream it into the
@@ -600,7 +681,7 @@ impl ExoBackend for MacLinuxBackend {
                     exit_code,
                 })
             }
-            GuestResponse::Error { message } => Err(anyhow::anyhow!("{}", message)),
+            GuestResponse::Error { message } => Err(map_guest_error(message)),
             other => Err(anyhow::anyhow!(
                 "unexpected guest response to RunContainer: {:?}",
                 other
@@ -663,7 +744,7 @@ impl ExoBackend for MacLinuxBackend {
                     metadata
                 })
                 .collect()),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to ListContainers: {:?}", other),
         }
     }
@@ -681,7 +762,7 @@ impl ExoBackend for MacLinuxBackend {
                 ports,
                 ..
             } => (id, name, ports),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected response to GetContainer: {:?}", other),
         };
 
@@ -727,7 +808,10 @@ impl ExoBackend for MacLinuxBackend {
             attach: _opts.attach,
         })? {
             GuestResponse::Ok { .. } => Ok(()),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            // Idempotent start (agent contract A5): starting a running
+            // container is a success, matching the other backends.
+            GuestResponse::Error { message } if message.contains("is already running") => Ok(()),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to StartContainer: {:?}", other),
         }
     }
@@ -739,7 +823,7 @@ impl ExoBackend for MacLinuxBackend {
             timeout_secs: _opts.timeout_secs,
         })? {
             GuestResponse::Ok { .. } => Ok(()),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to StopContainer: {:?}", other),
         }
     }
@@ -752,14 +836,18 @@ impl ExoBackend for MacLinuxBackend {
                 force: _opts.force,
             })? {
             GuestResponse::Ok { .. } => Ok(()),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to RemoveContainer: {:?}", other),
         }
     }
 
     async fn logs(&self, _id: &str, _opts: BackendLogOptions) -> anyhow::Result<LogStream> {
         if _opts.follow {
-            anyhow::bail!("follow-mode logs are not implemented for the EXO macOS Linux VM yet");
+            return Err(exo_runtime::ExoError::BackendUnsupported {
+                feature: "follow-mode logs".to_string(),
+                backend: "macos-linux-vm".to_string(),
+            }
+            .into());
         }
         match self.client()?.guest_request(GuestRequest::Logs {
             id: _id.to_string(),
@@ -768,7 +856,7 @@ impl ExoBackend for MacLinuxBackend {
             timestamps: _opts.timestamps,
         })? {
             GuestResponse::Logs { content } => Ok(LogStream { content }),
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to Logs: {:?}", other),
         }
     }
@@ -780,7 +868,11 @@ impl ExoBackend for MacLinuxBackend {
         _opts: ExecOptions,
     ) -> anyhow::Result<i32> {
         if _opts.interactive || _opts.tty {
-            anyhow::bail!("interactive/TTY exec is not implemented for the EXO macOS Linux VM yet");
+            return Err(exo_runtime::ExoError::BackendUnsupported {
+                feature: "interactive/TTY exec".to_string(),
+                backend: "macos-linux-vm".to_string(),
+            }
+            .into());
         }
         match self.client()?.guest_request(GuestRequest::Exec {
             id: _id.to_string(),
@@ -802,7 +894,7 @@ impl ExoBackend for MacLinuxBackend {
                 }
                 Ok(exit_code)
             }
-            GuestResponse::Error { message } => anyhow::bail!("{}", message),
+            GuestResponse::Error { message } => return Err(map_guest_error(message)),
             other => anyhow::bail!("unexpected guest response to Exec: {:?}", other),
         }
     }
