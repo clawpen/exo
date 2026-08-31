@@ -8,6 +8,7 @@ default = ["registry"]
 registry = ["reqwest", "async-compression", "futures-util"]
 
 [dependencies]
+exo-runtime = { path = "../exo-runtime" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

@@ -123,7 +123,11 @@ impl NativeMacBackend {
         if code == 0 {
             Ok(String::new())
         } else {
-            anyhow::bail!("Container exited with code {}", code)
+            Err(exo_runtime::ExoError::ContainerExited {
+                name: metadata.name.clone(),
+                code,
+            }
+            .into())
         }
     }
 
@@ -189,7 +193,11 @@ impl NativeMacBackend {
             metadata.set_stopped(Some(code));
             self.manager.save(&metadata)?;
             if code != 0 {
-                anyhow::bail!("Container exited with code {}", code);
+                return Err(exo_runtime::ExoError::ContainerExited {
+                    name: metadata.name.clone(),
+                    code,
+                }
+                .into());
             }
             Ok(format!("Container {} exited with code 0\n", metadata.name))
         } else {

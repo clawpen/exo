@@ -174,7 +174,11 @@ async fn execute_linux(args: StartArgs) -> Result<()> {
         match status {
             ContainerStatus::Exited(code) => {
                 if code != 0 {
-                    return Err(anyhow::anyhow!("Container exited with code {}", code));
+                    return Err(exo_runtime::ExoError::ContainerExited {
+                        name: metadata.name.clone(),
+                        code,
+                    }
+                    .into());
                 }
             }
             _ => {}

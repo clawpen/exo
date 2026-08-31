@@ -37,10 +37,11 @@ pub async fn remove(args: VolumeRemoveArgs) -> anyhow::Result<()> {
     let store = VolumeStore::new()?;
     if store.remove(&args.name)? {
         println!("Volume {} removed", args.name);
+        Ok(())
     } else {
-        println!("Volume {} not found", args.name);
+        // Existence is validated on removal (agent contract A5).
+        Err(exo_runtime::ExoError::VolumeNotFound(args.name).into())
     }
-    Ok(())
 }
 
 pub async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
@@ -81,7 +82,7 @@ pub async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
     let store = VolumeStore::new()?;
     let path = store.path(&args.name)?;
     if !path.exists() {
-        anyhow::bail!("Volume not found: {}", args.name);
+        return Err(exo_runtime::ExoError::VolumeNotFound(args.name.clone()).into());
     }
     let info = VolumeInfo {
         name: args.name,

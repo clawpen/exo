@@ -12,10 +12,8 @@ pub async fn execute(args: PullArgs) -> anyhow::Result<()> {
         println!("Pulling image: {}", args.image);
     }
 
-    // Parse the image reference
-    let image_ref = ImageReference::parse(&args.image).map_err(|e| {
-        exo_runtime::ExoError::InvalidInput(format!("invalid image reference '{}': {e}", args.image))
-    })?;
+    // Parse the image reference (typed INVALID_INPUT on malformed refs)
+    let image_ref = ImageReference::parse(&args.image)?;
 
     // Create image store
     let store = ImageStore::default();
@@ -42,18 +40,11 @@ pub async fn execute(args: PullArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Create registry client and pull
+    // Create registry client and pull. Registry failures are typed in
+    // exo-image (ImageNotFound / RegistryAuth / RegistryUnavailable) and
+    // survive the anyhow boundary via downcast — no string sniffing here.
     let mut client = RegistryClient::new(store)?;
-    // Transitional: exo-image still returns stringly registry errors with the
-    // HTTP status embedded; map 404s to the typed taxonomy until exo-image
-    // gets its own typed errors (tracked in ROADMAP A1 follow-up).
-    let pulled = client.pull(&image_ref).await.map_err(|e| {
-        if e.to_string().contains("404") {
-            exo_runtime::ExoError::ImageNotFound(args.image.clone()).into()
-        } else {
-            e
-        }
-    })?;
+    let pulled = client.pull(&image_ref).await?;
 
     if args.json {
         let mut fields = serde_json::Map::new();

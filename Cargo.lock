@@ -655,6 +655,7 @@ dependencies = [
  "async-compression",
  "base64 0.22.1",
  "dirs",
+ "exo-runtime",
  "flate2",
  "futures-util",
  "hex",

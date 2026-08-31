@@ -68,6 +68,12 @@ pub enum ExoError {
     #[error("feature '{feature}' is not supported by the '{backend}' backend")]
     BackendUnsupported { feature: String, backend: String },
 
+    #[error("registry authentication failed: {0}")]
+    RegistryAuth(String),
+
+    #[error("registry unavailable: {0}")]
+    RegistryUnavailable(String),
+
     // --- invalid input (exit 5) ---
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -81,6 +87,15 @@ pub enum ExoError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    // --- workload result (exit code passes through) ---
+    /// The workload inside the container exited non-zero (attach-mode `run`,
+    /// `exec`, `start --attach`). Unlike every other variant, `exit_code()`
+    /// returns the *container's own* exit code so `exo run` behaves like
+    /// `docker run`; the `CONTAINER_EXITED` envelope code is what tells the
+    /// agent the number came from the workload, not from exo.
+    #[error("container {name} exited with code {code}")]
+    ContainerExited { name: String, code: i32 },
 }
 
 impl ExoError {
@@ -96,13 +111,23 @@ impl ExoError {
             | Self::ContainerRunning(_)
             | Self::ContainerNotRunning(_) => EXIT_CONFLICT,
 
-            Self::DaemonUnreachable(_) | Self::BackendUnavailable(_) | Self::BackendUnsupported { .. } => {
-                EXIT_BACKEND
-            }
+            Self::DaemonUnreachable(_)
+            | Self::BackendUnavailable(_)
+            | Self::BackendUnsupported { .. }
+            | Self::RegistryAuth(_)
+            | Self::RegistryUnavailable(_) => EXIT_BACKEND,
 
             Self::InvalidInput(_) | Self::InvalidName(_) => EXIT_INVALID_INPUT,
 
             Self::Internal(_) | Self::Io(_) => EXIT_INTERNAL,
+
+            // The container's own exit code passes through (docker run
+            // semantics). Clamped into the valid process-exit range; 0 is
+            // impossible by construction but maps to 1 defensively.
+            Self::ContainerExited { code, .. } => match code {
+                1..=255 => *code,
+                _ => 1,
+            },
         }
     }
 
@@ -120,10 +145,13 @@ impl ExoError {
             Self::DaemonUnreachable(_) => "DAEMON_UNREACHABLE",
             Self::BackendUnavailable(_) => "BACKEND_UNAVAILABLE",
             Self::BackendUnsupported { .. } => "BACKEND_UNSUPPORTED",
+            Self::RegistryAuth(_) => "REGISTRY_AUTH",
+            Self::RegistryUnavailable(_) => "REGISTRY_UNAVAILABLE",
             Self::InvalidInput(_) => "INVALID_INPUT",
             Self::InvalidName(_) => "INVALID_NAME",
             Self::Internal(_) => "INTERNAL",
             Self::Io(_) => "IO",
+            Self::ContainerExited { .. } => "CONTAINER_EXITED",
         }
     }
 
@@ -132,7 +160,10 @@ impl ExoError {
     pub fn retryable(&self) -> bool {
         matches!(
             self,
-            Self::DaemonUnreachable(_) | Self::BackendUnavailable(_) | Self::Io(_)
+            Self::DaemonUnreachable(_)
+                | Self::BackendUnavailable(_)
+                | Self::RegistryUnavailable(_)
+                | Self::Io(_)
         )
     }
 
@@ -288,6 +319,62 @@ mod tests {
         let typed: ExoError = crate::ContainerError::Mount("bad mount".into()).into();
         assert_eq!(typed.exit_code(), 6);
         assert!(typed.to_string().contains("bad mount"));
+    }
+
+    #[test]
+    fn container_exited_passes_through_container_code() {
+        let err = ExoError::ContainerExited {
+            name: "web".into(),
+            code: 42,
+        };
+        assert_eq!(err.exit_code(), 42);
+        assert_eq!(err.code(), "CONTAINER_EXITED");
+        assert!(!err.retryable());
+        assert_eq!(err.to_string(), "container web exited with code 42");
+
+        // Clamping: out-of-range codes map to 1 (0 is success, never emit it).
+        assert_eq!(
+            ExoError::ContainerExited {
+                name: "x".into(),
+                code: 0
+            }
+            .exit_code(),
+            1
+        );
+        assert_eq!(
+            ExoError::ContainerExited {
+                name: "x".into(),
+                code: 300
+            }
+            .exit_code(),
+            1
+        );
+
+        // Survives anyhow chains with the container's code intact.
+        let anyhow_err: anyhow::Error = ExoError::ContainerExited {
+            name: "web".into(),
+            code: 137,
+        }
+        .into();
+        assert_eq!(exit_code_for(&anyhow_err), 137);
+        let json = serde_json::to_value(envelope_for(&anyhow_err)).unwrap();
+        assert_eq!(json["error"]["code"], "CONTAINER_EXITED");
+    }
+
+    #[test]
+    fn registry_variants_follow_backend_class() {
+        assert_eq!(ExoError::RegistryAuth("docker.io".into()).exit_code(), 4);
+        assert_eq!(ExoError::RegistryAuth("r".into()).code(), "REGISTRY_AUTH");
+        assert!(!ExoError::RegistryAuth("r".into()).retryable());
+        assert_eq!(
+            ExoError::RegistryUnavailable("docker.io".into()).exit_code(),
+            4
+        );
+        assert_eq!(
+            ExoError::RegistryUnavailable("r".into()).code(),
+            "REGISTRY_UNAVAILABLE"
+        );
+        assert!(ExoError::RegistryUnavailable("r".into()).retryable());
     }
 
     #[test]

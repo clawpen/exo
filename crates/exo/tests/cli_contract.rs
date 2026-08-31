@@ -116,6 +116,37 @@ fn images_json_payload_carries_schema() {
 }
 
 #[test]
+fn secret_remove_absent_is_typed_not_found() {
+    let ghost = ghost();
+    let (code, _, stderr) = run_exo(&["--json", "secret", "remove", &ghost]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert_eq!(envelope(&stderr)["error"]["code"], "SECRET_NOT_FOUND");
+}
+
+#[test]
+fn volume_remove_absent_is_typed_not_found() {
+    let ghost = ghost();
+    let (code, _, stderr) = run_exo(&["--json", "volume", "rm", &ghost]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert_eq!(envelope(&stderr)["error"]["code"], "VOLUME_NOT_FOUND");
+}
+
+#[test]
+fn volume_inspect_absent_is_typed_not_found() {
+    let ghost = ghost();
+    let (code, _, stderr) = run_exo(&["--json", "volume", "inspect", &ghost]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert_eq!(envelope(&stderr)["error"]["code"], "VOLUME_NOT_FOUND");
+}
+
+#[test]
+fn pull_invalid_reference_is_invalid_input() {
+    let (code, _, stderr) = run_exo(&["--json", "pull", "INVALID@@REF/::"]);
+    assert_eq!(code, 5, "stderr: {stderr}");
+    assert_eq!(envelope(&stderr)["error"]["code"], "INVALID_INPUT");
+}
+
+#[test]
 fn human_mode_has_no_json_on_stderr() {
     let (code, _, stderr) = run_exo(&["exec", "somecontainer"]);
     assert_eq!(code, 5);

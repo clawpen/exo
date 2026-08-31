@@ -31,10 +31,14 @@ pub async fn execute(args: EventsArgs) -> Result<()> {
 #[cfg(windows)]
 async fn execute_windows(_args: EventsArgs) -> Result<()> {
     // The event log lives in WSL with the daemon; surfacing it from Windows
-    // would mean another wsl-exec hop. Out of scope for M2 — print a hint.
-    println!("`exo events` reads the daemon's event log inside WSL2.");
-    println!("Run `wsl -d Ubuntu -- exo events [--container NAME] [--limit N] [--json]` to query it directly.");
-    Ok(())
+    // would mean another wsl-exec hop. Fail loudly (A6): a hint printed with
+    // exit 0 tells an agent the query succeeded when nothing was queried.
+    // Workaround: `wsl -d Ubuntu -- exo events [--container NAME] [--limit N]`.
+    Err(exo_runtime::ExoError::BackendUnsupported {
+        feature: "events (query it inside WSL: wsl -d Ubuntu -- exo events)".to_string(),
+        backend: "windows".to_string(),
+    }
+    .into())
 }
 
 #[cfg(target_os = "macos")]

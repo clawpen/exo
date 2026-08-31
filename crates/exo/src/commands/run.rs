@@ -325,7 +325,11 @@ async fn execute_windows(
     }
 
     if exit_code != 0 {
-        anyhow::bail!("Container exited with code {}", exit_code);
+        return Err(exo_runtime::ExoError::ContainerExited {
+            name: config.name.clone(),
+            code: exit_code,
+        }
+        .into());
     }
 
     Ok(())
@@ -478,7 +482,11 @@ async fn execute_macos(
             }
             if let Some(code) = result.exit_code {
                 if code != 0 {
-                    anyhow::bail!("Container exited with code {}", code);
+                    return Err(exo_runtime::ExoError::ContainerExited {
+                        name: result.name.clone(),
+                        code,
+                    }
+                    .into());
                 }
             }
             return Ok(());
@@ -705,7 +713,11 @@ async fn execute_linux(
             if code == 0 {
                 Ok(())
             } else {
-                Err(anyhow::anyhow!("Container exited with code {}", code))
+                Err(exo_runtime::ExoError::ContainerExited {
+                    name: metadata.name.clone(),
+                    code,
+                }
+                .into())
             }
         }
         _ => Ok(()),
@@ -1001,7 +1013,7 @@ async fn daemon_run_detached(config: &ContainerConfig) -> anyhow::Result<String>
                 .and_then(|c| c.get("message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("daemon returned error");
-            anyhow::bail!("{}", msg)
+            Err(super::daemon::map_daemon_error(msg.to_string()))
         }
         other => anyhow::bail!("unexpected daemon response type: {}", other),
     }

@@ -43,6 +43,9 @@ Exit code 1 is **never** used for failures.
 | `DAEMON_UNREACHABLE` | 4 | yes | `daemon unreachable: <detail>` |
 | `BACKEND_UNAVAILABLE` | 4 | yes | `backend unavailable: <detail>` |
 | `BACKEND_UNSUPPORTED` | 4 | no | `feature '<f>' is not supported by the '<b>' backend` |
+| `REGISTRY_AUTH` | 4 | no | `registry authentication failed: <detail>` |
+| `REGISTRY_UNAVAILABLE` | 4 | yes | `registry unavailable: <detail>` |
+| `CONTAINER_EXITED` | *container's own* | no | `container <name> exited with code <n>` |
 | `INVALID_INPUT` | 5 | no | `invalid input: <detail>` |
 | `INVALID_NAME` | 5 | no | `invalid name: <detail>` |
 | `INTERNAL` | 6 | no | `internal error: <detail>` |
@@ -116,25 +119,36 @@ protocol carries typed codes.
 
 ## Container exit codes vs. exo exit codes
 
-Today a container that exits non-zero surfaces as exit 6 (`Container exited
-with code N`). Propagating the *container's own* exit code through `exo run`
-(à la `docker run`) is planned follow-up work — the taxonomy above describes
-exo/runtime failures only.
+Attach-mode commands propagate the **container's own** exit code, à la
+`docker run`: `run` (attach), `exec`, and `start --attach` exit with whatever
+code the workload exited with, clamped to 1..=255 (0 stays success). This is
+the one place a non-zero exo exit code is *not* an exo failure — the
+envelope's `code: "CONTAINER_EXITED"` is the disambiguator telling agents the
+number came from the workload:
+
+```json
+{"schema":1,"error":{"code":"CONTAINER_EXITED","message":"container exo-… exited with code 42","retryable":false}}
+```
+
+For an unambiguous channel, use `run -d` + `exec --json`: the success payload
+carries `exit_code` as data and the process exit code stays purely exo's.
 
 ## Conversion status
 
 Typed at the command boundary: `run`, `stop`, `start`, `rm`, `exec`, `logs`,
-`pull`, `import`, backend selection — all with `--json` success output and the
-error envelope. `exo-mac` raises typed `CONTAINER_NOT_FOUND`/`SECRET_NOT_FOUND`;
-`exo-vm-mac` raises typed `BACKEND_UNSUPPORTED` for resource limits, GPU, and
-host bind mounts. Errors raised through `anyhow` chains keep their code
-(recovered via downcast at the process boundary). Known transitional gaps:
+`pull`, `import`, `daemon`, `vm`, `secret`, `volume`, `events`, backend
+selection — all with `--json` success output and the error envelope.
+`exo-image` raises typed `IMAGE_NOT_FOUND` / `REGISTRY_AUTH` /
+`REGISTRY_UNAVAILABLE` / `INVALID_INPUT` (malformed references fail fast
+before any network call). `exo-mac` raises typed
+`CONTAINER_NOT_FOUND`/`SECRET_NOT_FOUND`; `exo-vm-mac` raises typed
+`BACKEND_UNSUPPORTED` for resource limits, GPU, and host bind mounts. Errors
+raised through `anyhow` chains keep their code (recovered via downcast at the
+process boundary). Known transitional gaps:
 
-- `exo-image` registry errors are stringly with embedded HTTP statuses;
-  `pull` maps 404 → `IMAGE_NOT_FOUND`, other statuses → 6. Typed errors in
-  `exo-image` are the follow-up.
-- `daemon`, `vm`, `secret`, `volume`, `events` commands still exit 6 on most
-  failures.
+- The Linux daemon protocol reports errors as strings; the CLI maps stable
+  message shapes onto this taxonomy (`map_daemon_error` in
+  `crates/exo/src/commands/daemon.rs`) until the protocol carries typed codes.
 - Guest-agent errors inside `exo-vm-mac` (`GuestResponse::Error`) are stringly;
   the host maps stable message shapes onto the taxonomy via `map_guest_error`
   (see Idempotency section). Typed codes over the guest RPC channel are the

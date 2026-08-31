@@ -173,7 +173,11 @@ pub fn start(args: DaemonArgs) -> Result<()> {
             let _ = wsl_cmd.exec("cat /tmp/exo-daemon.log 2>/dev/null | tail -20");
         }
     } else {
-        anyhow::bail!("Failed to start daemon: {}", result.stderr);
+        return Err(exo_runtime::ExoError::BackendUnavailable(format!(
+            "failed to start daemon in WSL2: {}",
+            result.stderr
+        ))
+        .into());
     }
 
     Ok(())
@@ -989,6 +993,26 @@ fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     !std::path::Path::new(&proc_path).exists()
 }
 
+/// Transitional: the daemon protocol reports errors as strings; map its
+/// stable message shapes onto the typed taxonomy (cf. `map_guest_error` in
+/// exo-vm-mac) until the protocol carries typed codes. Unknown shapes pass
+/// through as untyped anyhow errors (exit 6).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn map_daemon_error(message: String) -> anyhow::Error {
+    if let Some(name) = message.strip_prefix("Container name already in use: ") {
+        return exo_runtime::ExoError::ContainerAlreadyExists(name.trim().to_string()).into();
+    }
+    if let Some(name) = message.strip_prefix("Container not found: ") {
+        return exo_runtime::ExoError::ContainerNotFound(name.trim().to_string()).into();
+    }
+    if message.starts_with("daemon at start-concurrency cap")
+        || message.starts_with("daemon at connection capacity")
+    {
+        return exo_runtime::ExoError::BackendUnavailable(message).into();
+    }
+    anyhow::anyhow!(message)
+}
+
 /// Daemon request types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
@@ -1030,4 +1054,31 @@ enum DaemonResponse {
 
     #[serde(rename = "pong")]
     Pong,
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod daemon_error_tests {
+    use super::map_daemon_error;
+
+    #[test]
+    fn daemon_messages_map_to_taxonomy() {
+        let err = map_daemon_error("Container name already in use: web".to_string());
+        assert_eq!(exo_runtime::exit_code_for(&err), 3);
+
+        let err = map_daemon_error("Container not found: ghost".to_string());
+        assert_eq!(exo_runtime::exit_code_for(&err), 2);
+
+        let err = map_daemon_error("daemon at start-concurrency cap; retry shortly".to_string());
+        assert_eq!(exo_runtime::exit_code_for(&err), 4);
+        assert!(err
+            .downcast_ref::<exo_runtime::ExoError>()
+            .unwrap()
+            .retryable());
+    }
+
+    #[test]
+    fn unknown_daemon_messages_stay_internal() {
+        let err = map_daemon_error("Failed to create container: boom".to_string());
+        assert_eq!(exo_runtime::exit_code_for(&err), 6);
+    }
 }

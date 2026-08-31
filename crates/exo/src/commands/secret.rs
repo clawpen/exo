@@ -27,10 +27,12 @@ pub async fn remove(args: SecretRemoveArgs) -> anyhow::Result<()> {
     let removed = SecretStore::new()?.remove(&args.name)?;
     if removed {
         println!("Secret {} removed", args.name);
+        Ok(())
     } else {
-        println!("Secret {} not found", args.name);
+        // Existence is validated on removal (agent contract A5): a typo'd
+        // name is a failure, not a silent no-op.
+        Err(exo_runtime::ExoError::SecretNotFound(args.name).into())
     }
-    Ok(())
 }
 
 pub async fn list(args: SecretListArgs) -> anyhow::Result<()> {
@@ -60,17 +62,19 @@ fn resolve_secret_value(name: &str, explicit: Option<String>) -> anyhow::Result<
         return Ok(value);
     }
     if std::io::stdin().is_terminal() {
-        anyhow::bail!(
-            "no value provided for secret '{}'; pass --value, set ${}, or pipe the value on stdin",
-            name,
-            name
-        );
+        return Err(exo_runtime::ExoError::InvalidInput(format!(
+            "no value provided for secret '{name}'; pass --value, set ${name}, or pipe the value on stdin"
+        ))
+        .into());
     }
 
     let mut value = String::new();
     std::io::stdin().read_to_string(&mut value)?;
     if value.is_empty() {
-        anyhow::bail!("stdin did not contain a value for secret '{}'", name);
+        return Err(exo_runtime::ExoError::InvalidInput(format!(
+            "stdin did not contain a value for secret '{name}'"
+        ))
+        .into());
     }
     Ok(value)
 }

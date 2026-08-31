@@ -50,7 +50,11 @@ pub async fn execute(args: ExecArgs) -> anyhow::Result<()> {
             super::print_json(fields);
         }
         if code != 0 {
-            anyhow::bail!("exec exited with code {}", code);
+            return Err(exo_runtime::ExoError::ContainerExited {
+                name: args.container.clone(),
+                code,
+            }
+            .into());
         }
         return Ok(());
     }

@@ -13,6 +13,35 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::{ImageReference, ImageStore};
+use exo_runtime::ExoError;
+
+/// Classify a registry HTTP failure into the typed taxonomy
+/// (`docs/EXIT_CODES.md`). Pure function over the status code so it is
+/// testable without network access.
+///
+/// - 404 → `ImageNotFound` (the manifest/blob reference does not exist)
+/// - 401/403 → `RegistryAuth` (fix credentials; retrying as-is won't help)
+/// - 5xx → `RegistryUnavailable` (registry-side, transient → retryable)
+/// - anything else → `Internal` with the status and body preserved
+fn classify_registry_status(status: u16, what: &str, detail: &str) -> ExoError {
+    match status {
+        404 => ExoError::ImageNotFound(what.to_string()),
+        401 | 403 => ExoError::RegistryAuth(format!("{what} (HTTP {status})")),
+        500..=599 => ExoError::RegistryUnavailable(format!("{what} (HTTP {status})")),
+        _ => ExoError::Internal(format!(
+            "registry request for {what} failed: HTTP {status} - {detail}"
+        )),
+    }
+}
+
+/// Map a reqwest transport failure (no HTTP response) into the taxonomy:
+/// connect/timeout errors are transient → `RegistryUnavailable` (retryable).
+fn map_transport_error(err: reqwest::Error, what: &str) -> anyhow::Error {
+    if err.is_connect() || err.is_timeout() {
+        return ExoError::RegistryUnavailable(format!("{what}: {err}")).into();
+    }
+    anyhow::Error::new(err).context(format!("registry request failed: {what}"))
+}
 
 /// Registry authentication credentials.
 #[derive(Debug, Clone)]
@@ -230,10 +259,14 @@ impl RegistryClient {
             let resp = request
                 .send()
                 .await
-                .context("Failed to get auth token from Docker Hub")?;
+                .map_err(|e| map_transport_error(e, &format!("auth token for {repository}")))?;
 
             if !resp.status().is_success() {
-                anyhow::bail!("Auth failed: {}", resp.status());
+                return Err(ExoError::RegistryAuth(format!(
+                    "{registry} (HTTP {})",
+                    resp.status()
+                ))
+                .into());
             }
 
             let token_resp: TokenResponse = resp
@@ -283,7 +316,10 @@ impl RegistryClient {
                 }
             }
 
-            let resp = request.send().await.context("Failed to get auth token")?;
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| map_transport_error(e, &format!("auth token for {repository}")))?;
 
             if !resp.status().is_success() {
                 // Try without auth for public repos
@@ -292,10 +328,16 @@ impl RegistryClient {
                     .get(&url)
                     .send()
                     .await
-                    .context("Failed to get auth token (anonymous)")?;
+                    .map_err(|e| {
+                        map_transport_error(e, &format!("anonymous auth token for {repository}"))
+                    })?;
 
                 if !resp.status().is_success() {
-                    anyhow::bail!("Auth failed: {}", resp.status());
+                    return Err(ExoError::RegistryAuth(format!(
+                        "{registry} (HTTP {})",
+                        resp.status()
+                    ))
+                    .into());
                 }
 
                 let token_resp: TokenResponse = resp
@@ -328,7 +370,7 @@ impl RegistryClient {
             .get(&url)
             .send()
             .await
-            .context("Failed to contact registry")?;
+            .map_err(|e| map_transport_error(e, &format!("auth challenge for {registry}")))?;
 
         // Get WWW-Authenticate header
         if let Some(www_auth) = resp.headers().get("www-authenticate") {
@@ -394,7 +436,11 @@ impl RegistryClient {
                         }
                     })
                 })
-                .ok_or_else(|| anyhow::anyhow!("No manifest found for linux/amd64"))?;
+                .ok_or_else(|| {
+                    ExoError::ImageNotFound(format!(
+                        "{reference} (no manifest for linux/amd64)"
+                    ))
+                })?;
 
             let manifest_digest = target_manifest.digest();
             info!("Selected manifest: {}", manifest_digest);
@@ -482,12 +528,17 @@ impl RegistryClient {
             )
             .send()
             .await
-            .context("Failed to get manifest")?;
+            .map_err(|e| map_transport_error(e, &format!("manifest for {repo}:{reference}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to get manifest: {} - {}", status, body);
+            return Err(classify_registry_status(
+                status.as_u16(),
+                &format!("{repo}:{reference}"),
+                &body,
+            )
+            .into());
         }
 
         let bytes = resp.bytes().await.context("Failed to read manifest")?;
@@ -511,10 +562,13 @@ impl RegistryClient {
             request = request.header("Authorization", format!("Bearer {}", token));
         }
 
-        let resp = request.send().await.context("Failed to download blob")?;
+        let resp = request
+            .send()
+            .await
+            .map_err(|e| map_transport_error(e, &format!("blob {digest}")))?;
 
         if !resp.status().is_success() {
-            anyhow::bail!("Failed to download blob {}: {}", digest, resp.status());
+            return Err(classify_registry_status(resp.status().as_u16(), digest, "").into());
         }
 
         // Stream to file
@@ -540,7 +594,10 @@ impl RegistryClient {
 
         if computed != digest {
             std::fs::remove_file(dest).ok();
-            anyhow::bail!("Digest mismatch: expected {}, got {}", digest, computed);
+            return Err(ExoError::Internal(format!(
+                "digest mismatch: expected {digest}, got {computed}"
+            ))
+            .into());
         }
 
         debug!("Saved blob to {:?}", dest);
@@ -608,5 +665,46 @@ fn parse_www_authenticate(header: &str) -> HashMap<String, String> {
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_registry_status;
+    use exo_runtime::ExoError;
+
+    #[test]
+    fn registry_statuses_map_to_taxonomy() {
+        let err = classify_registry_status(404, "library/alpine:latest", "not found");
+        assert!(matches!(err, ExoError::ImageNotFound(_)));
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("library/alpine:latest"));
+
+        for status in [401, 403] {
+            let err = classify_registry_status(status, "private/repo:latest", "");
+            assert!(matches!(err, ExoError::RegistryAuth(_)));
+            assert_eq!(err.exit_code(), 4);
+            assert!(!err.retryable());
+        }
+
+        for status in [500, 502, 503] {
+            let err = classify_registry_status(status, "library/alpine:latest", "");
+            assert!(matches!(err, ExoError::RegistryUnavailable(_)));
+            assert_eq!(err.exit_code(), 4);
+            assert!(err.retryable());
+        }
+
+        let err = classify_registry_status(418, "x", "teapot");
+        assert!(matches!(err, ExoError::Internal(_)));
+        assert_eq!(err.exit_code(), 6);
+        assert!(err.to_string().contains("418"));
+    }
+
+    #[test]
+    fn typed_registry_errors_survive_anyhow() {
+        let err: anyhow::Error = classify_registry_status(404, "img:tag", "").into();
+        assert_eq!(exo_runtime::exit_code_for(&err), 2);
+        let json = serde_json::to_value(exo_runtime::envelope_for(&err)).unwrap();
+        assert_eq!(json["error"]["code"], "IMAGE_NOT_FOUND");
     }
 }

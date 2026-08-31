@@ -5,6 +5,21 @@ All notable changes to Exo will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Container exit-code passthrough (A2):** attach-mode `run`/`exec`/
+  `start --attach` exit with the *container's own* exit code (clamped to
+  1..=255), à la `docker run`. The envelope's `code: "CONTAINER_EXITED"`
+  disambiguates workload exits from exo failures.
+- **Typed registry errors in `exo-image` (A1):** HTTP statuses classify to
+  `IMAGE_NOT_FOUND` (404), `REGISTRY_AUTH` (401/403), `REGISTRY_UNAVAILABLE`
+  (5xx + connect/timeout failures, retryable); malformed image references fail
+  fast with `INVALID_INPUT` before any network call (`validate_reference`
+  enforces OCI naming rules).
+- Transitional `map_daemon_error` maps stable Linux-daemon message shapes
+  onto the taxonomy (name-in-use → `CONTAINER_ALREADY_EXISTS`, not-found →
+  `CONTAINER_NOT_FOUND`, capacity → `BACKEND_UNAVAILABLE`) until the daemon
+  protocol carries typed codes.
+- 4 new CLI contract tests (12 total): absent secret/volume removal,
+  volume inspect, malformed pull reference.
 - **Idempotent lifecycle verbs (A5):** desired-state semantics documented in
   `docs/EXIT_CODES.md` — `stop` on a stopped container succeeds
   (`not_running`), `start` on a running one succeeds (`already_running`),
@@ -29,6 +44,11 @@ All notable changes to Exo will be documented in this file.
   (D1–D8), three pillars (agent contract / stability / backend completion).
 
 ### Changed
+- `daemon`, `vm`, `secret`, `volume`, `events` commands raise typed errors
+  (non-macOS `vm` → `BACKEND_UNSUPPORTED`; Windows start failure →
+  `BACKEND_UNAVAILABLE`; absent `secret remove`/`volume rm`/`volume inspect` →
+  exit 2 `*_NOT_FOUND`; Windows `events` → `BACKEND_UNSUPPORTED` instead of
+  print-hint-and-Ok).
 - **`--json` everywhere (A3/A4):** `--json` is now a global flag (per-command
   dupes removed). Lifecycle commands emit schema-1 JSON payloads
   (`run -d` → `{id,name,detached}`, `stop`/`start`/`rm` → `{container,status}`,

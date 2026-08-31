@@ -16,7 +16,11 @@ pub async fn init(force: bool) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = force;
-        anyhow::bail!("'exo vm' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -36,7 +40,11 @@ pub async fn start(foreground: bool) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = foreground;
-        anyhow::bail!("'exo vm' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -50,8 +58,15 @@ pub async fn stop(force: bool) -> anyhow::Result<()> {
                     println!("VM stopped");
                     return Ok(());
                 }
-                exo_vm_mac::VmDaemonResponse::Error { message } => anyhow::bail!("{}", message),
-                other => anyhow::bail!("unexpected VM daemon response: {:?}", other),
+                exo_vm_mac::VmDaemonResponse::Error { message } => {
+                    return Err(exo_runtime::ExoError::BackendUnavailable(message).into())
+                }
+                other => {
+                    return Err(exo_runtime::ExoError::Internal(format!(
+                        "unexpected VM daemon response: {other:?}"
+                    ))
+                    .into())
+                }
             }
         }
 
@@ -61,7 +76,11 @@ pub async fn stop(force: bool) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = force;
-        anyhow::bail!("'exo vm' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -103,8 +122,15 @@ pub async fn status(json: bool) -> anyhow::Result<()> {
                     }
                     return Ok(());
                 }
-                exo_vm_mac::VmDaemonResponse::Error { message } => anyhow::bail!("{}", message),
-                other => anyhow::bail!("unexpected VM daemon response: {:?}", other),
+                exo_vm_mac::VmDaemonResponse::Error { message } => {
+                    return Err(exo_runtime::ExoError::BackendUnavailable(message).into())
+                }
+                other => {
+                    return Err(exo_runtime::ExoError::Internal(format!(
+                        "unexpected VM daemon response: {other:?}"
+                    ))
+                    .into())
+                }
             }
         }
 
@@ -127,7 +153,11 @@ pub async fn status(json: bool) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = json;
-        anyhow::bail!("'exo vm' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -139,7 +169,11 @@ pub async fn serve() -> anyhow::Result<()> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        anyhow::bail!("'exo vm serve' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm serve".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -147,7 +181,11 @@ pub async fn install_guest_agent(path: std::path::PathBuf) -> anyhow::Result<()>
     #[cfg(target_os = "macos")]
     {
         if !path.exists() {
-            anyhow::bail!("guest agent binary not found: {}", path.display());
+            return Err(exo_runtime::ExoError::InvalidInput(format!(
+                "guest agent binary not found: {}",
+                path.display()
+            ))
+            .into());
         }
         let dest = exo_vm_mac::guest_agent_binary_path()?;
         if let Some(parent) = dest.parent() {
@@ -168,7 +206,11 @@ pub async fn install_guest_agent(path: std::path::PathBuf) -> anyhow::Result<()>
     #[cfg(not(target_os = "macos"))]
     {
         let _ = path;
-        anyhow::bail!("'exo vm install-guest-agent' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm install-guest-agent".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -183,7 +225,11 @@ pub async fn import_image(image: String, guest_path: String) -> anyhow::Result<(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (image, guest_path);
-        anyhow::bail!("'exo vm import-image' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm import-image".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -198,7 +244,11 @@ pub async fn remove_image(image: String) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = image;
-        anyhow::bail!("'exo vm rm-image' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm rm-image".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
 
@@ -227,10 +277,11 @@ fn start_daemon() -> anyhow::Result<()> {
         }
     }
 
-    anyhow::bail!(
+    Err(exo_runtime::ExoError::BackendUnavailable(format!(
         "timed out waiting for VM daemon to become ready; see {}",
         exo_vm_mac::daemon_log_path()?.display()
-    )
+    ))
+    .into())
 }
 
 pub async fn reset(keep_state: bool) -> anyhow::Result<()> {
@@ -243,6 +294,10 @@ pub async fn reset(keep_state: bool) -> anyhow::Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = keep_state;
-        anyhow::bail!("'exo vm' is only supported on macOS")
+        Err(exo_runtime::ExoError::BackendUnsupported {
+            feature: "exo vm".to_string(),
+            backend: std::env::consts::OS.to_string(),
+        }
+        .into())
     }
 }
