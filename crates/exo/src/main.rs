@@ -1,5 +1,6 @@
 //! Containment - Container runtime for AI agents
 
+mod agent_docs;
 mod commands;
 
 use clap::{Parser, Subcommand};
@@ -316,6 +317,10 @@ enum Commands {
         #[command(subcommand)]
         command: VolumeCommands,
     },
+
+    /// Print the generated agent CLI reference (source of docs/AGENT_CLI.md)
+    #[command(hide = true)]
+    AgentDocs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -711,6 +716,11 @@ async fn dispatch(command: Commands, json: bool) -> anyhow::Result<()> {
                 commands::volume::remove(commands::volume::VolumeRemoveArgs { name }).await?
             }
         },
+        Commands::AgentDocs => {
+            // Meta command: markdown on stdout, always (it's a document, not
+            // a data payload — no schema wrapper even in --json mode).
+            print!("{}", agent_docs::render());
+        }
     }
 
     Ok(())

@@ -5,6 +5,12 @@ All notable changes to Exo will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Generated agent CLI reference (A7):** hidden `exo agent-docs` command
+  renders the full command/flag/JSON-payload reference from the live clap
+  definitions (`crates/exo/src/agent_docs.rs`); committed as
+  `docs/AGENT_CLI.md`. A contract test fails the build when the doc drifts
+  from the parser — the CLI tree is the single source of truth for commands
+  and flags; JSON payload shapes live in the generator's `JSON_SHAPES` table.
 - **Container exit-code passthrough (A2):** attach-mode `run`/`exec`/
   `start --attach` exit with the *container's own* exit code (clamped to
   1..=255), à la `docker run`. The envelope's `code: "CONTAINER_EXITED"`

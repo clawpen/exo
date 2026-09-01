@@ -146,6 +146,34 @@ fn pull_invalid_reference_is_invalid_input() {
     assert_eq!(envelope(&stderr)["error"]["code"], "INVALID_INPUT");
 }
 
+/// A7 drift check: the committed agent reference must match what the binary
+/// generates from its clap definitions. If this fails, a command or flag
+/// changed without regenerating the doc:
+/// `cargo run -p exo -- agent-docs > docs/AGENT_CLI.md`
+#[test]
+fn agent_docs_match_committed_reference() {
+    let (code, stdout, stderr) = run_exo(&["agent-docs"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/AGENT_CLI.md");
+    let committed = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!("cannot read {path}: {e} — generate it with `exo agent-docs > docs/AGENT_CLI.md`")
+    });
+    assert_eq!(
+        stdout, committed,
+        "docs/AGENT_CLI.md is stale — regenerate with `exo agent-docs > docs/AGENT_CLI.md`"
+    );
+}
+
+#[test]
+fn agent_docs_is_hidden_from_help() {
+    let (code, stdout, _) = run_exo(&["--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        !stdout.contains("agent-docs"),
+        "agent-docs is a meta command and must stay hidden: {stdout}"
+    );
+}
+
 #[test]
 fn human_mode_has_no_json_on_stderr() {
     let (code, _, stderr) = run_exo(&["exec", "somecontainer"]);

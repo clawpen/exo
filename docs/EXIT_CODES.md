@@ -5,6 +5,10 @@
 > renumber without a schema-version bump.
 >
 > Implementation: `crates/exo-runtime/src/error.rs` (`ExoError`).
+>
+> Companion doc: `docs/AGENT_CLI.md` — the generated command/flag/payload
+> reference (source of truth: the clap definitions; regenerate with
+> `exo agent-docs > docs/AGENT_CLI.md`).
 
 ## Why
 

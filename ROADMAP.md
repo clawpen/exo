@@ -48,7 +48,7 @@
 - [x] **A4. Schema versioning.** Every JSON payload carries `"schema": 1`. Additive-only changes within a version. **DONE 2026-08-23** — enforced by the shared `print_json` helper, which inserts the field so call sites can't forget.
 - [x] **A5. Idempotent verbs.** `stop`/`rm` on absent or stopped containers succeed (or exit 2 with a typed code — pick one, document it, test it). Agents retry; retries must be safe. **DONE 2026-08-26** — semantics: desired-state success (`stop` on stopped → Ok `not_running`, `start` on running → Ok `already_running`), existence always validated (absent → 2). Documented matrix in `docs/EXIT_CODES.md`; vm-mac guest errors mapped to typed codes via transitional `map_guest_error` (+ host-side idempotent-start intercept); CLI contract tests in `crates/exo/tests/cli_contract.rs` (8 tests, platform-portable).
 - [x] **A6. No fake success.** Placeholders (D1) either work or exit 4 with `BACKEND_UNSUPPORTED`. Never `Ok` on a no-op. **DONE 2026-08-23** — fixed with D1 in the A3/A4 chunk (Linux exec/logs placeholders now exit 4).
-- [ ] **A7. Generated agent docs.** Command/flag/JSON-schema reference generated from clap definitions, checked by CI so docs can't drift.
+- [x] **A7. Generated agent docs.** Command/flag/JSON-schema reference generated from clap definitions, checked by CI so docs can't drift. **DONE 2026-09-01** — `exo agent-docs` (hidden meta command) renders the full reference from the live clap tree via introspection (`crates/exo/src/agent_docs.rs`); committed as `docs/AGENT_CLI.md`. Drift check = `agent_docs_match_committed_reference` in cli_contract.rs (fails when a command/flag changes without regenerating). JSON payload shapes live in the generator's `JSON_SHAPES` table as their single source of truth.
 
 ## Pillar 2 — Stability engineering
 
@@ -77,8 +77,8 @@
 
 ## Gates
 
-- **G5 (agent-usable):** A1–A6 done — Orchestre can drive exo with typed-error handling, no stderr parsing.
+- **G5 (agent-usable):** A1–A7 done — **MET 2026-09-01.** Orchestre can drive exo with typed-error handling, no stderr parsing, and a generated CLI reference that can't drift from the binary.
 - **G6 (trustworthy):** S1–S3 green in CI on macOS + Linux.
 - **G7 (feature-complete core):** B1–B3 done; parity matrix has no ❌ in the Linux/vm-mac columns for the core lifecycle.
 
-*Next review: after G5.*
+*Next review: after G6.*
