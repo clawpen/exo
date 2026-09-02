@@ -45,11 +45,8 @@ jobs:
       - name: Build exo (WSL2)
         shell: powershell
         run: |
-          wsl -e bash -c "cd /mnt/d/a/exo && ~/.cargo/bin/cargo build --release"
-          # Handle if path is different
-          if ($LASTEXITCODE -ne 0) {
-            wsl -e bash -c "cd $PWD && ~/.cargo/bin/cargo build --release"
-          }
+          $wslPath = (wsl -e wslpath -a "$PWD").Trim()
+          wsl -e bash -c "cd '$wslPath' && ~/.cargo/bin/cargo build --release"
 
       - name: Run Windows tests
         shell: powershell

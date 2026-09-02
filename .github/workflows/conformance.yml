@@ -1,0 +1,88 @@
+name: Conformance
+
+# S2: the S1 conformance suite (crates/exo/tests/conformance.rs) on every
+# commit, on the two supported lanes: Linux rootless and macOS microVM.
+# WSL2 has its own workflow (windows-wsl2.yml); its backend is broken (D2)
+# so it runs build-only until S5.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  linux-rootless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Ubuntu 24.04 restricts unprivileged user-namespace creation via
+      # AppArmor; exo's rootless runtime needs it.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Unit + contract tests
+        run: cargo test -p exo-runtime -p exo-image -p exo --test cli_contract
+
+      - name: Conformance suite (rootless backend)
+        run: cargo test -p exo --test conformance
+
+  macos-microvm:
+    runs-on: macos-14 # Apple silicon; Virtualization.framework available
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install zig (guest-agent cross toolchain)
+        run: brew install zig
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      # Kernel/initrd inputs are cached; `exo vm init` skips the download
+      # when present.
+      - name: Cache microVM kernel
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/exo/vm
+          key: exo-vm-${{ runner.os }}-${{ hashFiles('crates/exo-vm-mac/src/image.rs') }}
+          restore-keys: exo-vm-${{ runner.os }}-
+
+      - name: Unit + contract tests (no VM needed)
+        run: cargo test -p exo-runtime -p exo-image -p exo-vm-mac -p exo --test cli_contract
+
+      - name: Build guest agent (aarch64 Linux)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p exo-vm-mac-guest
+
+      # Build test binaries first, THEN sign, then execute the binaries
+      # directly: codesign changes the binary's mtime, and any later cargo
+      # invocation would relink it and strip the entitlement.
+      - name: Build conformance tests
+        run: cargo test -p exo --test conformance --no-run
+
+      - name: Sign exo with the Virtualization entitlement
+        run: scripts/sign-exo.sh debug
+
+      - name: Install guest agent + initialize VM image
+        run: |
+          ./target/debug/exo vm install-guest-agent target/aarch64-unknown-linux-musl/release/exo-vm-guest-init
+          rm -f ~/.local/share/exo/vm/initrd/initrd-exo.img
+          ./target/debug/exo vm init
+
+      - name: Conformance suite (microVM backend)
+        run: |
+          BIN=$(ls -t target/debug/deps/conformance-* | grep -v '\.d$' | head -1)
+          "$BIN" --nocapture
