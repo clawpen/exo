@@ -5,6 +5,14 @@ All notable changes to Exo will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Executable conformance suite (S1):** `crates/exo/tests/conformance.rs` —
+  22 tests porting all `test.sh` categories (smoke/isolation/features/edge/
+  integration) to JSON-payload + exit-code assertions against the real
+  binary, plus a new **containment** category probing the sandbox boundary
+  the way a hostile in-container workload would (host-file reads, PID
+  visibility, `/dev` curation, mount escape, memory limits — all
+  non-destructive). Backend chosen via `EXO_CONFORMANCE_BACKEND`; known
+  per-backend gaps skip with the B-track item that closes them.
 - **Generated agent CLI reference (A7):** hidden `exo agent-docs` command
   renders the full command/flag/JSON-payload reference from the live clap
   definitions (`crates/exo/src/agent_docs.rs`); committed as
@@ -50,6 +58,10 @@ All notable changes to Exo will be documented in this file.
   (D1–D8), three pillars (agent contract / stability / backend completion).
 
 ### Changed
+- `exo-vm-mac`'s OCI pull path (`oci.rs`) now raises typed registry errors
+  (404 → `IMAGE_NOT_FOUND`, 401/403 → `REGISTRY_AUTH`, 5xx + connect/timeout
+  → `REGISTRY_UNAVAILABLE`); the backend wraps them with context instead of
+  re-formatting, so codes survive to the CLI envelope.
 - `daemon`, `vm`, `secret`, `volume`, `events` commands raise typed errors
   (non-macOS `vm` → `BACKEND_UNSUPPORTED`; Windows start failure →
   `BACKEND_UNAVAILABLE`; absent `secret remove`/`volume rm`/`volume inspect` →

@@ -76,9 +76,9 @@ async fn get_with_auth(
         let token = fetch_token(client, auth.as_ref().unwrap()).await?;
         request = request.bearer_auth(token);
     }
-    let response = request.send().await?;
+    let response = send_typed(request, url).await?;
     if response.status() != reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(response.error_for_status()?);
+        return status_typed(response, url);
     }
     let challenge = response
         .headers()
@@ -90,13 +90,45 @@ async fn get_with_auth(
         .with_context(|| format!("registry auth challenge for {}: {}", url, challenge))?;
     *auth = Some(parsed);
     let token = fetch_token(client, auth.as_ref().unwrap()).await?;
-    let response = client
-        .get(url)
-        .header("Accept", accept)
-        .bearer_auth(token)
-        .send()
-        .await?;
-    Ok(response.error_for_status()?)
+    let response = send_typed(
+        client
+            .get(url)
+            .header("Accept", accept)
+            .bearer_auth(token),
+        url,
+    )
+    .await?;
+    status_typed(response, url)
+}
+
+/// Registry transport failures (connect/timeout) are typed
+/// `REGISTRY_UNAVAILABLE` (retryable) rather than stringly reqwest errors.
+async fn send_typed(request: reqwest::RequestBuilder, url: &str) -> Result<reqwest::Response> {
+    request.send().await.map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            exo_runtime::ExoError::RegistryUnavailable(format!("{url}: {e}")).into()
+        } else {
+            anyhow::Error::new(e).context(format!("registry request failed: {url}"))
+        }
+    })
+}
+
+/// Map an HTTP failure status onto the ExoError taxonomy (mirrors the
+/// exo-image classifier; vm-mac keeps its own pull path for guest-arch
+/// rootfs composition). Note Docker Hub answers 401 for nonexistent repos
+/// on the anonymous flow, so 401 maps to REGISTRY_AUTH, not IMAGE_NOT_FOUND.
+fn status_typed(response: reqwest::Response, url: &str) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    Err(match status.as_u16() {
+        404 => exo_runtime::ExoError::ImageNotFound(url.to_string()),
+        401 | 403 => exo_runtime::ExoError::RegistryAuth(format!("{url} (HTTP {status})")),
+        500..=599 => exo_runtime::ExoError::RegistryUnavailable(format!("{url} (HTTP {status})")),
+        _ => exo_runtime::ExoError::Internal(format!("registry request failed: HTTP {status} for {url}")),
+    }
+    .into())
 }
 
 fn parse_bearer_challenge(header: &str) -> Result<BearerAuth> {

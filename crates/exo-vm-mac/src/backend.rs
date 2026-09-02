@@ -6,6 +6,7 @@
 //! remaining work is narrowed to connecting this facade to a live guest agent.
 
 use crate::bridge::{ContainerSpec, GuestRequest, GuestResponse, MountSpec, NetworkSpec, PortSpec};
+use anyhow::Context as _;
 use async_trait::async_trait;
 use exo_runtime::{
     BackendCapabilities, BackendLogOptions, BackendRunOptions, ContainerConfig, ContainerMetadata,
@@ -258,12 +259,11 @@ impl MacLinuxBackend {
                 crate::image::download_file_if_missing(url, &host_tar).await?;
             } else {
                 // Generic path: pull from the OCI registry and compose the
-                // rootfs on the host.
+                // rootfs on the host. Context (not re-formatting) keeps typed
+                // registry errors downcast-recoverable at the CLI boundary.
                 crate::oci::pull_rootfs_tar(image, &host_tar)
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to pull image '{}': {:#}", image, e)
-                    })?;
+                    .with_context(|| format!("failed to pull image '{image}'"))?;
             }
         }
 

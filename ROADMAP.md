@@ -52,7 +52,7 @@
 
 ## Pillar 2 — Stability engineering
 
-- [ ] **S1. Executable conformance suite.** Port `test.sh` categories (smoke/isolation/features/edge/integration) to Rust integration tests driving the real binary; assert on JSON output + exit codes, not stdout prose.
+- [x] **S1. Executable conformance suite.** Port `test.sh` categories (smoke/isolation/features/edge/integration) to Rust integration tests driving the real binary; assert on JSON output + exit codes, not stdout prose. **DONE 2026-09-01** — `crates/exo/tests/conformance.rs`, 22 tests across 6 categories (all 5 test.sh categories + new **containment**: host-filesystem invisibility, PID isolation, /dev curation, mount-escape denial, memory-limit enforcement). Backend selected by `EXO_CONFORMANCE_BACKEND` (default: microVM on macOS, direct runtime on Linux); per-backend `Caps` table encodes known gaps (vm-mac: PID/user namespaces, cgroup limits, bind mounts, stdin streaming) as named B-track skips — flip to `Enforced` when the fix lands. Suite also drives defect fixes: vm-mac's oci.rs pull path now raises typed registry errors (401/403 → `REGISTRY_AUTH`, 404 → `IMAGE_NOT_FOUND`, 5xx/timeout → `REGISTRY_UNAVAILABLE`). One observed flake: stale guest state after interrupted runs (watch in S4).
 - [ ] **S2. CI matrix on every commit.** macOS (vm-mac), Linux rootless, WSL2. Today only WSL2 has CI — and its backend is broken (D2).
 - [ ] **S3. Crash-resilience tests.** Kill VM/daemon mid-run → restart → state reconciles (Linux reconciler exists; vm-mac needs equivalent guest-state recovery). Stale containers cleaned up.
 - [ ] **S4. Nightly soak.** Hundreds of run/stop cycles; watch fd counts, cgroup leaks (D6), memory.
